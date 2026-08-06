@@ -1,0 +1,7 @@
+* text=auto eol=lf
+
+# Conformance fixtures are exact bytes from a transparency service. Any
+# transformation changes the digests the test suite pins.
+*.cose  binary
+*.cbor  binary
+*.bin   binary
