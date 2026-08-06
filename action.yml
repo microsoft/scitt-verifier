@@ -69,11 +69,16 @@ runs:
         VERSION: ${{ inputs.version }}
       run: |
         set -euo pipefail
-        case "${RUNNER_OS}" in
-          Linux)   asset="scitt-verifier-x86_64-unknown-linux-musl" ;;
-          macOS)   asset="scitt-verifier-aarch64-apple-darwin" ;;
-          Windows) asset="scitt-verifier-x86_64-pc-windows-msvc.exe" ;;
-          *) echo "::error::unsupported runner OS ${RUNNER_OS}"; exit 1 ;;
+        # RUNNER_ARCH matters: GitHub offers arm64 Linux runners and the macOS
+        # runners are Apple Silicon. Picking the wrong asset produces an
+        # "Exec format error" that looks nothing like its cause.
+        case "${RUNNER_OS}:${RUNNER_ARCH}" in
+          Linux:X64)     asset="scitt-verifier-x86_64-unknown-linux-musl" ;;
+          Linux:ARM64)   asset="scitt-verifier-aarch64-unknown-linux-musl" ;;
+          macOS:ARM64)   asset="scitt-verifier-aarch64-apple-darwin" ;;
+          macOS:X64)     asset="scitt-verifier-x86_64-apple-darwin" ;;
+          Windows:X64)   asset="scitt-verifier-x86_64-pc-windows-msvc.exe" ;;
+          *) echo "::error::unsupported runner ${RUNNER_OS}/${RUNNER_ARCH}"; exit 1 ;;
         esac
 
         if [ "${VERSION}" = "latest" ]; then

@@ -20,11 +20,17 @@ jobs:
           # pipeline happens to use, and a glibc version mismatch would turn a
           # deployment gate into a broken build for reasons unrelated to
           # transparency.
-          - { os: ubuntu-latest,  target: x86_64-unknown-linux-musl,  ext: '' }
-          - { os: ubuntu-latest,  target: aarch64-unknown-linux-musl, ext: '' }
-          - { os: macos-latest,   target: x86_64-apple-darwin,        ext: '' }
-          - { os: macos-latest,   target: aarch64-apple-darwin,       ext: '' }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc,     ext: '.exe' }
+          #
+          # `verify` marks the targets the runner can actually execute. A
+          # cross-compiled binary cannot be smoke-tested on the host that built
+          # it: aarch64-musl is a foreign architecture, and the macOS runners
+          # are arm64 without Rosetta, so an x86_64-apple-darwin binary will
+          # not run there either.
+          - { os: ubuntu-latest,  target: x86_64-unknown-linux-musl,  ext: '',     verify: true  }
+          - { os: ubuntu-latest,  target: aarch64-unknown-linux-musl, ext: '',     verify: false }
+          - { os: macos-latest,   target: x86_64-apple-darwin,        ext: '',     verify: false }
+          - { os: macos-latest,   target: aarch64-apple-darwin,       ext: '',     verify: true  }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc,     ext: '.exe', verify: true  }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -45,17 +51,16 @@ jobs:
       # locally built one. A release that cannot verify the reference fixture
       # should never reach a user.
       - name: Verify the corpus with the release binary
-        if: "!endsWith(matrix.target, '-musl') || matrix.target == 'x86_64-unknown-linux-musl'"
+        if: matrix.verify
         shell: bash
         run: |
-          set -uo pipefail
+          set -euo pipefail
           bin="target/${{ matrix.target }}/release/scitt-verifier${{ matrix.ext }}"
           "$bin" verify \
             --statement corpus/fixtures/transparent-statement.cose \
             --scitt-keys corpus/fixtures/musa-mst-july-scitt-keys.cbor \
             --policy corpus/policies/fixture-mst.json \
             --format text
-          test $? -eq 0
 
       - name: Stage the asset
         shell: bash
