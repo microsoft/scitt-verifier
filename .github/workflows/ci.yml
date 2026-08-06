@@ -1,0 +1,125 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo fmt --all -- --check
+
+      # Not --all-features: the crypto backends are mutually exclusive, so
+      # enabling them together drags in OpenSSL and fails on a machine that has
+      # deliberately been kept free of it.
+      - run: cargo clippy --all-targets
+      - run: cargo test --workspace
+
+  boundary:
+    name: Core boundary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # scitt-receipt is meant to be embeddable — in a browser via WASM, in
+      # Ledger Explorer, in someone else's service. That is only true while it
+      # stays free of I/O, clocks, and policy. These greps are cheap and they
+      # fail loudly the first time someone reaches for `std::fs` "just here".
+      - name: Reject I/O, clocks, and policy coupling in the core
+        run: |
+          set -euo pipefail
+          violations=0
+          check() {
+            if grep -rn --include='*.rs' -E "$1" crates/scitt-receipt/src; then
+              echo "::error::$2"
+              violations=1
+            fi
+          }
+          check 'std::fs|File::open|read_to_string' \
+                'scitt-receipt must not perform file I/O; callers supply bytes.'
+          check 'SystemTime|Instant::now|chrono' \
+                'scitt-receipt must not read the clock; freshness is a policy question.'
+          check 'std::process::exit|ExitCode' \
+                'scitt-receipt must not decide exit codes.'
+          check 'scitt_policy|scitt_verifier' \
+                'scitt-receipt must not depend on policy or the CLI.'
+          check 'reqwest|hyper|ureq|TcpStream' \
+                'scitt-receipt must not open network connections; verification is offline.'
+          exit $violations
+
+      - name: Reject dependency drift in the core manifest
+        run: |
+          set -euo pipefail
+          if grep -qE '^(scitt-policy|scitt-verifier)' crates/scitt-receipt/Cargo.toml; then
+            echo "::error::scitt-receipt must not depend on scitt-policy or scitt-verifier."
+            exit 1
+          fi
+
+  size:
+    name: Binary size budget
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo build --release
+
+      # The binary is downloaded on every pipeline run that uses the gate.
+      # Size is a running cost, so regressions should be a conscious decision.
+      - name: Enforce the size budget
+        run: |
+          set -euo pipefail
+          budget=$((4 * 1024 * 1024))
+          actual=$(stat -c%s target/release/scitt-verifier)
+          printf 'scitt-verifier: %s bytes (budget %s)\n' "$actual" "$budget"
+          if [ "$actual" -gt "$budget" ]; then
+            echo "::error::binary exceeded the size budget"
+            exit 1
+          fi
+
+  action:
+    name: Action smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Exercises the action's argument construction and exit-code mapping
+      # against a locally built binary, so the wrapper is covered before a
+      # release exists to download.
+      - run: cargo build --release
+      - name: Verify the corpus fixture through the CLI contract
+        run: |
+          set -uo pipefail
+          ./target/release/scitt-verifier verify \
+            --statement corpus/fixtures/transparent-statement.cose \
+            --scitt-keys corpus/fixtures/musa-mst-july-scitt-keys.cbor \
+            --policy corpus/policies/fixture-mst.json \
+            --evidence /tmp/evidence.json \
+            --format text
+          test $? -eq 0
+          jq -e '.verdict == "verified"' /tmp/evidence.json
+          jq -e '.notChecked | length > 0' /tmp/evidence.json

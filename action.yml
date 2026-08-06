@@ -1,0 +1,165 @@
+name: 'Verify SCITT transparent statement'
+description: >-
+  Verify that an artifact was registered on a SCITT transparency service before
+  allowing a deployment to proceed. Runs entirely offline.
+author: 'Microsoft'
+
+branding:
+  icon: 'shield'
+  color: 'blue'
+
+inputs:
+  statement:
+    description: 'Path to the transparent statement (COSE_Sign1).'
+    required: true
+  scitt-keys:
+    description: >-
+      Path to the transparency service signing keys (COSE_KeySet). Commit these
+      to your repository so that rotating them is a reviewed change rather than
+      a silent one.
+    required: true
+  policy:
+    description: 'Path to the relying-party policy document (JSON).'
+    required: true
+  artifact:
+    description: 'Optional path to the artifact the statement should describe.'
+    required: false
+    default: ''
+  binding-mode:
+    description: 'How the statement relates to the artifact: none or payload-bytes.'
+    required: false
+    default: 'none'
+  issuer:
+    description: 'Scope the key set to a single transparency service. Recommended.'
+    required: false
+    default: ''
+  evidence:
+    description: 'Where to write the evidence record. Attach it to your release.'
+    required: false
+    default: 'scitt-evidence.json'
+  on-unevaluable:
+    description: >-
+      What to do when the tool cannot answer (exit 3) — typically stale trust
+      material. "fail" is the safe default; "warn" suits teams introducing the
+      gate gradually. Cryptographic failures always fail regardless.
+    required: false
+    default: 'fail'
+  version:
+    description: 'Release tag of scitt-verifier to download.'
+    required: false
+    default: 'latest'
+
+outputs:
+  verdict:
+    description: 'verified | untrusted | policyFailed | cannotEvaluate'
+    value: ${{ steps.verify.outputs.verdict }}
+  exit-code:
+    description: 'The raw exit code from the verifier.'
+    value: ${{ steps.verify.outputs.exit-code }}
+  evidence:
+    description: 'Path to the evidence record.'
+    value: ${{ steps.verify.outputs.evidence }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install scitt-verifier
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        case "${RUNNER_OS}" in
+          Linux)   asset="scitt-verifier-x86_64-unknown-linux-musl" ;;
+          macOS)   asset="scitt-verifier-aarch64-apple-darwin" ;;
+          Windows) asset="scitt-verifier-x86_64-pc-windows-msvc.exe" ;;
+          *) echo "::error::unsupported runner OS ${RUNNER_OS}"; exit 1 ;;
+        esac
+
+        if [ "${VERSION}" = "latest" ]; then
+          url="https://github.com/microsoft/scitt-verifier/releases/latest/download/${asset}"
+        else
+          url="https://github.com/microsoft/scitt-verifier/releases/download/${VERSION}/${asset}"
+        fi
+
+        mkdir -p "${RUNNER_TEMP}/scitt-verifier"
+        curl --fail --silent --show-error --location \
+             --output "${RUNNER_TEMP}/scitt-verifier/scitt-verifier" "${url}"
+        chmod +x "${RUNNER_TEMP}/scitt-verifier/scitt-verifier"
+        echo "${RUNNER_TEMP}/scitt-verifier" >> "${GITHUB_PATH}"
+
+    - name: Verify
+      id: verify
+      shell: bash
+      env:
+        STATEMENT: ${{ inputs.statement }}
+        SCITT_KEYS: ${{ inputs.scitt-keys }}
+        POLICY: ${{ inputs.policy }}
+        ARTIFACT: ${{ inputs.artifact }}
+        BINDING_MODE: ${{ inputs.binding-mode }}
+        ISSUER: ${{ inputs.issuer }}
+        EVIDENCE: ${{ inputs.evidence }}
+        ON_UNEVALUABLE: ${{ inputs.on-unevaluable }}
+      run: |
+        # Note: no `set -e` here. A non-zero exit from the verifier is data we
+        # need to interpret, not a reason to abort before we have reported it.
+        set -uo pipefail
+
+        args=(verify
+              --statement "${STATEMENT}"
+              --scitt-keys "${SCITT_KEYS}"
+              --policy "${POLICY}"
+              --evidence "${EVIDENCE}"
+              --format text)
+
+        [ -n "${ISSUER}" ] && args+=(--issuer "${ISSUER}")
+        if [ -n "${ARTIFACT}" ]; then
+          args+=(--artifact "${ARTIFACT}" --binding-mode "${BINDING_MODE}")
+        fi
+
+        scitt-verifier "${args[@]}"
+        code=$?
+
+        verdict=$(jq -r '.verdict // "unknown"' "${EVIDENCE}" 2>/dev/null || echo unknown)
+        {
+          echo "verdict=${verdict}"
+          echo "exit-code=${code}"
+          echo "evidence=${EVIDENCE}"
+        } >> "${GITHUB_OUTPUT}"
+
+        # Surface what was *not* checked, even on success. A green gate that
+        # quietly skipped the artifact binding is the failure mode worth
+        # designing against.
+        if [ -f "${EVIDENCE}" ]; then
+          jq -r '.notChecked[]? | "::notice title=Not checked::" + .' "${EVIDENCE}" || true
+        fi
+
+        case "${code}" in
+          0)
+            echo "::notice title=SCITT::Transparent statement verified and policy satisfied."
+            exit 0
+            ;;
+          1)
+            echo "::error title=SCITT::Cryptographic or binding failure. Do not deploy this artifact."
+            exit 1
+            ;;
+          2)
+            echo "::error title=SCITT::The statement is genuine but your policy rejected it."
+            exit 1
+            ;;
+          3)
+            # Exit 3 means "unknown", most often stale trust material. Teams
+            # rolling the gate out incrementally can downgrade this; nobody can
+            # downgrade exit 1.
+            if [ "${ON_UNEVALUABLE}" = "warn" ]; then
+              echo "::warning title=SCITT::Verification could not be completed (exit 3). Continuing because on-unevaluable=warn."
+              exit 0
+            fi
+            echo "::error title=SCITT::Verification could not be completed. This is not a pass."
+            exit 1
+            ;;
+          *)
+            echo "::error title=SCITT::scitt-verifier was invoked incorrectly (exit ${code})."
+            exit 1
+            ;;
+        esac

@@ -1,0 +1,12 @@
+{
+  "policyId": "example/release-gate",
+  "policyVersion": "1",
+  "description": "A starting point for a deployment gate. Replace the issuer with your own transparency service before use.",
+  "assertions": {
+    "issuer": ["YOUR-LEDGER.confidential-ledger.azure.com"],
+    "signerIssuerContains": "Microsoft Corporation",
+    "minReceipts": 1,
+    "maxAgeDays": 90,
+    "requireKidBoundToKey": true
+  }
+}

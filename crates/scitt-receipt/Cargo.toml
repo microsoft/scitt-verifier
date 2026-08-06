@@ -1,0 +1,30 @@
+[package]
+name = "scitt-receipt"
+description = "Verification core for SCITT transparent statements over CCF ledgers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# ---------------------------------------------------------------------------
+# BOUNDARY RULE (enforced in CI)
+#
+# This crate must not depend on scitt-policy or scitt-verifier, must perform no
+# I/O, and must never read the clock. It takes bytes and returns facts.
+#
+# That is what keeps it usable from a browser (Ledger Explorer) and from a CLI
+# without either one inheriting the other's assumptions.
+# ---------------------------------------------------------------------------
+
+[features]
+default = ["crypto_pure_rust"]
+crypto_pure_rust = ["tav-cose/crypto_pure_rust", "tav-crypto/crypto_pure_rust"]
+crypto_openssl = ["tav-cose/crypto_openssl", "tav-crypto/crypto_openssl"]
+crypto_webcrypto = ["tav-cose/crypto_webcrypto", "tav-crypto/crypto_webcrypto"]
+
+[dependencies]
+tav-cose = { workspace = true }
+tav-crypto = { workspace = true }
+sha2 = { workspace = true }

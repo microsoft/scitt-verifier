@@ -1,0 +1,66 @@
+# Gate a deployment on a SCITT transparent statement.
+#
+# The shape to notice: verification happens *before* deployment, offline, using
+# trust material committed to this repository. Nothing in this job talks to the
+# transparency service, so the gate keeps working during an outage — and cannot
+# be tricked by one.
+
+name: Deploy
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify transparency
+    runs-on: ubuntu-latest
+    outputs:
+      verdict: ${{ steps.scitt.outputs.verdict }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the release artifact and its statement
+        run: |
+          set -euo pipefail
+          # Replace with however your build publishes these.
+          gh release download "${GITHUB_REF_NAME}" \
+            --pattern 'sbom.spdx.json' \
+            --pattern 'sbom.spdx.json.cose'
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Verify the SBOM was registered on the transparency service
+        id: scitt
+        uses: microsoft/scitt-verifier@v0
+        with:
+          statement: sbom.spdx.json.cose
+          artifact: sbom.spdx.json
+          binding-mode: payload-bytes
+          scitt-keys: .well-known/scitt-keys.cbor
+          policy: .github/policies/release-gate.json
+          issuer: your-ledger.confidential-ledger.azure.com
+          evidence: scitt-evidence.json
+          on-unevaluable: fail
+
+      # Keep the evidence. Six months from now the question will not be "did it
+      # pass" but "what exactly did it check", and the answer lives in here.
+      - name: Archive the evidence record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scitt-evidence
+          path: scitt-evidence.json
+          retention-days: 365
+
+  deploy:
+    name: Deploy
+    needs: verify
+    if: needs.verify.outputs.verdict == 'verified'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Transparency verified. Deploying."

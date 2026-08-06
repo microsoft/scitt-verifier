@@ -1,0 +1,96 @@
+# Limitations
+
+Every limitation here is also reported at runtime, in the `notChecked` array of
+the evidence record. Nothing in this list requires reading the documentation to
+discover.
+
+That is deliberate. A verification tool that overstates its coverage is worse
+than no tool, because it converts an open question into false confidence.
+
+## Not implemented in this release
+
+### Certificate chain validation to a trusted root
+
+The statement signature is verified against the public key in the leaf
+certificate embedded in the statement itself. That proves the statement is
+internally consistent. It does **not** prove the certificate chains to a root
+you trust.
+
+*Consequence:* an attacker who can present any self-signed certificate produces
+a statement whose signature "verifies". The receipt binding still protects you —
+they cannot get a ledger receipt for it without registering with the
+transparency service — but do not read `signatureValid: true` as an identity
+claim.
+
+*Mitigation today:* use the `signerSubjectContains` and `signerIssuerContains`
+policy assertions.
+
+*Planned:* `--trusted-roots`, using the chain validation already available in
+the underlying crypto crate.
+
+### COSE Hash Envelope binding (`payload-digest`)
+
+When a statement is produced by indirect signing, the payload **is already a
+digest** of the artifact rather than the artifact itself. Comparing it to the
+artifact's bytes will always report a mismatch — and it is exactly the mode an
+SBOM signed with `CoseSignTool indirect-sign` uses.
+
+Passing `--binding-mode payload-digest` is refused with exit 4 rather than
+approximated. A binding that appears to have been checked but was not is the
+failure this whole tool exists to prevent.
+
+### Certificate revocation
+
+Not checked. Revocation checking requires network access, and this tool is
+offline by design. There is no plan to change that; a gate that stops working
+when OCSP is unreachable is not a gate anyone keeps enabled.
+
+### Verifiable data structures other than `CCF_LEDGER_SHA256`
+
+Any other value in header 395 is refused (exit 3), never interpreted as a
+format we do understand.
+
+### Signed trust material
+
+`--scitt-keys` takes a raw COSE_KeySet. There is no cryptographic binding
+between that file and the transparency service it claims to represent — its
+authenticity comes from how you obtained and reviewed it.
+
+*Recommended practice:* commit the key set to your repository so that rotating
+it is a reviewed pull request with an audit trail, rather than a file that
+appears on a build agent.
+
+Always pass `--issuer` as well. Without it, a receipt from a *different*
+transparency service that happens to use a kid present in your key set will not
+be rejected on issuer grounds.
+
+## Deliberate non-goals
+
+**Fetching statements from a service.** This tool verifies bytes you already
+have. Retrieval belongs in whatever already knows your service topology, and
+keeping it out is what makes the verifier auditable and offline.
+
+**Deciding what is trustworthy.** The tool reports facts and evaluates *your*
+policy. It ships no default policy, because a default would be a trust decision
+made on your behalf by a tool that has never seen your threat model.
+
+**Signing or registering.** Verification only. Use `CoseSignTool` or `pyscitt`.
+
+**TPAL and other non-SCITT CCF receipts.** The Merkle core would serve them, but
+supporting a second envelope format would blur what "verified" means. Out of
+scope.
+
+## Known rough edges
+
+* Only the first inclusion proof in a receipt is evaluated. The evidence record
+  says so when there is more than one.
+* `iat` is read from the receipt's CWT claims and reported as a raw Unix
+  timestamp. Time-based policy assertions use the *receipt's* registration time,
+  never the statement's own `iat`, because the issuer controls the latter.
+* The CLI surface is unstable before v1.0. Exit codes are the stable contract;
+  pin a release tag in pipelines.
+
+## Reporting a gap
+
+If the tool reported success where it should not have, that is a security issue.
+See [SECURITY.md](../SECURITY.md) — please do not open a public issue.

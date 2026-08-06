@@ -1,0 +1,23 @@
+[package]
+name = "scitt-verifier"
+description = "Offline verifier for SCITT transparent statements"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "scitt-verifier"
+path = "src/main.rs"
+
+[dependencies]
+scitt-receipt = { path = "../scitt-receipt", default-features = false }
+scitt-policy = { path = "../scitt-policy", default-features = false }
+serde_json = "1"
+
+[features]
+default = ["crypto_pure_rust"]
+crypto_pure_rust = ["scitt-receipt/crypto_pure_rust", "scitt-policy/crypto_pure_rust"]
+crypto_openssl = ["scitt-receipt/crypto_openssl", "scitt-policy/crypto_openssl"]

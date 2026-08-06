@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/scitt-receipt",
+    "crates/scitt-policy",
+    "crates/scitt-verifier",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+license = "MIT"
+repository = "https://github.com/microsoft/scitt-verifier"
+authors = ["Microsoft Corporation"]
+
+[workspace.dependencies]
+# Verification primitives reused from the CCF team's portable Rust libraries.
+#
+# Pinned to an exact revision rather than a tag: this is the crypto and CBOR
+# layer of a security gate, so an upgrade should be a reviewed commit in this
+# repository, never something that happens because an upstream tag moved.
+#
+# These are not on crates.io — they depend transitively on EverParse's `cborrs`
+# via git, which crates.io forbids. See docs/distribution.md.
+tav-cose = { package = "tee-attestation-verification-cose", git = "https://github.com/microsoft/TEE-Attestation-Verification.git", rev = "a52c499f64aeb5014c94c1faf5ac33c38a195280", default-features = false }
+tav-crypto = { package = "tee-attestation-verification-crypto", git = "https://github.com/microsoft/TEE-Attestation-Verification.git", rev = "a52c499f64aeb5014c94c1faf5ac33c38a195280", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+
+# Size budget: the release binary is a deployment gate that ships in CI images.
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

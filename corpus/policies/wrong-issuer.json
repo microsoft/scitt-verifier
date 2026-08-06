@@ -1,0 +1,9 @@
+{
+  "policyId": "corpus/wrong-issuer",
+  "policyVersion": "1",
+  "description": "Accepts only a transparency service the fixture was not registered with. Must fail.",
+  "assertions": {
+    "issuer": ["some-other-ledger.confidential-ledger.azure.com"],
+    "minReceipts": 1
+  }
+}

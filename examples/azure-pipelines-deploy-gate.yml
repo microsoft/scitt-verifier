@@ -1,0 +1,50 @@
+# Gate an Azure Pipelines release on a SCITT transparent statement.
+#
+# ⚠️ Use `script:` or `bash:`, never `powershell:`. The PowerShell task does not
+# fail the step on a non-zero exit code from a native program, so a gate written
+# with `powershell:` reports success no matter what the verifier decides. If you
+# must use PowerShell, check `$LASTEXITCODE` explicitly.
+
+trigger: none
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  SCITT_VERIFIER_VERSION: v0.1.0
+
+steps:
+  - checkout: self
+
+  - bash: |
+      set -euo pipefail
+      url="https://github.com/microsoft/scitt-verifier/releases/download/${SCITT_VERIFIER_VERSION}/scitt-verifier-x86_64-unknown-linux-musl"
+      curl --fail --silent --show-error --location --output "$(Agent.TempDirectory)/scitt-verifier" "$url"
+      chmod +x "$(Agent.TempDirectory)/scitt-verifier"
+    displayName: Install scitt-verifier
+
+  - bash: |
+      set -uo pipefail
+      "$(Agent.TempDirectory)/scitt-verifier" verify \
+        --statement "$(Pipeline.Workspace)/drop/sbom.spdx.json.cose" \
+        --artifact  "$(Pipeline.Workspace)/drop/sbom.spdx.json" \
+        --binding-mode payload-bytes \
+        --scitt-keys .well-known/scitt-keys.cbor \
+        --policy .pipelines/policies/release-gate.json \
+        --issuer your-ledger.confidential-ledger.azure.com \
+        --evidence "$(Build.ArtifactStagingDirectory)/scitt-evidence.json"
+      code=$?
+
+      case "$code" in
+        0) echo "Transparent statement verified." ;;
+        1) echo "##vso[task.logissue type=error]Cryptographic or binding failure. Do not deploy."; exit 1 ;;
+        2) echo "##vso[task.logissue type=error]Policy rejected an otherwise genuine statement."; exit 1 ;;
+        3) echo "##vso[task.logissue type=error]Verification could not be completed. This is not a pass."; exit 1 ;;
+        *) echo "##vso[task.logissue type=error]scitt-verifier was invoked incorrectly (exit $code)."; exit 1 ;;
+      esac
+    displayName: Verify transparency gate
+
+  - publish: $(Build.ArtifactStagingDirectory)/scitt-evidence.json
+    artifact: scitt-evidence
+    condition: always()
+    displayName: Archive the evidence record
