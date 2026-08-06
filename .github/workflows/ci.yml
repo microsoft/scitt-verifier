@@ -58,7 +58,8 @@ jobs:
           }
           check 'std::fs|File::open|read_to_string' \
                 'scitt-receipt must not perform file I/O; callers supply bytes.'
-          check 'SystemTime|Instant::now|chrono' \
+          # \b matters: an unanchored 'chrono' matches tav_cose::synchronous.
+          check 'SystemTime|Instant::now|\bchrono\b' \
                 'scitt-receipt must not read the clock; freshness is a policy question.'
           check 'std::process::exit|ExitCode' \
                 'scitt-receipt must not decide exit codes.'

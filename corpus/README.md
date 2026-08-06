@@ -10,7 +10,7 @@ implementing SCITT receipt verification independently.
 | `transparent-statement.cose` | A genuine transparent statement from Microsoft Signing Transparency: PS256, a four-certificate chain, and one CCF receipt |
 | `tampered-statement.cose` | The same statement with a byte flipped in the signed region |
 | `payload-tampered.cose` | The same statement with a modified payload — the receipt is untouched and still valid *for the original statement* |
-| `artifact.bin` | The 21-byte artifact the genuine statement's payload equals |
+| `artifact.bin` | The 21-byte artifact the genuine statement's payload equals — `Hello from MST Team\r\n`, **CRLF included** |
 | `bad-artifact.bin` | A different artifact, for the negative binding case |
 | `musa-mst-july-scitt-keys.cbor` | The transparency service's signing keys, as a COSE_KeySet |
 | `stale-scitt-keys.cbor` | A key set from before a rotation — parses fine, contains the wrong kid |
@@ -19,6 +19,13 @@ implementing SCITT receipt verification independently.
 genuine, its inclusion proof is valid, and its root signature verifies. It is
 still not evidence about this payload, because the claims digest no longer
 matches. Any implementation that omits the binding check will accept it.
+
+Every file here is exact bytes from a transparency service, so `.gitattributes`
+marks `*.cose`, `*.cbor`, and `*.bin` as binary. This is not cosmetic:
+`artifact.bin` is pure ASCII ending in CRLF, and without that rule git will
+classify it as text and rewrite the line ending on checkout, changing its length
+and breaking the binding check. `fixtures_are_byte_exact` in the acceptance
+suite fails loudly if that ever happens again.
 
 `stale-scitt-keys.cbor` exercises the other distinction worth defending: a
 rotated key must produce a different outcome from a forged artifact. One is an

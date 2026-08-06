@@ -116,6 +116,42 @@ fn a_policy_that_rejects_the_issuer_exits_two() {
     assert!(r.stdout.contains("policyFailed"));
 }
 
+/// Fixtures must survive checkout byte-for-byte.
+///
+/// `artifact.bin` is pure ASCII ending in CRLF, so without the `*.bin binary`
+/// rule in `.gitattributes` git classifies it as text and silently rewrites the
+/// line ending on platforms with `core.autocrlf`. That drops one byte, the
+/// payload no longer matches, and the failure surfaces as a confusing binding
+/// error rather than a corrupted checkout. Fail loudly and specifically here.
+#[test]
+fn fixtures_are_byte_exact() {
+    for (name, expected) in [
+        ("artifact.bin", 21usize),
+        ("bad-artifact.bin", 20),
+        ("transparent-statement.cose", 9270),
+        ("tampered-statement.cose", 9270),
+        ("payload-tampered.cose", 9270),
+        ("musa-mst-july-scitt-keys.cbor", 1219),
+        ("stale-scitt-keys.cbor", 523),
+    ] {
+        let bytes = std::fs::read(corpus(&["fixtures", name]))
+            .unwrap_or_else(|e| panic!("fixture {name} must be readable: {e}"));
+        assert_eq!(
+            bytes.len(),
+            expected,
+            "fixture {name} is {} bytes, expected {expected}. The checkout \
+             transformed it — check .gitattributes and core.autocrlf.",
+            bytes.len()
+        );
+    }
+
+    assert_eq!(
+        std::fs::read(corpus(&["fixtures", "artifact.bin"])).unwrap(),
+        b"Hello from MST Team\r\n",
+        "artifact.bin must keep its CRLF; the statement signs these exact bytes"
+    );
+}
+
 #[test]
 fn a_matching_artifact_binds() {
     let artifact = corpus(&["fixtures", "artifact.bin"]);
