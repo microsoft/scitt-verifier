@@ -132,6 +132,28 @@ gate.
 
 Full examples live in [`examples/`](examples/).
 
+## Obtaining the transparency service keys
+
+`--scitt-keys` takes the service's signing keys as a COSE_Key_Set. The verifier
+never fetches them: acquisition is a separate, occasional step whose output you
+commit and review.
+
+```console
+pip install cryptography cbor2
+python tools/scitt-keys.py fetch \
+  --issuer your-ledger.confidential-ledger.azure.com \
+  --out    .well-known/scitt-keys.cbor
+```
+
+This pins TLS to the service certificate published by the Azure identity
+service, requires the service's own key to appear in the key set it serves, and
+writes a provenance sidecar so the key set is reviewable in a pull request. It
+needs no credentials. It refuses to run in CI unless you declare it a scheduled
+rotation job.
+
+See [docs/trust-material.md](docs/trust-material.md), including the
+rotation-as-a-pull-request pattern and support for self-hosted ledgers.
+
 ## Policy documents
 
 ```json
@@ -164,6 +186,7 @@ crates/scitt-verifier   The CLI.
 corpus/                 Conformance fixtures and example policies.
 action.yml              Composite GitHub Action.
 examples/               GitHub Actions and Azure Pipelines samples.
+tools/                  Trust-material acquisition. Not part of the gate.
 ```
 
 `scitt-receipt` is deliberately isolated so it can be embedded elsewhere — a

@@ -56,6 +56,15 @@ format we do understand.
 between that file and the transparency service it claims to represent — its
 authenticity comes from how you obtained and reviewed it.
 
+`tools/scitt-keys.py fetch` establishes that binding *at acquisition time* by
+pinning TLS to the service certificate published by the Azure identity service
+and requiring the service's own key to appear in the key set it serves. It
+records the result in a provenance sidecar. See
+[`trust-material.md`](trust-material.md).
+
+That sidecar is a record for reviewers, not a proof: anyone who can edit the key
+set can edit the sidecar. The verifier cannot re-check any of it offline.
+
 *Recommended practice:* commit the key set to your repository so that rotating
 it is a reviewed pull request with an audit trail, rather than a file that
 appears on a build agent.
