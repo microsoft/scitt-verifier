@@ -60,7 +60,10 @@ jobs:
   deploy:
     name: Deploy
     needs: verify
-    if: needs.verify.outputs.verdict == 'verified'
+    # Gate on the *artifact* claim, not merely on exit 0. A run that verified a
+    # statement without binding it to the artifact also exits 0, and this job
+    # must not accept that.
+    if: needs.verify.outputs.verdict == 'artifact-transparent'
     runs-on: ubuntu-latest
     steps:
-      - run: echo "Transparency verified. Deploying."
+      - run: echo "Artifact is transparent. Deploying."

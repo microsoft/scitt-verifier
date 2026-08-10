@@ -4,25 +4,27 @@
 //! auditor six months later wants to know exactly what was checked and what was
 //! not. The second audience is the harder one, which is why `notChecked` is a
 //! first-class field rather than something you infer from silence.
+//!
+//! This record is produced on *every* path, including runs that failed before
+//! a signature was checked. A pipeline that archives evidence on `always()`
+//! must get a file when things go wrong — that is the only time anyone reads
+//! it closely.
 
-use scitt_policy::{Outcome, PolicyDecision};
 use scitt_receipt::{KeyLookup, ReceiptFacts, StatementFacts};
 use serde_json::{json, Map, Value};
 
 use crate::cli::{BindingMode, VerifyArgs};
-use crate::Verdict;
+use crate::outcome::{Assessment, Checks, Diagnostic, Gap, Trust};
 
-pub fn build(
-    args: &VerifyArgs,
-    facts: &StatementFacts,
-    decision: Option<&PolicyDecision>,
-    binding: &BindingResult,
-    verdict: Verdict,
-    now: i64,
-) -> Value {
+/// Bumped from v1 alongside the artifact-aware verdicts. A v1 consumer looking
+/// for `"verdict": "verified"` would silently stop matching, so the version
+/// has to move with it.
+const SCHEMA_VERSION: &str = "scitt-verifier/evidence/v2";
+
+pub fn build(args: &VerifyArgs, assessment: &Assessment, now: i64) -> Value {
     let mut root = Map::new();
 
-    root.insert("schemaVersion".into(), json!("scitt-verifier/evidence/v1"));
+    root.insert("schemaVersion".into(), json!(SCHEMA_VERSION));
     root.insert(
         "tool".into(),
         json!({
@@ -31,8 +33,30 @@ pub fn build(
         }),
     );
     root.insert("evaluatedAt".into(), json!(now));
-    root.insert("verdict".into(), json!(verdict.as_str()));
-    root.insert("exitCode".into(), json!(verdict.exit_code()));
+    root.insert("verdict".into(), json!(assessment.verdict.as_str()));
+    root.insert("exitCode".into(), json!(assessment.verdict.exit_code()));
+
+    // The single field that answers "what stopped my deployment". Everything
+    // else in this document is supporting detail for that one question.
+    root.insert(
+        "primaryDiagnostic".into(),
+        match &assessment.primary {
+            Some(d) => diagnostic_json(d),
+            None => Value::Null,
+        },
+    );
+
+    root.insert("trust".into(), trust_json(&assessment.trust));
+    root.insert("checks".into(), checks_json(&assessment.checks));
+
+    root.insert(
+        "diagnostics".into(),
+        Value::Array(assessment.diagnostics.iter().map(diagnostic_json).collect()),
+    );
+    root.insert(
+        "notChecked".into(),
+        Value::Array(assessment.not_checked.iter().map(gap_json).collect()),
+    );
 
     root.insert(
         "inputs".into(),
@@ -45,32 +69,25 @@ pub fn build(
         }),
     );
 
-    root.insert(
+    let mut details = Map::new();
+
+    details.insert(
         "statement".into(),
-        json!({
-            "claimDigest": facts.claim_digest,
-            "signedStatementBytes": facts.signed_statement_len,
-            "payloadBytes": facts.payload_len,
-            "algorithm": facts.alg.map(scitt_receipt::labels::alg::name),
-            "signatureValid": facts.signature_valid,
-            "certificateChainLength": facts.certificate_chain_len,
-            "signerSubject": facts.leaf_subject,
-            "signerIssuer": facts.leaf_issuer,
-            "cwt": {
-                "iss": facts.cwt.iss,
-                "sub": facts.cwt.sub,
-                "iat": facts.cwt.iat,
-                "svn": facts.cwt.svn,
-            },
-        }),
+        match &assessment.facts {
+            Some(facts) => statement_json(facts),
+            None => Value::Null,
+        },
     );
 
-    root.insert(
+    details.insert(
         "receipts".into(),
-        Value::Array(facts.receipts.iter().map(receipt_json).collect()),
+        match &assessment.facts {
+            Some(facts) => Value::Array(facts.receipts.iter().map(receipt_json).collect()),
+            None => Value::Null,
+        },
     );
 
-    root.insert(
+    details.insert(
         "artifactBinding".into(),
         json!({
             // Always recorded as declared, never inferred. A future reader must
@@ -81,14 +98,14 @@ pub fn build(
                 BindingMode::PayloadBytes => "payload-bytes",
             },
             "declared": args.artifact.is_some(),
-            "bound": binding.bound,
-            "detail": binding.detail,
+            "bound": assessment.binding.bound,
+            "detail": assessment.binding.detail,
         }),
     );
 
-    root.insert(
+    details.insert(
         "policy".into(),
-        match decision {
+        match &assessment.decision {
             Some(d) => json!({
                 "policyId": d.policy_id,
                 "policyVersion": d.policy_version,
@@ -99,13 +116,77 @@ pub fn build(
         },
     );
 
-    root.insert("problems".into(), json!(facts.problems));
-    root.insert(
-        "notChecked".into(),
-        json!(not_checked(facts, decision, args)),
+    details.insert(
+        "problems".into(),
+        match &assessment.facts {
+            Some(facts) => json!(facts.problems),
+            None => json!([]),
+        },
     );
 
+    root.insert("details".into(), Value::Object(details));
+
     Value::Object(root)
+}
+
+fn diagnostic_json(d: &Diagnostic) -> Value {
+    json!({
+        "code": d.code,
+        "category": d.category.as_str(),
+        "severity": d.severity.as_str(),
+        "message": d.message,
+        "action": d.action,
+    })
+}
+
+fn gap_json(g: &Gap) -> Value {
+    json!({
+        "code": g.code,
+        "category": g.category.as_str(),
+        "message": g.message,
+        "impact": g.impact,
+    })
+}
+
+/// How the trust material arrived, promoted out of prose.
+///
+/// "The receipt signature is valid" means nothing without "valid under whose
+/// key, and who vouched for it". A consumer auditing a fleet needs to be able
+/// to query for runs that trusted an unsigned key set.
+fn trust_json(t: &Trust) -> Value {
+    json!({
+        "mode": t.mode,
+        "issuerScope": t.issuer_scope,
+        "limitations": t.limitations,
+    })
+}
+
+fn checks_json(c: &Checks) -> Value {
+    json!({
+        "statementSignature": c.statement_signature.as_str(),
+        "receiptInclusion": c.receipt_inclusion.as_str(),
+        "artifactBinding": c.artifact_binding.as_str(),
+        "policy": c.policy.as_str(),
+    })
+}
+
+fn statement_json(facts: &StatementFacts) -> Value {
+    json!({
+        "claimDigest": facts.claim_digest,
+        "signedStatementBytes": facts.signed_statement_len,
+        "payloadBytes": facts.payload_len,
+        "algorithm": facts.alg.map(scitt_receipt::labels::alg::name),
+        "signatureValid": facts.signature_valid,
+        "certificateChainLength": facts.certificate_chain_len,
+        "signerSubject": facts.leaf_subject,
+        "signerIssuer": facts.leaf_issuer,
+        "cwt": {
+            "iss": facts.cwt.iss,
+            "sub": facts.cwt.sub,
+            "iat": facts.cwt.iat,
+            "svn": facts.cwt.svn,
+        },
+    })
 }
 
 fn receipt_json(r: &ReceiptFacts) -> Value {
@@ -135,72 +216,4 @@ fn key_lookup_name(lookup: &KeyLookup) -> &'static str {
         KeyLookup::Revoked => "revoked",
         KeyLookup::IssuerMismatch => "issuerMismatch",
     }
-}
-
-/// What this run did *not* establish.
-///
-/// Reported unconditionally, including on success. A green result that quietly
-/// skipped the artifact binding is more dangerous than a red one, because
-/// nobody goes looking for the caveat.
-fn not_checked(
-    facts: &StatementFacts,
-    decision: Option<&PolicyDecision>,
-    args: &VerifyArgs,
-) -> Vec<String> {
-    let mut gaps = Vec::new();
-
-    if args.binding_mode == BindingMode::None {
-        gaps.push(
-            "No artifact binding was requested, so this run does not establish which artifact \
-             the statement describes."
-                .into(),
-        );
-    }
-
-    if args.issuer.is_none() {
-        gaps.push(
-            "The key set was not scoped to an issuer (--issuer), so a receipt from a different \
-             transparency service using a known kid would not be rejected on issuer grounds."
-                .into(),
-        );
-    }
-
-    // The statement signature is checked against the key in its own certificate.
-    // Chain validation to a trusted root is a separate question this release
-    // does not answer, and saying so is the whole point of this section.
-    if facts.certificate_chain_len > 0 {
-        gaps.push(
-            "The signing certificate chain was not validated to a trusted root; the statement \
-             signature was checked against the leaf certificate embedded in the statement itself."
-                .into(),
-        );
-    }
-
-    if facts.certificate_chain_len == 0 {
-        gaps.push("The statement carried no certificate chain.".into());
-    }
-
-    gaps.push("Certificate revocation was not checked (this tool runs offline).".into());
-
-    if let Some(d) = decision {
-        for r in &d.results {
-            if r.outcome == Outcome::CannotEvaluate {
-                gaps.push(format!(
-                    "Policy assertion '{}' could not be evaluated: {}",
-                    r.name, r.detail
-                ));
-            }
-        }
-    } else {
-        gaps.push("No policy was evaluated.".into());
-    }
-
-    gaps
-}
-
-/// Outcome of comparing the statement to the artifact on disk.
-pub struct BindingResult {
-    /// `None` means no binding was requested — not that it failed.
-    pub bound: Option<bool>,
-    pub detail: String,
 }

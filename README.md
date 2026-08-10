@@ -19,8 +19,20 @@ $ scitt-verifier verify \
     --scitt-keys .well-known/scitt-keys.cbor \
     --policy     release-gate.json
 
-Verdict: verified (exit 0)
+PASS artifact-transparent
+
+Policy document:     contoso/release-gate v7
+Trust material:      unsigned SCITT key set, scoped to contoso.confidential-ledger.azure.com
+Statement signature: pass
+Receipt inclusion:   pass
+Artifact binding:    pass
+Policy decision:     pass
 ```
+
+Drop `--artifact` and the verdict becomes `statement-transparent` — still exit
+0, but a narrower claim, because nothing was checked against the bytes you are
+deploying. The two are kept apart on purpose; see
+[docs/output.md](docs/output.md).
 
 ## Why this exists
 
@@ -84,17 +96,24 @@ folded into "compromised", because the response to each is different.
 result that quietly skipped the artifact binding is more dangerous than a red
 one, because nobody goes looking for the caveat.
 
-## Exit codes
+## Exit codes and verdicts
 
-| Code | Meaning | What to do |
-|---|---|---|
-| 0 | Verified, policy satisfied | Proceed |
-| 1 | Cryptographic or binding failure | **Stop.** Treat as an incident |
-| 2 | Genuine, but your policy rejected it | Review the policy or the artifact |
-| 3 | Could not be evaluated | Refresh trust material; do not proceed |
-| 4 | Usage or input error | Fix the invocation |
+| Code | Verdict | Meaning | What to do |
+|---|---|---|---|
+| 0 | `artifact-transparent` | The artifact you supplied was registered | Proceed |
+| 0 | `statement-transparent` | Transparent, but no artifact was checked | Proceed only if you meant to skip binding |
+| 1 | `untrusted` | Cryptographic or binding failure | **Stop.** Treat as an incident |
+| 2 | `policy-failed` | Genuine, but your policy rejected it | Review the policy or the artifact |
+| 3 | `cannot-evaluate` | Could not be evaluated | Refresh trust material; do not proceed |
+| 4 | `usage-error` | Usage or input error | Fix the invocation |
 
 Exit 3 is not a pass.
+
+**Gate on the verdict, not on exit 0.** Both success verdicts exit 0 so that
+teams can adopt the gate before they wire up artifact binding — but only
+`artifact-transparent` says anything about the bytes being deployed. The full
+contract, including diagnostics, check states, and the evidence schema, is in
+[docs/output.md](docs/output.md).
 
 ## Installing
 
@@ -201,6 +220,11 @@ Transparency statements and its digests are cross-checked against two
 independent implementations, but the CLI surface should be considered unstable
 until v1.0. Known gaps are listed in [docs/limitations.md](docs/limitations.md)
 and reported at runtime in the `notChecked` field of every evidence record.
+
+The output contract changed after v0.1.0: `verified` was replaced by the two
+artifact-aware verdicts, and the evidence schema moved to
+`scitt-verifier/evidence/v2`. If you pinned against v0.1.0 output, read
+[docs/output.md](docs/output.md) before upgrading.
 
 ## Contributing
 

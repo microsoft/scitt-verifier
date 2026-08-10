@@ -27,11 +27,15 @@ VERIFY OPTIONS:
     --now <UNIX_SECONDS>     Override the clock, for reproducible runs.
 
 EXIT CODES:
-    0  verified, and the policy is satisfied
+    0  transparent, and the policy is satisfied
     1  cryptographic or binding failure — do not trust this artifact
-    2  verified, but the policy was not satisfied
+    2  transparent, but the policy was not satisfied
     3  could not be evaluated — missing trust material or unsupported feature
     4  usage or input error
+
+VERDICTS (exit 0 is two different claims — see docs/output.md):
+    artifact-transparent   the artifact you supplied is the one that was registered
+    statement-transparent  the statement is transparent, but no artifact was checked
 
 Exit 3 is not a pass. It means the tool could not answer the question.
 "#;

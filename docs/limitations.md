@@ -1,7 +1,8 @@
 # Limitations
 
 Every limitation here is also reported at runtime, in the `notChecked` array of
-the evidence record. Nothing in this list requires reading the documentation to
+the evidence record, as a structured entry with a stable `code`, a `category`,
+and an `impact`. Nothing in this list requires reading the documentation to
 discover.
 
 That is deliberate. A verification tool that overstates its coverage is worse

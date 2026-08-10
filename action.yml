@@ -51,7 +51,7 @@ inputs:
 
 outputs:
   verdict:
-    description: 'verified | untrusted | policyFailed | cannotEvaluate'
+    description: 'artifact-transparent | statement-transparent | untrusted | policy-failed | cannot-evaluate | usage-error'
     value: ${{ steps.verify.outputs.verdict }}
   exit-code:
     description: 'The raw exit code from the verifier.'
@@ -106,8 +106,11 @@ runs:
         EVIDENCE: ${{ inputs.evidence }}
         ON_UNEVALUABLE: ${{ inputs.on-unevaluable }}
       run: |
-        # Note: no `set -e` here. A non-zero exit from the verifier is data we
-        # need to interpret, not a reason to abort before we have reported it.
+        # GitHub runs `shell: bash` as `bash --noprofile --norc -e -o pipefail`,
+        # so `-e` is already on and a non-zero exit from the verifier would end
+        # the step before we could interpret it. That exit code is the whole
+        # point of this action, so turn `-e` off explicitly.
+        set +e
         set -uo pipefail
 
         args=(verify
@@ -134,14 +137,25 @@ runs:
 
         # Surface what was *not* checked, even on success. A green gate that
         # quietly skipped the artifact binding is the failure mode worth
-        # designing against.
+        # designing against. notChecked entries are objects (evidence/v2), so
+        # render the code and message rather than concatenating a bare string.
         if [ -f "${EVIDENCE}" ]; then
-          jq -r '.notChecked[]? | "::notice title=Not checked::" + .' "${EVIDENCE}" || true
+          jq -r '.notChecked[]? | "::notice title=Not checked (" + .code + ")::" + .message' "${EVIDENCE}" || true
+          jq -r 'select(.primaryDiagnostic != null)
+                 | "::error title=SCITT " + .primaryDiagnostic.code + "::"
+                   + .primaryDiagnostic.message + " — " + .primaryDiagnostic.action' \
+             "${EVIDENCE}" || true
         fi
 
         case "${code}" in
           0)
-            echo "::notice title=SCITT::Transparent statement verified and policy satisfied."
+            # Two different claims share exit 0. A gate that treats them alike
+            # cannot tell "the artifact is transparent" from "some statement is".
+            if [ "${verdict}" = "statement-transparent" ]; then
+              echo "::warning title=SCITT::Statement is transparent, but no artifact binding was requested. This run does not establish which artifact was verified."
+            else
+              echo "::notice title=SCITT::Artifact is transparent and the policy is satisfied."
+            fi
             exit 0
             ;;
           1)
