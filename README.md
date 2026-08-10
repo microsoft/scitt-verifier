@@ -64,6 +64,43 @@ proof that commits to a *different* statement is real, valid evidence — about
 something else. Verifying it and stopping there is a convincing way to prove
 nothing.
 
+## What it can and cannot tell you
+
+Questions it answers:
+
+- **Is this file the exact thing that was registered?** The one that matters
+  most. You get this answer only if you pass `--artifact`; without it the tool
+  says so rather than implying it.
+- **Did a transparency service really record this, or is someone just claiming
+  it did?** The receipt has to verify against trust material you supplied.
+- **Has anything been altered since registration?** Statement, payload, or
+  receipt.
+- **Which service vouched for it** — and with `--issuer`, whether that is the
+  one you meant, rather than any ledger that happens to be in your key file.
+- **Who signed it, and does that satisfy my rules?** Kept deliberately separate
+  from the cryptography: "valid, but I don't accept this signer" (exit 2) is a
+  different situation from "this does not verify" (exit 1).
+- **Can I deploy this right now?** One verdict, decidable by a script.
+- **What is actually inside this thing?** `inspect`, with no trust claim
+  attached.
+- **What did you not check?** The `notChecked` list — reported on success too.
+
+Questions it does **not** answer, and will not pretend to:
+
+- **Is the artifact any good?** Transparency proves an artifact was recorded —
+  not that it is safe, unbackdoored, or fit to ship. This is an audit trail, not
+  a scanner. A malicious build that was properly registered passes.
+- **Is the signer trustworthy?** It proves *which* key signed, not that the key
+  belongs to who you think. The certificate chain is not validated.
+- **Has this been revoked, or is it too old to trust?** The tool is offline and
+  will not guess. Age is only checked if your policy asks.
+- **Are my trust keys legitimate?** It uses the key file you hand it. Where that
+  file came from is your responsibility — which is why the output labels it an
+  *unsigned* SCITT key set.
+
+In one line: it answers **"is this the thing that was recorded, and does it meet
+my rules?"** — never "is this thing safe?"
+
 ## Design commitments
 
 These are constraints, not aspirations. Each has a test that fails if it erodes.
