@@ -315,13 +315,23 @@ pub struct Assessment {
 
 impl Assessment {
     /// A run that stopped before it could establish anything.
-    pub fn incomplete(verdict: Verdict, trust: Trust, primary: Diagnostic) -> Self {
+    ///
+    /// `not_checked` is a required argument rather than a default, because a
+    /// run that stopped early has *more* gaps than one that finished, not
+    /// fewer. Letting a caller omit it would produce the one output this tool
+    /// must never emit: a failure report that claims nothing was skipped.
+    pub fn incomplete(
+        verdict: Verdict,
+        trust: Trust,
+        primary: Diagnostic,
+        not_checked: Vec<Gap>,
+    ) -> Self {
         Self {
             verdict,
             diagnostics: vec![primary.clone()],
             primary: Some(primary),
             checks: Checks::none(),
-            not_checked: Vec::new(),
+            not_checked,
             trust,
             facts: None,
             decision: None,
@@ -400,11 +410,20 @@ mod tests {
             Verdict::CannotEvaluate,
             Trust::unsigned_key_set(None),
             Diagnostic::error("X", Category::Trust, "m", "a"),
+            vec![Gap::new(
+                "PolicyNotEvaluated",
+                Category::Policy,
+                "No policy was evaluated.",
+                "no relying-party decision was made about these facts",
+            )],
         );
         assert_eq!(a.checks.statement_signature, CheckState::NotChecked);
         assert_eq!(a.checks.policy, CheckState::NotChecked);
         assert!(a.primary.is_some());
         assert_eq!(a.diagnostics.len(), 1);
+        // A run that stopped early has more gaps than one that finished, so
+        // an empty `notChecked` here would be a lie of omission.
+        assert!(!a.not_checked.is_empty());
     }
 
     #[test]

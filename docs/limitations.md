@@ -23,8 +23,19 @@ they cannot get a ledger receipt for it without registering with the
 transparency service — but do not read `signatureValid: true` as an identity
 claim.
 
-*Mitigation today:* use the `signerSubjectContains` and `signerIssuerContains`
-policy assertions.
+*What actually protects you today:* registration. An attacker who self-signs
+still has to get that statement admitted to a transparency service whose keys
+are in your `--scitt-keys` file, and the receipt is what this tool verifies
+cryptographically. Pair it with `--issuer` so that a receipt from some *other*
+service in your key set cannot stand in.
+
+*What does not:* `signerSubjectContains` and `signerIssuerContains` substring-match
+the leaf certificate embedded in the statement — the same certificate an attacker
+in the paragraph above minted. Against that attacker they prove nothing, because
+they choose the strings. They are useful for catching an *honest* mistake — a
+build signed by the wrong team, or by a legitimate CA you did not intend to
+accept — and worthless as a defence against forgery. Do not treat them as a
+substitute for chain validation.
 
 *Planned:* `--trusted-roots`, using the chain validation already available in
 the underlying crypto crate.

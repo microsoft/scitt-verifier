@@ -14,7 +14,7 @@ use tav_cose::CborValue;
 use tav_crypto::KeyBackend;
 
 /// What a single receipt turned out to be.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ReceiptFacts {
     /// Issuer from the receipt's CWT claims.
     pub issuer: Option<String>,
@@ -52,22 +52,7 @@ pub struct ReceiptFacts {
 
 impl ReceiptFacts {
     fn empty() -> Self {
-        Self {
-            issuer: None,
-            kid: None,
-            registered_at: None,
-            algorithm: None,
-            vds: None,
-            leaf_hash: None,
-            root: None,
-            path_length: None,
-            root_signature_valid: None,
-            bound_to_statement: None,
-            claims_digest: None,
-            key_lookup: None,
-            kid_bound_to_key: None,
-            problems: Vec::new(),
-        }
+        Self::default()
     }
 
     /// True only when every check that matters actually ran and passed.

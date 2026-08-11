@@ -433,6 +433,12 @@ mod tests {
             Verdict::CannotEvaluate,
             Trust::unsigned_key_set(None),
             Diagnostic::error("ReceiptKeyUnknown", Category::Trust, "m", "a"),
+            vec![Gap::new(
+                "RevocationNotChecked",
+                Category::SignerIdentity,
+                "Certificate revocation was not checked.",
+                "a revoked signing certificate would still verify here",
+            )],
         )
     }
 

@@ -115,6 +115,7 @@ fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
                     e,
                     "Check the --statement path and that the file was produced by the build.",
                 ),
+                gaps(args, None, None),
             )
         }
     };
@@ -130,6 +131,7 @@ fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
                     e,
                     "Check the --scitt-keys path. See docs/trust-material.md to obtain a key set.",
                 ),
+                gaps(args, None, None),
             ),
         };
     let policy_bytes = match read(&args.policy) {
@@ -144,6 +146,7 @@ fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
                     e,
                     "Check the --policy path.",
                 ),
+                gaps(args, None, None),
             )
         }
     };
@@ -160,6 +163,7 @@ fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
                     e,
                     "Fix the policy document. A policy this tool cannot parse is a policy nobody is enforcing.",
                 ),
+                gaps(args, None, None),
             )
         }
     };
@@ -178,6 +182,7 @@ fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
                     e.to_string(),
                     "Re-fetch the key set with tools/scitt-keys.py fetch.",
                 ),
+                gaps(args, None, None),
             )
         }
     };
@@ -186,7 +191,7 @@ fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
         Ok(f) => f,
         Err(e) => {
             let (verdict, diagnostic) = classify_core_error(&e);
-            return Assessment::incomplete(verdict, trust, diagnostic);
+            return Assessment::incomplete(verdict, trust, diagnostic, gaps(args, None, None));
         }
     };
 
@@ -202,6 +207,7 @@ fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
                     e.clone(),
                     "Check the --artifact path.",
                 ),
+                gaps(args, Some(&facts), None),
             );
             // The statement checks did run, so report them rather than
             // pretending the whole run established nothing.
@@ -215,7 +221,6 @@ fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
                 bound: None,
                 detail: format!("artifact binding was requested but could not be checked: {e}"),
             };
-            a.not_checked = gaps(args, Some(&facts), None);
             a.facts = Some(facts);
             return a;
         }

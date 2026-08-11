@@ -167,16 +167,23 @@ impl Policy {
             .min();
 
         if let Some(accepted) = &a.issuer {
+            // Only fully verified receipts, for the same reason `registered_at`
+            // filters above: receipts travel in the statement's *unprotected*
+            // bucket, so anyone handling the file can append one. An appended
+            // receipt's self-declared `iss` is an attacker-chosen string, and
+            // accepting it here would let a statement registered on a ledger
+            // this policy rejects satisfy the issuer rule anyway.
             let issuers: Vec<String> = facts
                 .receipts
                 .iter()
+                .filter(|r| r.fully_verified())
                 .filter_map(|r| r.issuer.clone())
                 .collect();
             results.push(if issuers.is_empty() {
                 result(
                     "issuer",
                     Outcome::CannotEvaluate,
-                    "no receipt declares an issuer",
+                    "no fully verified receipt declares an issuer",
                 )
             } else if issuers.iter().any(|i| accepted.contains(i)) {
                 result(
@@ -369,6 +376,8 @@ fn compare_time(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use scitt_receipt::keys::KeyLookup;
+    use scitt_receipt::receipt::ReceiptFacts;
 
     #[test]
     fn unknown_assertions_are_refused() {
@@ -403,5 +412,66 @@ mod tests {
         assert!(!decision.satisfied());
         assert!(!decision.failed());
         assert!(decision.unevaluable());
+    }
+
+    fn policy_accepting(issuer: &str) -> Policy {
+        let json = format!(
+            r#"{{"policyId":"p","policyVersion":"1","assertions":{{"issuer":["{issuer}"]}}}}"#
+        );
+        Policy::from_json(json.as_bytes()).unwrap()
+    }
+
+    fn verified_receipt(issuer: &str) -> ReceiptFacts {
+        ReceiptFacts {
+            issuer: Some(issuer.into()),
+            root_signature_valid: Some(true),
+            bound_to_statement: Some(true),
+            key_lookup: Some(KeyLookup::Found),
+            ..Default::default()
+        }
+    }
+
+    fn unverified_receipt(issuer: &str) -> ReceiptFacts {
+        ReceiptFacts {
+            issuer: Some(issuer.into()),
+            ..Default::default()
+        }
+    }
+
+    fn facts_with(receipts: Vec<ReceiptFacts>) -> StatementFacts {
+        StatementFacts {
+            receipts,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn an_unverified_receipt_cannot_satisfy_the_issuer_assertion() {
+        // Receipts ride in the statement's unprotected bucket, so anyone can
+        // append one that declares whatever issuer the policy wants to see.
+        let facts = facts_with(vec![unverified_receipt("trusted.example")]);
+        let decision = policy_accepting("trusted.example").evaluate(&facts, 0);
+        assert!(!decision.satisfied(), "{decision:?}");
+        assert!(decision.unevaluable(), "{decision:?}");
+    }
+
+    #[test]
+    fn a_forged_receipt_cannot_launder_a_genuine_one_from_another_ledger() {
+        // A genuine receipt from a ledger the policy rejects, plus a forged
+        // receipt naming the ledger it accepts, must not add up to a pass.
+        let facts = facts_with(vec![
+            verified_receipt("other.example"),
+            unverified_receipt("trusted.example"),
+        ]);
+        let decision = policy_accepting("trusted.example").evaluate(&facts, 0);
+        assert!(decision.failed(), "{decision:?}");
+    }
+
+    #[test]
+    fn a_verified_receipt_satisfies_the_issuer_assertion() {
+        let facts = facts_with(vec![verified_receipt("trusted.example")]);
+        assert!(policy_accepting("trusted.example")
+            .evaluate(&facts, 0)
+            .satisfied());
     }
 }

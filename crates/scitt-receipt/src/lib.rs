@@ -54,7 +54,7 @@ pub use receipt::{verify_receipt, ReceiptFacts};
 pub use statement::{sha256_hex, CwtClaims, Sign1};
 
 /// Everything learned about one transparent statement.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct StatementFacts {
     pub alg: Option<i64>,
     pub cwt: CwtClaims,

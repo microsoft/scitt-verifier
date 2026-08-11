@@ -37,7 +37,7 @@ apart has no other way to tell them apart.
 
 | Assertion | Type | Meaning |
 |---|---|---|
-| `issuer` | `string[]` | The receipt's issuer must be in this list |
+| `issuer` | `string[]` | A **fully verified** receipt's issuer must be in this list |
 | `signerSubjectContains` | `string` | Substring of the signing certificate's subject |
 | `signerIssuerContains` | `string` | Substring of the signing certificate's issuer |
 | `minReceipts` | `number` | How many receipts must *fully* verify |
@@ -49,6 +49,18 @@ apart has no other way to tell them apart.
 
 An empty `assertions` object is rejected: a policy that asserts nothing accepts
 everything, which is almost never what someone meant to write.
+
+### These assertions are not equally strong
+
+`issuer`, `minReceipts`, `registeredAfter`, `registeredBefore`, `maxAgeDays` and
+`minSvn` read facts that a transparency service signed, or that this tool
+verified. They are load-bearing.
+
+`signerSubjectContains` and `signerIssuerContains` read the leaf certificate
+embedded in the statement, which is **not validated to a trusted root** — see
+[limitations](limitations.md#certificate-chain-validation-to-a-trusted-root).
+Anyone who can sign a statement chooses those strings. Use them to catch an
+honest mistake, never as a defence against forgery.
 
 ## Three outcomes, not two
 
