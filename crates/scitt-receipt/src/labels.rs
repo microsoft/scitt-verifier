@@ -11,8 +11,9 @@ pub const X5CHAIN: i64 = 33;
 pub const RECEIPTS: i64 = 394;
 /// Verifiable data structure identifier.
 pub const VERIFIABLE_DATA_STRUCTURE: i64 = 395;
-/// Proofs bucket, in the receipt's unprotected headers.
-pub const VDS_PROOFS: i64 = 396;
+/// Verifiable data proofs bucket (RFC 9942 calls this `vdp`), in the receipt's
+/// unprotected headers.
+pub const VDP: i64 = 396;
 
 /// `CCF_LEDGER_SHA256` — the only verifiable data structure this release verifies.
 pub const CCF_LEDGER_SHA256: i64 = 2;

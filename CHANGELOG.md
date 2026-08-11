@@ -6,6 +6,22 @@ Breaking changes to the output contract. All of them landed together and before
 v1.0 deliberately: the schema is easier to change now than after it has
 consumers. See [docs/output.md](docs/output.md) for the full contract.
 
+### Documented which standards are actually implemented
+
+A new **Standards** section in the README states plainly that the tool
+implements the RFC 9943 architecture and parses receipts per RFC 9942, but that
+the only verifiable data structure it verifies is `CCF_LEDGER_SHA256` from
+`draft-ietf-scitt-receipts-ccf-profile-04` — an Internet-Draft whose codepoint
+is requested rather than assigned. `RFC9162_SHA256`, the only VDS RFC 9942
+itself registers, is *not* implemented and is refused.
+
+This is a documentation change only; no behaviour moved. It is called out
+because the omission is the kind a reader assumes away: "RFC 9942 receipts"
+reads as though the RFC's own proof format works, and it does not.
+
+`labels::VDS_PROOFS` is renamed `labels::VDP` to match RFC 9942's name for
+header 396.
+
 ### The verdict now says whether the artifact was checked
 
 `verified` is replaced by two verdicts, both exit 0:

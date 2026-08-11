@@ -51,6 +51,12 @@ when OCSP is unreachable is not a gate anyone keeps enabled.
 Any other value in header 395 is refused (exit 3), never interpreted as a
 format we do understand.
 
+This includes `RFC9162_SHA256` (vds `1`), which is the only verifiable data
+structure RFC 9942 itself registers. Its inclusion proofs use RFC 9162's
+domain-separated Merkle construction — a different shape from CCF's — so
+supporting it is a second verifier, not a parameter. Until then, receipts from
+Sigstore-style logs cannot be verified here.
+
 ### Signed trust material
 
 `--scitt-keys` takes a raw COSE_KeySet. There is no cryptographic binding

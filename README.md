@@ -133,6 +133,35 @@ folded into "compromised", because the response to each is different.
 result that quietly skipped the artifact binding is more dangerous than a red
 one, because nobody goes looking for the caveat.
 
+## Standards
+
+The tool implements the SCITT architecture defined in
+[RFC 9943](https://www.rfc-editor.org/rfc/rfc9943.html). Its vocabulary is the
+RFC's — Signed Statement, Receipt, Transparent Statement — and so is the output
+document's structure. The separation this tool insists on between verifying a
+receipt and applying a relying-party policy is the RFC's separation, not one we
+invented.
+
+Receipts are parsed as [RFC 9942](https://www.rfc-editor.org/rfc/rfc9942.html)
+COSE receipts: header 394 carries receipts in the Signed Statement's
+*unprotected* bucket, 395 the verifiable data structure, 396 the verifiable data
+proofs, and −1 within that bucket the inclusion proofs.
+
+Where the header says which Merkle construction to verify, one algorithm is
+supported:
+
+| Verifiable data structure | Defined by | Supported |
+|---|---|---|
+| `CCF_LEDGER_SHA256` (2) | [draft-ietf-scitt-receipts-ccf-profile-04](https://datatracker.ietf.org/doc/draft-ietf-scitt-receipts-ccf-profile/) — registration requested, not yet assigned | Yes |
+| `RFC9162_SHA256` (1) | RFC 9942 §5.1 | **No** — refused with `UnsupportedVds` |
+
+So: the envelope is RFC 9942, but the only proof format verified today is the
+CCF profile's, which is still an Internet-Draft. If you hold receipts from a
+Sigstore-style RFC 9162 log, this build cannot verify them — it rejects the
+receipt rather than misreading one proof format as another. That gap is
+[tracked](docs/limitations.md#verifiable-data-structures-other-than-ccf_ledger_sha256)
+and is the next substantial piece of verification work.
+
 ## Exit codes and verdicts
 
 | Code | Verdict | Meaning | What to do |

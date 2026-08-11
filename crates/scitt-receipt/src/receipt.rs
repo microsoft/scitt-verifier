@@ -120,7 +120,7 @@ pub fn verify_receipt(
         }
     }
 
-    let proofs = cbor::opt_int_key(&receipt.unprotected, labels::VDS_PROOFS)
+    let proofs = cbor::opt_int_key(&receipt.unprotected, labels::VDP)
         .ok_or_else(|| Error::Structure("receipt carries no proofs bucket (header 396)".into()))?;
     let inclusion = cbor::opt_int_key(proofs, labels::PROOF_INCLUSION).ok_or_else(|| {
         Error::Structure("proofs bucket carries no inclusion proof (key -1)".into())
