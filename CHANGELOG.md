@@ -10,6 +10,42 @@ consumers. See [docs/output.md](docs/output.md) for the full contract.
 `verdict`, and expect `artifact-transparent` or `statement-transparent` where
 0.1.0 emitted `verified`. The GitHub Action's `evidence` input is now `result`.
 
+### An appended receipt can no longer deny the gate
+
+`requireKidBoundToKey` considered every receipt on the statement, including
+ones whose signing key never resolved. Receipts arrive in the Signed
+Statement's *unprotected* bucket, which no signature covers, so appending one
+takes no key and breaks nothing — and a single appended receipt was enough to
+force `cannotEvaluate` on a statement that was otherwise fine. It now considers
+only fully verified receipts.
+
+The rule is not weakened by this. `fully_verified()` requires the receipt's
+signing key to have been *found*, not that its `kid` was derived from it, so a
+genuine receipt whose kid is not its key's digest still fails as before.
+
+`StatementFacts::verified_receipts()` now exists so that this filtering is a
+method rather than a convention repeated at each call site, which is how the
+`issuer` assertion came to be missing it too. `inspect` and the record's receipt
+listing still enumerate every receipt, because "what is present" is the question
+they answer.
+
+### `artifactBinding` distinguishes "could not compare" from "did not match"
+
+`bound` was a two-state boolean carrying three meanings. A statement with a
+detached payload reported `false` — the same value as an artifact that genuinely
+differed — so a binding mode that simply cannot apply came back as exit 1, *do
+not deploy this artifact*. An unreadable artifact reported `null`, the same
+value as never having asked.
+
+- `bound` is `true` or `false` only when a comparison actually happened
+- `status` now derives from the outcome rather than from whether `--artifact`
+  was passed, so `not-evaluated` marks a binding that was requested and could
+  not be made
+- a requested binding that could not be made yields `cannot-evaluate` (exit 3)
+  instead of falling through to `statement-transparent`
+
+See [docs/output.md](docs/output.md) for the full table.
+
 ### Documented which standards are actually implemented
 
 A new **Standards** section in the README states plainly that the tool
@@ -162,6 +198,16 @@ documented contract.
 
 ### Fixed
 
+- The text report gated its diagnostics list on there being more than one,
+  intending not to repeat the primary diagnostic. It instead hid a lone
+  diagnostic whenever that diagnostic was not the primary one. It now prints
+  whatever the primary did not already say.
+- The README claimed every design commitment had a test that fails if it
+  erodes. Four did; "offline by default" and "no prerequisites" are
+  whole-program properties no example run establishes. Offline is now genuinely
+  enforced — `tests/design_commitments.rs` fails if a networking crate enters
+  the dependency graph or any source file names a socket API. The README says
+  which commitment is enforced by the release pipeline instead.
 - The `issuer` policy assertion accepted any receipt's self-declared `iss`,
   including receipts whose signature never verified or whose key was never
   found. Receipts travel in the statement's *unprotected* bucket, so anyone

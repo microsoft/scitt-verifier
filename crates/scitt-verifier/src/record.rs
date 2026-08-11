@@ -47,7 +47,7 @@ use scitt_receipt::{KeyLookup, ReceiptFacts};
 use serde_json::{json, Map, Value};
 
 use crate::cli::{BindingMode, VerifyArgs};
-use crate::outcome::{Assessment, Checks, Diagnostic, Gap, Trust};
+use crate::outcome::{Assessment, Binding, Checks, Diagnostic, Gap, Trust};
 
 /// The full record: observations, rules, and decision.
 ///
@@ -303,10 +303,14 @@ fn binding_json(args: &VerifyArgs, assessment: &Assessment) -> Value {
         BindingMode::PayloadBytes => "payload-bytes",
     };
 
-    let status = if args.artifact.is_some() {
-        EVALUATED
-    } else {
-        NOT_REQUESTED
+    // Derived from the outcome, not from whether `--artifact` was passed.
+    // Keying it off the flag reported `evaluated` for a run that was asked to
+    // compare and could not — an unreadable artifact, or a detached payload —
+    // so the block claimed an evaluation it did not have.
+    let status = match assessment.binding.outcome {
+        Binding::NotRequested => NOT_REQUESTED,
+        Binding::Bound | Binding::Mismatch => EVALUATED,
+        Binding::CannotCompare => NOT_EVALUATED,
     };
 
     json!({

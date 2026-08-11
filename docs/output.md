@@ -243,6 +243,24 @@ later by an auditor holding RFC 9943, bare `policy` would read as the
 transparency service's Registration Policy, which is a different document
 enforced by a different party at a different time.
 
+### `artifactBinding.bound`
+
+Three-valued, and the third value matters:
+
+| `bound` | `status` | Meaning |
+|---|---|---|
+| `true` | `evaluated` | The artifact is the one the statement describes |
+| `false` | `evaluated` | The artifact is **not** the one the statement describes |
+| `null` | `not-requested` | Nobody asked — no `--artifact` was supplied |
+| `null` | `not-evaluated` | A binding was requested and could not be made |
+
+`null` never means "failed". Read `status`, not the truthiness of `bound`, to
+tell "we did not ask" from "we asked and could not find out" — the artifact
+being unreadable, or the statement's payload being detached, which
+`payload-bytes` has nothing to compare against. Only `false` accuses anyone,
+and a requested binding that could not be made yields `cannot-evaluate` (exit
+3) rather than a pass.
+
 ### Provenance
 
 Every observation block carries `provenance.coveredBy`, one of:
