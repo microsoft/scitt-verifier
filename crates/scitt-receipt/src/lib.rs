@@ -66,8 +66,31 @@ pub struct StatementFacts {
     pub certificate_chain_len: usize,
     pub leaf_subject: Option<String>,
     pub leaf_issuer: Option<String>,
+    /// Every receipt found in the statement, verified or not.
+    ///
+    /// Receipts arrive in the statement's *unprotected* header bucket, which
+    /// no signature covers, so anyone who handles the file can append one.
+    /// Reach for [`Self::verified_receipts`] instead unless you specifically
+    /// mean "everything present", as `inspect` and the record's receipt
+    /// listing do.
     pub receipts: Vec<ReceiptFacts>,
     pub problems: Vec<String>,
+}
+
+impl StatementFacts {
+    /// Only the receipts that actually proved something.
+    ///
+    /// Any decision that grants trust must read this rather than `receipts`.
+    /// A receipt that did not verify carries no more authority than a text
+    /// file an attacker attached, because that is exactly what it might be.
+    pub fn verified_receipts(&self) -> impl Iterator<Item = &ReceiptFacts> {
+        self.receipts.iter().filter(|r| r.fully_verified())
+    }
+
+    /// Whether anything in this statement establishes transparency at all.
+    pub fn any_receipt_verified(&self) -> bool {
+        self.verified_receipts().next().is_some()
+    }
 }
 
 /// Verify a transparent statement end to end, minus policy.

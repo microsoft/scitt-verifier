@@ -12,7 +12,8 @@ mod report;
 
 use cli::{BindingMode, Command, Format, VerifyArgs};
 use outcome::{
-    Assessment, BindingResult, Category, CheckState, Checks, Diagnostic, Gap, Severity, Trust,
+    Assessment, Binding, BindingResult, Category, CheckState, Checks, Diagnostic, Gap, Severity,
+    Trust,
     Verdict,
 };
 use scitt_policy::{Outcome as AssertionOutcome, Policy, PolicyDecision};
@@ -218,7 +219,7 @@ fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
             // latter would claim nobody asked.
             a.checks.artifact_binding = CheckState::CannotEvaluate;
             a.binding = BindingResult {
-                bound: None,
+                outcome: Binding::CannotCompare,
                 detail: format!("artifact binding was requested but could not be checked: {e}"),
             };
             a.facts = Some(facts);
@@ -339,7 +340,7 @@ fn receipt_state(facts: &StatementFacts) -> CheckState {
     {
         return CheckState::Fail;
     }
-    if facts.receipts.iter().any(|r| r.fully_verified()) {
+    if facts.any_receipt_verified() {
         return CheckState::Pass;
     }
     // No receipts at all, or receipts we could not resolve a key for. Either
@@ -371,7 +372,7 @@ fn decide(
     decision: &PolicyDecision,
     mode: BindingMode,
 ) -> Verdict {
-    if facts.signature_valid == Some(false) || binding.bound == Some(false) {
+    if facts.signature_valid == Some(false) || binding.outcome == Binding::Mismatch {
         return Verdict::Untrusted;
     }
     if facts
@@ -384,7 +385,7 @@ fn decide(
 
     // No verified receipt means the statement is, at best, merely signed.
     // That can never be a pass, whatever the policy says.
-    if !facts.receipts.iter().any(|r| r.fully_verified()) {
+    if !facts.any_receipt_verified() {
         return Verdict::CannotEvaluate;
     }
     if facts.signature_valid.is_none() {
@@ -404,8 +405,13 @@ fn decide(
     // Everything held. Which success this is depends entirely on whether the
     // operator asked us to look at an artifact — a question the tool must
     // never answer on their behalf.
-    match (mode, binding.bound) {
-        (BindingMode::PayloadBytes, Some(true)) => Verdict::ArtifactTransparent,
+    match (mode, binding.outcome) {
+        (BindingMode::PayloadBytes, Binding::Bound) => Verdict::ArtifactTransparent,
+        // A requested comparison that could not be made is not a success of
+        // either kind. Falling through to `statement-transparent` here would
+        // quietly downgrade the operator's request into a claim about the
+        // statement alone.
+        (BindingMode::PayloadBytes, Binding::CannotCompare) => Verdict::CannotEvaluate,
         _ => Verdict::StatementTransparent,
     }
 }
@@ -486,7 +492,7 @@ fn diagnose(
             "the statement carries no receipt, so it is signed but not transparent",
             "Register the statement with a transparency service before deploying it.",
         ));
-    } else if !facts.receipts.iter().any(|r| r.fully_verified()) {
+    } else if !facts.any_receipt_verified() {
         out.push(Diagnostic::error(
             "NoVerifiedReceipt",
             Category::Trust,
@@ -495,13 +501,21 @@ fn diagnose(
         ));
     }
 
-    if binding.bound == Some(false) {
-        out.push(Diagnostic::error(
+    match binding.outcome {
+        Binding::Mismatch => out.push(Diagnostic::error(
             "ArtifactBindingMismatch",
             Category::Binding,
             binding.detail.clone(),
             "The registered statement does not describe this artifact. Do not deploy it.",
-        ));
+        )),
+        Binding::CannotCompare => out.push(Diagnostic::error(
+            "ArtifactBindingUnevaluable",
+            Category::Binding,
+            binding.detail.clone(),
+            "This run does not establish which artifact the statement describes. \
+             A detached statement needs a binding mode that compares digests.",
+        )),
+        Binding::Bound | Binding::NotRequested => {}
     }
 
     for r in &decision.results {
@@ -752,15 +766,25 @@ fn check_binding(args: &VerifyArgs, statement_bytes: &[u8]) -> Result<BindingRes
         BindingMode::None => Ok(BindingResult::not_requested()),
         BindingMode::PayloadBytes => {
             let Some(payload) = statement.payload.as_deref() else {
+                // A detached payload is not a mismatch. There is nothing to
+                // compare, so `payload-bytes` cannot answer the question —
+                // reporting Some(false) here accused the operator of shipping
+                // a tampered artifact when the real problem is that this
+                // binding mode does not apply to a detached statement.
                 return Ok(BindingResult {
-                    bound: Some(false),
-                    detail: "the statement payload is detached, so it cannot equal the artifact"
+                    outcome: Binding::CannotCompare,
+                    detail: "the statement payload is detached, so binding-mode payload-bytes \
+                             has nothing to compare the artifact against"
                         .into(),
                 });
             };
             let bound = payload == artifact.as_slice();
             Ok(BindingResult {
-                bound: Some(bound),
+                outcome: if bound {
+                    Binding::Bound
+                } else {
+                    Binding::Mismatch
+                },
                 detail: if bound {
                     format!(
                         "the statement payload is byte-identical to {} ({} bytes)",

@@ -341,26 +341,54 @@ impl Assessment {
 }
 
 /// Outcome of comparing the statement to the artifact on disk.
+///
+/// Four states, not three, because "nobody asked" and "we were asked and could
+/// not find out" are different facts about a deployment, and a boolean with a
+/// `None` for both of them cannot report the difference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Binding {
+    /// No artifact was supplied, or `--binding-mode none` was chosen.
+    NotRequested,
+    /// The artifact is the one the statement describes.
+    Bound,
+    /// The artifact is *not* the one the statement describes.
+    Mismatch,
+    /// A binding was requested, but the comparison could not be made — an
+    /// unreadable artifact, or a statement whose payload is detached. This is
+    /// not evidence of tampering, and must not be reported as though it were.
+    CannotCompare,
+}
+
 #[derive(Debug, Clone)]
 pub struct BindingResult {
-    /// `None` means no binding was requested — not that it failed.
-    pub bound: Option<bool>,
+    pub outcome: Binding,
     pub detail: String,
 }
 
 impl BindingResult {
     pub fn not_requested() -> Self {
         Self {
-            bound: None,
+            outcome: Binding::NotRequested,
             detail: "no artifact binding was requested".into(),
         }
     }
 
     pub fn state(&self) -> CheckState {
-        match self.bound {
-            Some(true) => CheckState::Pass,
-            Some(false) => CheckState::Fail,
-            None => CheckState::NotChecked,
+        match self.outcome {
+            Binding::Bound => CheckState::Pass,
+            Binding::Mismatch => CheckState::Fail,
+            Binding::CannotCompare => CheckState::CannotEvaluate,
+            Binding::NotRequested => CheckState::NotChecked,
+        }
+    }
+
+    /// What the record reports. `null` where no answer exists, so a consumer
+    /// cannot read a missing comparison as a failed one.
+    pub fn as_json_bool(&self) -> Option<bool> {
+        match self.outcome {
+            Binding::Bound => Some(true),
+            Binding::Mismatch => Some(false),
+            Binding::NotRequested | Binding::CannotCompare => None,
         }
     }
 }
@@ -427,9 +455,41 @@ mod tests {
     }
 
     #[test]
-    fn an_unscoped_key_set_names_that_as_a_limitation() {
-        let scoped = Trust::unsigned_key_set(Some("x".into()));
+    fn an_unscoped_key_set_names_that_as_a_limitation() {        let scoped = Trust::unsigned_key_set(Some("x".into()));
         let open = Trust::unsigned_key_set(None);
         assert!(open.limitations.len() > scoped.limitations.len());
+    }
+
+    #[test]
+    fn a_comparison_that_could_not_be_made_is_not_a_mismatch() {
+        // The distinction this enum exists for. "We could not compare" must
+        // not reach a gate looking like "the artifact is wrong", because the
+        // second sentence accuses someone and the first does not.
+        let cannot = BindingResult {
+            outcome: Binding::CannotCompare,
+            detail: "detached".into(),
+        };
+        let mismatch = BindingResult {
+            outcome: Binding::Mismatch,
+            detail: "differs".into(),
+        };
+        assert_eq!(cannot.state(), CheckState::CannotEvaluate);
+        assert_eq!(mismatch.state(), CheckState::Fail);
+        assert_ne!(cannot.state(), mismatch.state());
+
+        // In the record, only a real mismatch is `false`. An absent answer is
+        // null, so a consumer cannot read it as a failed comparison.
+        assert_eq!(cannot.as_json_bool(), None);
+        assert_eq!(mismatch.as_json_bool(), Some(false));
+    }
+
+    #[test]
+    fn not_requested_and_cannot_compare_are_different_facts() {
+        let cannot = BindingResult {
+            outcome: Binding::CannotCompare,
+            detail: "unreadable".into(),
+        };
+        assert_eq!(BindingResult::not_requested().state(), CheckState::NotChecked);
+        assert_eq!(cannot.state(), CheckState::CannotEvaluate);
     }
 }

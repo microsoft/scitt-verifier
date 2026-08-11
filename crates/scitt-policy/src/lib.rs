@@ -160,9 +160,7 @@ impl Policy {
         // Registration time is taken from the receipt, not the statement's own
         // `iat`. The issuer controls the latter; the ledger controls the former.
         let registered_at = facts
-            .receipts
-            .iter()
-            .filter(|r| r.fully_verified())
+            .verified_receipts()
             .filter_map(|r| r.registered_at)
             .min();
 
@@ -174,9 +172,7 @@ impl Policy {
             // accepting it here would let a statement registered on a ledger
             // this policy rejects satisfy the issuer rule anyway.
             let issuers: Vec<String> = facts
-                .receipts
-                .iter()
-                .filter(|r| r.fully_verified())
+                .verified_receipts()
                 .filter_map(|r| r.issuer.clone())
                 .collect();
             results.push(if issuers.is_empty() {
@@ -241,7 +237,7 @@ impl Policy {
         }
 
         if let Some(minimum) = a.min_receipts {
-            let verified = facts.receipts.iter().filter(|r| r.fully_verified()).count();
+            let verified = facts.verified_receipts().count();
             results.push(if verified >= minimum {
                 result(
                     "minReceipts",
@@ -306,13 +302,30 @@ impl Policy {
         }
 
         if a.require_kid_bound_to_key == Some(true) {
+            // Only fully verified receipts. Reading every receipt here made
+            // this assertion an attacker-triggerable denial of gate: appending
+            // one junk receipt, whose key never resolves, left a `None` in the
+            // list and forced `cannotEvaluate` on a statement that was
+            // otherwise fine. Nobody needs a signing key to append a receipt.
+            //
+            // Filtering does not weaken the assertion. `fully_verified()`
+            // requires the key to have been *found*, not that its kid was
+            // derived from it, so the case this rule exists to catch — a
+            // genuine, verifying receipt whose kid is not its key's digest —
+            // still reaches the check below.
             let flags: Vec<Option<bool>> =
-                facts.receipts.iter().map(|r| r.kid_bound_to_key).collect();
-            results.push(if flags.is_empty() || flags.iter().any(Option::is_none) {
+                facts.verified_receipts().map(|r| r.kid_bound_to_key).collect();
+            results.push(if flags.is_empty() {
                 result(
                     "requireKidBoundToKey",
                     Outcome::CannotEvaluate,
-                    "at least one receipt's signing key was never resolved",
+                    "no receipt fully verified, so no signing key was resolved to compare",
+                )
+            } else if flags.iter().any(Option::is_none) {
+                result(
+                    "requireKidBoundToKey",
+                    Outcome::CannotEvaluate,
+                    "a verified receipt's kid could not be compared to its signing key",
                 )
             } else if flags.iter().all(|f| *f == Some(true)) {
                 result(
@@ -414,8 +427,7 @@ mod tests {
         assert!(decision.unevaluable());
     }
 
-    fn policy_accepting(issuer: &str) -> Policy {
-        let json = format!(
+    fn policy_accepting(issuer: &str) -> Policy {        let json = format!(
             r#"{{"policyId":"p","policyVersion":"1","assertions":{{"issuer":["{issuer}"]}}}}"#
         );
         Policy::from_json(json.as_bytes()).unwrap()
@@ -473,5 +485,35 @@ mod tests {
         assert!(policy_accepting("trusted.example")
             .evaluate(&facts, 0)
             .satisfied());
+    }
+
+    fn kid_policy() -> Policy {
+        let json = br#"{"policyId":"p","policyVersion":"1","assertions":{"requireKidBoundToKey":true}}"#;
+        Policy::from_json(json).unwrap()
+    }
+
+    #[test]
+    fn an_appended_junk_receipt_cannot_deny_the_gate() {
+        // Anyone handling the file can append a receipt whose key never
+        // resolves. If that alone forced cannotEvaluate, appending junk would
+        // be enough to stop a good build from shipping.
+        let mut good = verified_receipt("trusted.example");
+        good.kid_bound_to_key = Some(true);
+        let facts = facts_with(vec![good, unverified_receipt("whatever")]);
+        assert!(kid_policy().evaluate(&facts, 0).satisfied());
+    }
+
+    #[test]
+    fn a_verified_receipt_with_an_unbound_kid_still_fails() {
+        // The filter above must not swallow the case this assertion exists for.
+        let mut bad = verified_receipt("trusted.example");
+        bad.kid_bound_to_key = Some(false);
+        assert!(kid_policy().evaluate(&facts_with(vec![bad]), 0).failed());
+    }
+
+    #[test]
+    fn nothing_verified_means_the_kid_rule_cannot_be_evaluated() {
+        let facts = facts_with(vec![unverified_receipt("trusted.example")]);
+        assert!(kid_policy().evaluate(&facts, 0).unevaluable());
     }
 }

@@ -319,7 +319,7 @@ fn binding_json(args: &VerifyArgs, assessment: &Assessment) -> Value {
         ),
         "mode": mode,
         "declared": args.artifact.is_some(),
-        "bound": assessment.binding.bound,
+        "bound": assessment.binding.as_json_bool(),
         "detail": assessment.binding.detail,
     })
 }

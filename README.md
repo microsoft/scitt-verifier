@@ -103,7 +103,10 @@ my rules?"** — never "is this thing safe?"
 
 ## Design commitments
 
-These are constraints, not aspirations. Each has a test that fails if it erodes.
+These are constraints, not aspirations. Six of the seven below have a test that
+fails if they erode — mostly in
+[`crates/scitt-verifier/tests/`](crates/scitt-verifier/tests/). The exception is
+noted where it appears.
 
 **Offline by default.** Verification never opens a socket. The trust material is
 an input you commit to your repository. A gate that phones home is a gate that
@@ -112,6 +115,9 @@ network.
 
 **No prerequisites.** A single static binary. No runtime to install on the build
 agent, and nothing that changes behaviour when the agent image is updated.
+*This one is enforced by the release pipeline rather than by a test:* the
+published artifacts are `musl` and MSVC static builds, so a dynamic dependency
+shows up as a broken release, not a red suite.
 
 **Binding is declared, never inferred.** The tool will not guess which artifact a
 statement describes from a filename or a content type. You say `--binding-mode`,

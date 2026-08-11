@@ -101,10 +101,19 @@ fn detail(a: &Assessment) {
         policy_detail(decision);
     }
 
-    if a.diagnostics.len() > 1 {
+    // Everything the primary diagnostic did not already say. Gating on
+    // `len() > 1` hid a lone diagnostic whenever it was not the primary one,
+    // which is precisely when a reader most needs to see it.
+    let primary = a.primary.as_ref();
+    let rest: Vec<_> = a
+        .diagnostics
+        .iter()
+        .filter(|d| !primary.is_some_and(|p| p.code == d.code && p.message == d.message))
+        .collect();
+    if !rest.is_empty() {
         println!();
         println!("  Diagnostics");
-        for d in &a.diagnostics {
+        for d in rest {
             println!("    [{}] {}", d.code, d.message);
         }
     }
