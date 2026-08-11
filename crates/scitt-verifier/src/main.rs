@@ -13,8 +13,7 @@ mod report;
 use cli::{BindingMode, Command, Format, VerifyArgs};
 use outcome::{
     Assessment, Binding, BindingResult, Category, CheckState, Checks, Diagnostic, Gap, Severity,
-    Trust,
-    Verdict,
+    Trust, Verdict,
 };
 use scitt_policy::{Outcome as AssertionOutcome, Policy, PolicyDecision};
 use scitt_receipt::{verify_statement, LedgerKeySet, Sign1, StatementFacts};

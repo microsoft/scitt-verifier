@@ -313,8 +313,10 @@ impl Policy {
             // derived from it, so the case this rule exists to catch — a
             // genuine, verifying receipt whose kid is not its key's digest —
             // still reaches the check below.
-            let flags: Vec<Option<bool>> =
-                facts.verified_receipts().map(|r| r.kid_bound_to_key).collect();
+            let flags: Vec<Option<bool>> = facts
+                .verified_receipts()
+                .map(|r| r.kid_bound_to_key)
+                .collect();
             results.push(if flags.is_empty() {
                 result(
                     "requireKidBoundToKey",
@@ -427,7 +429,8 @@ mod tests {
         assert!(decision.unevaluable());
     }
 
-    fn policy_accepting(issuer: &str) -> Policy {        let json = format!(
+    fn policy_accepting(issuer: &str) -> Policy {
+        let json = format!(
             r#"{{"policyId":"p","policyVersion":"1","assertions":{{"issuer":["{issuer}"]}}}}"#
         );
         Policy::from_json(json.as_bytes()).unwrap()
@@ -488,7 +491,8 @@ mod tests {
     }
 
     fn kid_policy() -> Policy {
-        let json = br#"{"policyId":"p","policyVersion":"1","assertions":{"requireKidBoundToKey":true}}"#;
+        let json =
+            br#"{"policyId":"p","policyVersion":"1","assertions":{"requireKidBoundToKey":true}}"#;
         Policy::from_json(json).unwrap()
     }
 

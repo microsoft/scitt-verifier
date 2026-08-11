@@ -455,7 +455,8 @@ mod tests {
     }
 
     #[test]
-    fn an_unscoped_key_set_names_that_as_a_limitation() {        let scoped = Trust::unsigned_key_set(Some("x".into()));
+    fn an_unscoped_key_set_names_that_as_a_limitation() {
+        let scoped = Trust::unsigned_key_set(Some("x".into()));
         let open = Trust::unsigned_key_set(None);
         assert!(open.limitations.len() > scoped.limitations.len());
     }
@@ -489,7 +490,10 @@ mod tests {
             outcome: Binding::CannotCompare,
             detail: "unreadable".into(),
         };
-        assert_eq!(BindingResult::not_requested().state(), CheckState::NotChecked);
+        assert_eq!(
+            BindingResult::not_requested().state(),
+            CheckState::NotChecked
+        );
         assert_eq!(cannot.state(), CheckState::CannotEvaluate);
     }
 }
