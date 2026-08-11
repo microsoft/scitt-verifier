@@ -76,7 +76,7 @@ The `details` bag is gone. The document now separates three things it used to
 run together:
 
 - **Observations** — `signedStatement`, `receipts`, `artifactBinding`
-- **The rules** — `appraisalPolicy`
+- **The rules** — `relyingPartyPolicy`
 - **The decision** — `appraisal`, holding `verdict`, `exitCode`, `checks`,
   `primaryDiagnostic`, `diagnostics`, and `notChecked`
 
@@ -86,9 +86,11 @@ the spec needs no glossary for ours. `artifactBinding` sits outside that
 vocabulary on purpose: SCITT defines no relationship between a statement and a
 deployed file, so it is our invention, asserted by the operator.
 
-`appraisalPolicy` is named after RATS (RFC 9334 §8.5) rather than `policy`,
-because RFC 9943 §3 already gives "Registration Policy" to the *transparency
-service*. Ours is the relying party's, applied long after registration.
+`relyingPartyPolicy` is named in full rather than `policy`, because RFC 9943 §3
+already gives "Registration Policy" to the *transparency service*. Ours is the
+Relying Party's — RFC 9943's own name for the role this tool performs — applied
+long after registration. The ambiguity is about *whose* rules these are, so the
+name answers that. It is populated from the `--policy` document.
 
 ### Every observation carries provenance
 
@@ -118,7 +120,7 @@ In RATS (RFC 9334 §8.1) "Evidence" is the *input* being appraised, so the old
 name pointed at the wrong end of the pipeline. `--evidence` is refused with an
 explanation rather than silently accepted.
 
-`--facts` writes the observation blocks with `appraisalPolicy` and `appraisal`
+`--facts` writes the observation blocks with `relyingPartyPolicy` and `appraisal`
 removed, for systems that make their own decision. There is deliberately no way
 to obtain it without a full verification: facts about a statement nobody
 authenticated are worth nothing, and a keyless extraction path is how

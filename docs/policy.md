@@ -25,8 +25,11 @@ tool making a trust decision on your behalf.
 }
 ```
 
-`policyId` and `policyVersion` are echoed into the verification record, so a decision
-can be traced back to the exact rules that produced it. Bump the version when
+`policyId` and `policyVersion` are echoed into the verification record — under
+`relyingPartyPolicy`, named in full there because a stored record loses the
+command line that produced it, and RFC 9943 §3 gives bare "Registration Policy"
+to the transparency service. A decision can be traced back to the exact rules
+that produced it. Bump the version when
 you change the assertions; an auditor comparing two verification records months
 apart has no other way to tell them apart.
 

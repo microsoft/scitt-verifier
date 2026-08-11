@@ -214,9 +214,9 @@ Relative to the retired `evidence/v2` draft:
   `artifactBinding` are now top-level sections, named after RFC 9943 §3
 - `verdict`, `exitCode`, `checks`, `primaryDiagnostic`, `diagnostics`, and
   `notChecked` moved under `appraisal`
-- the policy moved to `appraisalPolicy`, named after RATS rather than "policy"
+- the policy moved to `relyingPartyPolicy` — named for *whose* rules they are,
   because RFC 9943 §3 reserves "Registration Policy" for the transparency
-  service's own admission rules
+  service's own admission rules. It is populated from the `--policy` document.
 - every observation block carries a `provenance` object and a `status`
 - `fullyVerified` was removed from receipt entries: it was our judgement
   leaking into the observations. Read `appraisal.checks.receiptInclusion`
@@ -232,8 +232,16 @@ Relative to the retired `evidence/v2` draft:
 | `signedStatement` | Envelope, CWT claims, payload facts | the Issuer |
 | `receipts` | Registration facts, one entry per receipt | the transparency service (presence: **nobody**) |
 | `artifactBinding` | Which file the operator claims this describes | **nobody** |
-| `appraisalPolicy` | The rules that were applied | — |
+| `relyingPartyPolicy` | The rules that were applied — the `--policy` document | — |
 | `appraisal` | The verdict and the reasoning | — |
+
+Two names differ between input and output on purpose. The `--policy` flag stays
+short because it is mandatory and typed on every run, and inside a verifier
+there is no other policy it could mean. The output field is
+`relyingPartyPolicy` because a record outlives its command line: read six months
+later by an auditor holding RFC 9943, bare `policy` would read as the
+transparency service's Registration Policy, which is a different document
+enforced by a different party at a different time.
 
 ### Provenance
 
@@ -266,7 +274,7 @@ reads as a failed check.
 
 ## `--facts`: observations without a verdict
 
-`--facts` writes the same observation blocks with `appraisalPolicy` and
+`--facts` writes the same observation blocks with `relyingPartyPolicy` and
 `appraisal` removed, for systems that make their own decision — Ratify,
 Kyverno, OPA, or a bespoke gate.
 

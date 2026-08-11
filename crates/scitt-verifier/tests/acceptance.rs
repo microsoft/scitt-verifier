@@ -272,10 +272,10 @@ fn the_record_says_what_was_not_checked() {
     // The rules and the decision they produced are separate sections, so a
     // reader can cite the policy that gated a release without reading a verdict
     // into it, and vice versa.
-    assert_eq!(value["appraisalPolicy"]["status"], "evaluated");
-    assert_eq!(value["appraisalPolicy"]["satisfied"], true);
+    assert_eq!(value["relyingPartyPolicy"]["status"], "evaluated");
+    assert_eq!(value["relyingPartyPolicy"]["satisfied"], true);
     assert!(
-        value["appraisalPolicy"]["verdict"].is_null(),
+        value["relyingPartyPolicy"]["verdict"].is_null(),
         "the rules section must not carry the decision"
     );
 
@@ -331,7 +331,7 @@ fn the_record_says_what_was_not_checked() {
         "the facts document must not carry a verdict: {facts_value}"
     );
     assert!(
-        facts_value.get("appraisalPolicy").is_none(),
+        facts_value.get("relyingPartyPolicy").is_none(),
         "the facts document must not carry the policy: {facts_value}"
     );
 
@@ -412,7 +412,7 @@ fn every_failure_path_still_writes_a_record() {
 
         // A block we never reached must say so rather than being null, so that
         // "we did not look" cannot be read as "the input did not carry it".
-        for section in ["signedStatement", "receipts", "appraisalPolicy"] {
+        for section in ["signedStatement", "receipts", "relyingPartyPolicy"] {
             assert!(
                 value[section]["status"].is_string(),
                 "{name}: {section} must declare whether it was evaluated: {value}"

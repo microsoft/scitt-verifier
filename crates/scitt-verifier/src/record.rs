@@ -16,7 +16,7 @@
 //!
 //! * **Observations** — `signedStatement`, `receipts`, `artifactBinding`.
 //!   What the inputs say, and which signature (if any) covers each part.
-//! * **The rules** — `appraisalPolicy`. What the relying party required.
+//! * **The rules** — `relyingPartyPolicy`. What the relying party required.
 //! * **The decision** — `appraisal`. The verdict and the reasoning.
 //!
 //! The observation blocks use the nouns from RFC 9943 §3 — Signed Statement,
@@ -26,10 +26,12 @@
 //! a deployed file, so it is our invention, asserted by the operator and signed
 //! by nobody. The structure should say so.
 //!
-//! `appraisalPolicy` is named after RATS (RFC 9334 §8.5) rather than "policy"
-//! alone, because RFC 9943 §3 already gives "Registration Policy" to the
-//! *transparency service*. Ours is the relying party's, applied long after
-//! registration, and conflating the two would be a meaningful error.
+//! `relyingPartyPolicy` is named in full rather than `policy` alone, because
+//! RFC 9943 §3 already gives "Registration Policy" to the *transparency
+//! service*. Ours is the Relying Party's — RFC 9943's own name for the role
+//! this tool performs — applied long after registration, and conflating the two
+//! would be a meaningful error. The ambiguity is about *whose* rules these are,
+//! so the name answers that rather than describing what they do.
 //!
 //! # Provenance
 //!
@@ -59,7 +61,7 @@ const RESULT_SCHEMA: &str = "scitt-verifier/result/v0";
 
 /// The observations alone, for a system that makes its own decision.
 ///
-/// A projection of the full record with `appraisalPolicy` and `appraisal`
+/// A projection of the full record with `relyingPartyPolicy` and `appraisal`
 /// removed. Deliberately not a separate code path: there is no way to obtain
 /// this document without running a full verification, because facts about a
 /// statement nobody authenticated are worth nothing, and a keyless extraction
@@ -125,7 +127,7 @@ pub fn build(args: &VerifyArgs, assessment: &Assessment, now: i64) -> Value {
     root.insert("signedStatement".into(), statement_json(assessment));
     root.insert("receipts".into(), receipts_json(assessment));
     root.insert("artifactBinding".into(), binding_json(args, assessment));
-    root.insert("appraisalPolicy".into(), policy_json(assessment));
+    root.insert("relyingPartyPolicy".into(), policy_json(assessment));
     root.insert("appraisal".into(), appraisal_json(assessment));
 
     Value::Object(root)
@@ -324,10 +326,10 @@ fn binding_json(args: &VerifyArgs, assessment: &Assessment) -> Value {
 
 /// The rules, separated from the decision they produced.
 ///
-/// Named `appraisalPolicy` after RATS rather than `policy`, because RFC 9943 §3
+/// Named `relyingPartyPolicy` rather than `policy`, because RFC 9943 §3
 /// reserves "Registration Policy" for the transparency service's own admission
 /// rules. Someone reading `policy` in a SCITT context will reasonably assume
-/// the latter.
+/// the latter. Populated from the `--policy` document.
 fn policy_json(assessment: &Assessment) -> Value {
     match &assessment.decision {
         Some(d) => json!({
@@ -443,7 +445,7 @@ mod tests {
             "signedStatement",
             "receipts",
             "artifactBinding",
-            "appraisalPolicy",
+            "relyingPartyPolicy",
             "appraisal",
         ] {
             assert!(
@@ -460,7 +462,7 @@ mod tests {
         let record = build(&args(), &incomplete(), 0);
         assert_eq!(record["signedStatement"]["status"], NOT_EVALUATED);
         assert_eq!(record["receipts"]["status"], NOT_EVALUATED);
-        assert_eq!(record["appraisalPolicy"]["status"], NOT_EVALUATED);
+        assert_eq!(record["relyingPartyPolicy"]["status"], NOT_EVALUATED);
         assert!(!record["signedStatement"].is_null());
     }
 
@@ -497,7 +499,7 @@ mod tests {
     fn the_facts_projection_carries_no_verdict_and_no_policy() {
         let record = facts(&args(), &incomplete(), 0);
         assert!(record.get("appraisal").is_none());
-        assert!(record.get("appraisalPolicy").is_none());
+        assert!(record.get("relyingPartyPolicy").is_none());
         assert!(record.get("signedStatement").is_some());
         assert_eq!(record["schemaVersion"], FACTS_SCHEMA);
     }
