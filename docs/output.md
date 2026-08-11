@@ -73,7 +73,7 @@ Categories:
 `unsupported` is kept apart from `crypto` on purpose. "I do not implement this"
 is never evidence of compromise, and must never be reported as though it were.
 
-## `notChecked`
+## `appraisal.notChecked`
 
 Reported on every run, **including successes**. A green result that quietly
 skipped the artifact binding is more dangerous than a red one, because nobody
@@ -106,27 +106,28 @@ raw COSE key set with no publisher signature. See
 [trust-material.md](trust-material.md) for how to obtain one and what the
 sidecar does and does not prove.
 
-## Evidence is written on every path
+## A record is written on every path
 
-If `--evidence` is supplied, a record is written **whether or not verification
+If `--result` is supplied, a record is written **whether or not verification
 completed**. A run that failed to parse the policy still produces a document
-with `exitCode`, `primaryDiagnostic`, and every check marked `not-checked`.
+with `appraisal.exitCode`, `appraisal.primaryDiagnostic`, every check marked
+`not-checked`, and every observation block marked `status: not-evaluated`.
 
-Both shipped CI examples publish the evidence artifact with `always()`. If an
-early failure wrote no file, the archive would be empty exactly when someone
-needed it — during an incident.
+Both shipped CI examples publish the record with `always()`. If an early
+failure wrote no file, the archive would be empty exactly when someone needed
+it — during an incident.
 
-`every_failure_path_still_writes_evidence` in `tests/acceptance.rs` pins this.
+`every_failure_path_still_writes_a_record` in `tests/acceptance.rs` pins this.
 
-### If the evidence cannot be written
+### If the record cannot be written
 
 A pass whose audit trail vanished is not a pass a gate should act on. If
-`--evidence` is supplied and the write fails, a passing run is downgraded to
-`usage-error` (exit 4) and the emitted document is rebuilt so that its `verdict`
-and `exitCode` agree with the process. A run that was already failing keeps its
-own, more important, verdict.
+`--result` or `--facts` is supplied and the write fails, a passing run is
+downgraded to `usage-error` (exit 4) and the emitted document is built from the
+downgraded assessment so that its `verdict` and `exitCode` agree with the
+process. A run that was already failing keeps its own, more important, verdict.
 
-The most common cause is an evidence path whose parent directory does not exist.
+The most common cause is an output path whose parent directory does not exist.
 
 ## Every failure names its cause
 
@@ -179,30 +180,102 @@ nothing that a diagnostic `code` does not.
 
 ## Determinism
 
-Evidence is deterministic **for fixed inputs and a fixed `--now`**. That is the
-whole guarantee, and it is narrower than it sounds:
+The record is deterministic **for fixed inputs and a fixed `--now`**. That is
+the whole guarantee, and it is narrower than it sounds:
 
 - Without `--now`, `evaluatedAt` varies per run.
 - `inputs` records the paths you passed, so two agents with different workspace
   layouts produce different documents from identical bytes — including the path
-  separator, which differs between Windows and Linux agents.
+  separator, which differs between Windows and Linux agents. That block is
+  marked `"canonical": false` for exactly this reason.
 
-If you are diffing evidence across runs, pass `--now` and compare the `checks`,
-`verdict`, `primaryDiagnostic`, and `details` blocks rather than the whole
-document.
+If you are diffing records across runs, pass `--now` and skip the `inputs`
+block.
 
 ## Schema versioning
 
-`schemaVersion` is currently `scitt-verifier/evidence/v2`.
+`schemaVersion` is currently `scitt-verifier/result/v0`, and the
+observations-only projection written by `--facts` is
+`scitt-verifier/facts/v0`.
 
-v2 changed, relative to v1:
+`v0` is deliberate: this shape is still moving, and it says so. It freezes at
+`v1` when the repository goes public.
 
-- `verdict` gained `artifact-transparent` / `statement-transparent`, replacing
-  `verified`; the remaining values moved to kebab-case
-- `primaryDiagnostic`, `trust`, `checks`, and `diagnostics` are new
-- `notChecked` entries changed from strings to objects
-- `statement`, `receipts`, `artifactBinding`, `policy`, and `problems` moved
-  under `details`
+The `scitt-verifier/evidence/*` name is **retired and will not be reused**.
+`evidence/v1` means what v0.1.0 emitted, permanently — reusing the string for a
+different shape would leave a consumer no way to tell them apart. The name
+changed because in RATS (RFC 9334 §8.1) "Evidence" is the *input* being
+appraised, while this document is the tool's *output*; the old name pointed at
+the wrong end of the pipeline.
 
-A v1 consumer matching `"verdict": "verified"` would have silently stopped
-matching, which is why the version moved with it.
+Relative to the retired `evidence/v2` draft:
+
+- the `details` bag is gone. `signedStatement`, `receipts`, and
+  `artifactBinding` are now top-level sections, named after RFC 9943 §3
+- `verdict`, `exitCode`, `checks`, `primaryDiagnostic`, `diagnostics`, and
+  `notChecked` moved under `appraisal`
+- the policy moved to `appraisalPolicy`, named after RATS rather than "policy"
+  because RFC 9943 §3 reserves "Registration Policy" for the transparency
+  service's own admission rules
+- every observation block carries a `provenance` object and a `status`
+- `fullyVerified` was removed from receipt entries: it was our judgement
+  leaking into the observations. Read `appraisal.checks.receiptInclusion`
+- `--evidence` was renamed `--result`; the old flag is refused with an
+  explanation rather than silently accepted
+
+## Sections
+
+| Section | What it is | Signed by |
+|---|---|---|
+| `inputs` | Local paths. Non-canonical | — |
+| `trust` | How the trust material arrived, and its limits | — |
+| `signedStatement` | Envelope, CWT claims, payload facts | the Issuer |
+| `receipts` | Registration facts, one entry per receipt | the transparency service (presence: **nobody**) |
+| `artifactBinding` | Which file the operator claims this describes | **nobody** |
+| `appraisalPolicy` | The rules that were applied | — |
+| `appraisal` | The verdict and the reasoning | — |
+
+### Provenance
+
+Every observation block carries `provenance.coveredBy`, one of:
+
+| Value | Meaning |
+|---|---|
+| `statement-signer` | Covered by the Issuer's signature over the protected header and payload |
+| `transparency-service` | Covered by a log's signature over the verifiable data structure root — **a different signer from the Issuer** |
+| `operator` | Asserted by whoever ran the tool. No signature |
+| `unauthenticated` | Present in a COSE unprotected header. Covered by no signature |
+
+The `receipts` block is the one to read carefully. Its *presence* is
+`unauthenticated` — RFC 9943 §3 places receipts in the Signed Statement's
+unprotected header, so anyone can add or strip one without breaking the
+Issuer's signature. Each entry's *contents* are `transparency-service`. Those
+are two different trust statements.
+
+`provenance.signatureVerified` is `false` only when a signature was checked and
+failed. Where no signature covers the block it is `null`, so "nobody signed
+this" can never be misread as "the signature was bad".
+
+### `status` versus `null`
+
+A `null` field means the input did not carry that value. `status:
+not-evaluated` means the run never got that far. Collapsing the two would make
+"the statement declares no SVN" indistinguishable from "we failed before
+parsing the statement" — and in a Rego policy both would be `undefined`, which
+reads as a failed check.
+
+## `--facts`: observations without a verdict
+
+`--facts` writes the same observation blocks with `appraisalPolicy` and
+`appraisal` removed, for systems that make their own decision — Ratify,
+Kyverno, OPA, or a bespoke gate.
+
+There is deliberately **no way to obtain this document without running a full
+verification**. Facts about a statement nobody authenticated are worth nothing,
+and a keyless extraction path is how unauthenticated claims end up in an
+admission policy. `--facts` requires the same `--scitt-keys` and `--policy` as
+any other run.
+
+The verdict is *omitted* rather than emptied. A consumer that wants our
+decision should read the full record; handing a verdict to a system that
+intends to decide for itself invites it to forward ours as its own.

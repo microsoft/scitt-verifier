@@ -10,7 +10,7 @@
 ## Before filing a bug
 
 Include the output of `scitt-verifier --version`, the exact command line, and
-the evidence record (`--evidence`). The evidence record contains the digests and
+the verification record (`--result`). The verification record contains the digests and
 assertion outcomes needed to reproduce a decision, and is usually enough on its
 own.
 

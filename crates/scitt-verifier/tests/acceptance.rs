@@ -229,24 +229,33 @@ fn an_artifact_that_would_be_ignored_is_refused() {
 }
 
 #[test]
-fn evidence_records_what_was_not_checked() {
+fn the_record_says_what_was_not_checked() {
     let dir = std::env::temp_dir().join("scitt-verifier-acceptance");
     std::fs::create_dir_all(&dir).unwrap();
-    let evidence = dir.join("evidence.json");
-    let evidence_str = evidence.display().to_string();
+    let result = dir.join("result.json");
+    let result_str = result.display().to_string();
+    let facts = dir.join("facts.json");
+    let facts_str = facts.display().to_string();
 
-    let r = verify(&["--evidence", &evidence_str, "--format", "json"]);
+    let r = verify(&[
+        "--result",
+        &result_str,
+        "--facts",
+        &facts_str,
+        "--format",
+        "json",
+    ]);
     assert_eq!(r.code, 0, "{}", r.stdout);
 
-    let written = std::fs::read_to_string(&evidence).unwrap();
+    let written = std::fs::read_to_string(&result).unwrap();
     let value: serde_json::Value = serde_json::from_str(&written).unwrap();
 
-    assert_eq!(value["verdict"], "statement-transparent");
-    assert_eq!(value["exitCode"], 0);
-    assert_eq!(value["schemaVersion"], "scitt-verifier/evidence/v2");
-    assert_eq!(value["details"]["artifactBinding"]["mode"], "none");
+    assert_eq!(value["schemaVersion"], "scitt-verifier/result/v0");
+    assert_eq!(value["appraisal"]["verdict"], "statement-transparent");
+    assert_eq!(value["appraisal"]["exitCode"], 0);
+    assert_eq!(value["artifactBinding"]["mode"], "none");
     assert!(
-        value["primaryDiagnostic"].is_null(),
+        value["appraisal"]["primaryDiagnostic"].is_null(),
         "a pass has nothing that stopped it"
     );
 
@@ -254,14 +263,40 @@ fn evidence_records_what_was_not_checked() {
     // query for runs that trusted an unsigned key set.
     assert_eq!(value["trust"]["mode"], "unsigned-scitt-keys");
 
-    assert_eq!(value["checks"]["statementSignature"], "pass");
-    assert_eq!(value["checks"]["receiptInclusion"], "pass");
-    assert_eq!(value["checks"]["artifactBinding"], "not-checked");
-    assert_eq!(value["checks"]["policy"], "pass");
+    let checks = &value["appraisal"]["checks"];
+    assert_eq!(checks["statementSignature"], "pass");
+    assert_eq!(checks["receiptInclusion"], "pass");
+    assert_eq!(checks["artifactBinding"], "not-checked");
+    assert_eq!(checks["policy"], "pass");
+
+    // The rules and the decision they produced are separate sections, so a
+    // reader can cite the policy that gated a release without reading a verdict
+    // into it, and vice versa.
+    assert_eq!(value["appraisalPolicy"]["status"], "evaluated");
+    assert_eq!(value["appraisalPolicy"]["satisfied"], true);
+    assert!(
+        value["appraisalPolicy"]["verdict"].is_null(),
+        "the rules section must not carry the decision"
+    );
+
+    // Provenance is what stops a downstream engine treating an issuer-signed
+    // claim and an operator assertion as equally solid.
+    assert_eq!(
+        value["signedStatement"]["provenance"]["coveredBy"],
+        "statement-signer"
+    );
+    assert_eq!(
+        value["receipts"]["entries"][0]["provenance"]["coveredBy"],
+        "transparency-service"
+    );
+    assert_eq!(
+        value["artifactBinding"]["provenance"]["coveredBy"],
+        "operator"
+    );
 
     // A green run must still say what it did not establish, in a form that
     // machines can count rather than grep.
-    let gaps = value["notChecked"]
+    let gaps = value["appraisal"]["notChecked"]
         .as_array()
         .expect("notChecked must be present");
     assert!(
@@ -284,16 +319,32 @@ fn evidence_records_what_was_not_checked() {
         "chain validation gap must be declared: {gaps:?}"
     );
 
-    let _ = std::fs::remove_file(&evidence);
+    // The facts projection must carry the observations and none of our
+    // judgement, so that a system using it cannot forward our verdict as its
+    // own conclusion.
+    let facts_value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&facts).unwrap()).unwrap();
+    assert_eq!(facts_value["schemaVersion"], "scitt-verifier/facts/v0");
+    assert!(facts_value["signedStatement"]["claimDigest"].is_string());
+    assert!(
+        facts_value.get("appraisal").is_none(),
+        "the facts document must not carry a verdict: {facts_value}"
+    );
+    assert!(
+        facts_value.get("appraisalPolicy").is_none(),
+        "the facts document must not carry the policy: {facts_value}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The guarantee a pipeline depends on.
 ///
-/// Both shipped CI examples publish the evidence artifact with `always()`. If
-/// an early failure writes no file, the archive is empty exactly when someone
-/// needs it — during an incident. Every one of these paths must leave a record.
+/// Both shipped CI examples publish the record with `always()`. If an early
+/// failure writes no file, the archive is empty exactly when someone needs it —
+/// during an incident. Every one of these paths must leave a record.
 #[test]
-fn every_failure_path_still_writes_evidence() {
+fn every_failure_path_still_writes_a_record() {
     let dir = std::env::temp_dir().join("scitt-verifier-acceptance-failures");
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -320,9 +371,9 @@ fn every_failure_path_still_writes_evidence() {
     ];
 
     for (name, paths, expected_code) in cases {
-        let evidence = dir.join(format!("{}.json", name.replace(' ', "-")));
-        let evidence_str = evidence.display().to_string();
-        let _ = std::fs::remove_file(&evidence);
+        let record = dir.join(format!("{}.json", name.replace(' ', "-")));
+        let record_str = record.display().to_string();
+        let _ = std::fs::remove_file(&record);
 
         let r = run(&[
             "verify",
@@ -332,8 +383,8 @@ fn every_failure_path_still_writes_evidence() {
             paths[1],
             "--policy",
             paths[2],
-            "--evidence",
-            &evidence_str,
+            "--result",
+            &record_str,
             "--format",
             "json",
         ]);
@@ -344,20 +395,29 @@ fn every_failure_path_still_writes_evidence() {
             r.stdout, r.stderr
         );
 
-        let written = std::fs::read_to_string(&evidence)
-            .unwrap_or_else(|e| panic!("{name}: evidence must exist even on failure: {e}"));
+        let written = std::fs::read_to_string(&record)
+            .unwrap_or_else(|e| panic!("{name}: a record must exist even on failure: {e}"));
         let value: serde_json::Value = serde_json::from_str(&written)
-            .unwrap_or_else(|e| panic!("{name}: evidence must be valid JSON: {e}"));
+            .unwrap_or_else(|e| panic!("{name}: the record must be valid JSON: {e}"));
 
-        assert_eq!(value["exitCode"], expected_code, "{name}");
+        assert_eq!(value["appraisal"]["exitCode"], expected_code, "{name}");
         assert!(
-            value["primaryDiagnostic"]["code"].is_string(),
+            value["appraisal"]["primaryDiagnostic"]["code"].is_string(),
             "{name}: a failure must name what stopped it: {value}"
         );
         assert!(
-            value["primaryDiagnostic"]["action"].is_string(),
+            value["appraisal"]["primaryDiagnostic"]["action"].is_string(),
             "{name}: a failure must say what to do about it: {value}"
         );
+
+        // A block we never reached must say so rather than being null, so that
+        // "we did not look" cannot be read as "the input did not carry it".
+        for section in ["signedStatement", "receipts", "appraisalPolicy"] {
+            assert!(
+                value[section]["status"].is_string(),
+                "{name}: {section} must declare whether it was evaluated: {value}"
+            );
+        }
 
         // stdout must be the same protocol on every path, or a JSON consumer
         // has to parse two.
@@ -367,8 +427,8 @@ fn every_failure_path_still_writes_evidence() {
 
     // An unreadable artifact fails late, after the statement checks have run.
     // Those results must survive into the record rather than being discarded.
-    let evidence = dir.join("unreadable-artifact.json");
-    let evidence_str = evidence.display().to_string();
+    let record = dir.join("unreadable-artifact.json");
+    let record_str = record.display().to_string();
     let r = run(&[
         "verify",
         "--statement",
@@ -381,23 +441,26 @@ fn every_failure_path_still_writes_evidence() {
         &missing,
         "--binding-mode",
         "payload-bytes",
-        "--evidence",
-        &evidence_str,
+        "--result",
+        &record_str,
         "--format",
         "json",
     ]);
     assert_eq!(r.code, 4, "{}", r.stderr);
     let value: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&evidence).unwrap()).unwrap();
-    assert_eq!(value["primaryDiagnostic"]["code"], "ArtifactUnreadable");
+        serde_json::from_str(&std::fs::read_to_string(&record).unwrap()).unwrap();
     assert_eq!(
-        value["checks"]["statementSignature"], "pass",
+        value["appraisal"]["primaryDiagnostic"]["code"],
+        "ArtifactUnreadable"
+    );
+    assert_eq!(
+        value["appraisal"]["checks"]["statementSignature"], "pass",
         "checks that did run must be reported: {value}"
     );
     // The operator asked for a binding and we could not find out. Reporting
     // that as "not-checked" would claim nobody asked.
     assert_eq!(
-        value["checks"]["artifactBinding"], "cannot-evaluate",
+        value["appraisal"]["checks"]["artifactBinding"], "cannot-evaluate",
         "a requested-but-unperformed binding is not the same as an unrequested one: {value}"
     );
 
@@ -405,20 +468,20 @@ fn every_failure_path_still_writes_evidence() {
     let _ = std::fs::write(&artifact, std::fs::read(&artifact).unwrap());
 }
 
-/// A failed evidence write must not leave stdout claiming success.
+/// A failed record write must not leave stdout claiming success.
 ///
-/// The record is built before the write is attempted, so a naive implementation
-/// prints `artifact-transparent` / `exitCode: 0` while the process exits 4 —
-/// two contradictory answers from one run, and the consumer reading stdout gets
-/// the wrong one.
+/// The document is built from the assessment, so a naive implementation prints
+/// `artifact-transparent` / `exitCode: 0` while the process exits 4 — two
+/// contradictory answers from one run, and the consumer reading stdout gets the
+/// wrong one.
 #[test]
-fn a_failed_evidence_write_is_reflected_in_the_output() {
-    let dir = std::env::temp_dir().join("scitt-verifier-evidence-write");
+fn a_failed_record_write_is_reflected_in_the_output() {
+    let dir = std::env::temp_dir().join("scitt-verifier-record-write");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
     // A path whose parent does not exist: a common CI mistake.
-    let unwritable = dir.join("no-such-dir").join("evidence.json");
+    let unwritable = dir.join("no-such-dir").join("result.json");
     let unwritable = unwritable.display().to_string();
 
     let artifact = corpus(&["fixtures", "artifact.bin"]);
@@ -427,7 +490,7 @@ fn a_failed_evidence_write_is_reflected_in_the_output() {
         &artifact,
         "--binding-mode",
         "payload-bytes",
-        "--evidence",
+        "--result",
         &unwritable,
         "--format",
         "json",
@@ -438,14 +501,57 @@ fn a_failed_evidence_write_is_reflected_in_the_output() {
     let value: serde_json::Value =
         serde_json::from_str(&r.stdout).expect("stdout must still be JSON");
     assert_eq!(
-        value["exitCode"], 4,
+        value["appraisal"]["exitCode"], 4,
         "the document must not disagree with the process: {value}"
     );
-    assert_eq!(value["verdict"], "usage-error");
-    assert_eq!(value["primaryDiagnostic"]["code"], "EvidenceWriteFailed");
-    assert_eq!(value["primaryDiagnostic"]["category"], "internal");
+    assert_eq!(value["appraisal"]["verdict"], "usage-error");
+    assert_eq!(
+        value["appraisal"]["primaryDiagnostic"]["code"],
+        "RecordWriteFailed"
+    );
+    assert_eq!(
+        value["appraisal"]["primaryDiagnostic"]["category"],
+        "internal"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The same guarantee for the facts projection.
+///
+/// A gate that hands facts to another engine has the same audit obligation as
+/// one that decides itself: if the handoff file never landed, the run must not
+/// report success.
+#[test]
+fn a_failed_facts_write_is_also_fatal() {
+    let dir = std::env::temp_dir().join("scitt-verifier-facts-write");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let unwritable = dir.join("no-such-dir").join("facts.json");
+
+    let r = verify(&[
+        "--facts",
+        &unwritable.display().to_string(),
+        "--format",
+        "json",
+    ]);
+
+    assert_eq!(r.code, 4, "{}", r.stdout);
+    let value: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    assert_eq!(
+        value["appraisal"]["primaryDiagnostic"]["code"],
+        "RecordWriteFailed"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The retired flag must fail loudly rather than being silently accepted.
+#[test]
+fn the_renamed_evidence_flag_explains_itself() {
+    let r = verify(&["--evidence", "x.json"]);
+    assert_eq!(r.code, 4);
+    assert!(r.stderr.contains("--result"), "{}", r.stderr);
 }
 
 /// Every non-pass verdict must name what stopped it.
@@ -483,7 +589,7 @@ fn a_policy_that_evaluates_nothing_still_names_the_problem() {
     assert_eq!(r.code, 3, "a policy that decides nothing is not a pass");
     let value: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
     assert_eq!(
-        value["primaryDiagnostic"]["code"], "PolicyProducedNoAssertions",
+        value["appraisal"]["primaryDiagnostic"]["code"], "PolicyProducedNoAssertions",
         "a red gate must never be silent about why: {value}"
     );
 
@@ -510,8 +616,8 @@ fn json_mode_is_one_protocol() {
     assert_eq!(r.code, 3);
     let value: serde_json::Value =
         serde_json::from_str(&r.stdout).expect("failures must be JSON too");
-    assert_eq!(value["verdict"], "cannot-evaluate");
-    assert_eq!(value["primaryDiagnostic"]["category"], "trust");
+    assert_eq!(value["appraisal"]["verdict"], "cannot-evaluate");
+    assert_eq!(value["appraisal"]["primaryDiagnostic"]["category"], "trust");
 }
 
 #[test]

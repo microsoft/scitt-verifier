@@ -25,9 +25,9 @@ tool making a trust decision on your behalf.
 }
 ```
 
-`policyId` and `policyVersion` are echoed into the evidence record, so a decision
+`policyId` and `policyVersion` are echoed into the verification record, so a decision
 can be traced back to the exact rules that produced it. Bump the version when
-you change the assertions; an auditor comparing two evidence records months
+you change the assertions; an auditor comparing two verification records months
 apart has no other way to tell them apart.
 
 ## Assertions

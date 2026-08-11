@@ -30,7 +30,7 @@ This is a verification tool, so the severe class of bug is one where it says
   is a gate that gets bypassed
 
 Also in scope, though lower severity: a limitation that is **not** reported in
-the `notChecked` field of the evidence record. Silent gaps in coverage are the
+the `appraisal.notChecked` field of the verification record. Silent gaps in coverage are the
 thing this design is most concerned with.
 
 ## Out of scope

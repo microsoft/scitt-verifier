@@ -3,7 +3,7 @@
 ## Unreleased
 
 Breaking changes to the output contract. All of them landed together and before
-v1.0 deliberately: the evidence schema is easier to change now than after it has
+v1.0 deliberately: the schema is easier to change now than after it has
 consumers. See [docs/output.md](docs/output.md) for the full contract.
 
 ### The verdict now says whether the artifact was checked
@@ -27,11 +27,11 @@ states, and the recommended action. Detailed evidence follows. Previously the
 verdict was the last line, which in a long CI log is the part that gets scrolled
 past.
 
-### Evidence is written on every path
+### A record is written on every path
 
-If `--evidence` is supplied, a record is now written even when the run fails
+If `--result` is supplied, a record is now written even when the run fails
 before verification starts — a malformed policy, an unreadable key set, a
-missing file. Both shipped CI examples publish evidence with `always()`; an
+missing file. Both shipped CI examples publish the record with `always()`; an
 early failure previously left the archive empty exactly when someone needed it.
 
 ### `--format json` is one protocol
@@ -43,7 +43,7 @@ handle two protocols depending on how the run failed.
 The one exception is a failure to parse the arguments themselves, where there is
 no `--format` to honour.
 
-### New first-class evidence fields
+### New first-class fields
 
 - `primaryDiagnostic` — the one diagnostic that explains the exit code
 - `trust` — how the trust material arrived (`mode`, `issuerScope`, `limitations`)
@@ -54,10 +54,71 @@ no `--format` to honour.
 `category`, `message`, and `impact`, so a fleet-wide report can count runs that
 skipped artifact binding rather than grepping English sentences.
 
-`statement`, `receipts`, `artifactBinding`, `policy`, and `problems` moved under
-`details`.
+### The record is structured around the SCITT vocabulary
 
-`schemaVersion` is now `scitt-verifier/evidence/v2`.
+The `details` bag is gone. The document now separates three things it used to
+run together:
+
+- **Observations** — `signedStatement`, `receipts`, `artifactBinding`
+- **The rules** — `appraisalPolicy`
+- **The decision** — `appraisal`, holding `verdict`, `exitCode`, `checks`,
+  `primaryDiagnostic`, `diagnostics`, and `notChecked`
+
+The observation blocks use the nouns from RFC 9943 §3 — Signed Statement,
+Receipt, Verifiable Data Structure, Verifiable Data Proof — so a reader holding
+the spec needs no glossary for ours. `artifactBinding` sits outside that
+vocabulary on purpose: SCITT defines no relationship between a statement and a
+deployed file, so it is our invention, asserted by the operator.
+
+`appraisalPolicy` is named after RATS (RFC 9334 §8.5) rather than `policy`,
+because RFC 9943 §3 already gives "Registration Policy" to the *transparency
+service*. Ours is the relying party's, applied long after registration.
+
+### Every observation carries provenance
+
+Each block now records which key, if any, covers it: `statement-signer`,
+`transparency-service`, `operator`, or `unauthenticated`.
+
+This matters most for receipts. Their *presence* is unauthenticated — RFC 9943
+§3 places them in the Signed Statement's unprotected header, so anyone can add
+or strip one without breaking the Issuer's signature — while their *contents*
+are covered by the transparency service, a different signer entirely. A flat
+document invited a downstream policy engine to treat both alike.
+
+`fullyVerified` was removed from receipt entries: it was our judgement leaking
+into the observations. Read `appraisal.checks.receiptInclusion` instead.
+
+### `status` distinguishes "not evaluated" from "absent"
+
+Every observation block carries `status`. A `null` field means the input did not
+carry that value; `status: not-evaluated` means the run never got that far.
+Previously both rendered as `null`, which made "the statement declares no SVN"
+indistinguishable from "we failed before parsing the statement" — and in a Rego
+policy both are `undefined`, which reads as a failed check.
+
+### `--evidence` is now `--result`, and `--facts` is new
+
+In RATS (RFC 9334 §8.1) "Evidence" is the *input* being appraised, so the old
+name pointed at the wrong end of the pipeline. `--evidence` is refused with an
+explanation rather than silently accepted.
+
+`--facts` writes the observation blocks with `appraisalPolicy` and `appraisal`
+removed, for systems that make their own decision. There is deliberately no way
+to obtain it without a full verification: facts about a statement nobody
+authenticated are worth nothing, and a keyless extraction path is how
+unauthenticated claims end up in an admission policy.
+
+### Schema versioning
+
+`schemaVersion` is now `scitt-verifier/result/v0`, and `--facts` emits
+`scitt-verifier/facts/v0`.
+
+`v0` is deliberate — this shape is still moving, and it says so. It freezes at
+`v1` when the repository goes public.
+
+`scitt-verifier/evidence/*` is retired and will not be reused. `evidence/v1`
+means what v0.1.0 emitted, permanently; reusing the string for a different shape
+would leave a consumer no way to tell them apart.
 
 ### Policy results are spelled out
 

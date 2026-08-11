@@ -83,7 +83,7 @@ Questions it answers:
 - **Can I deploy this right now?** One verdict, decidable by a script.
 - **What is actually inside this thing?** `inspect`, with no trust claim
   attached.
-- **What did you not check?** The `notChecked` list — reported on success too.
+- **What did you not check?** The `appraisal.notChecked` list — reported on success too.
 
 Questions it does **not** answer, and will not pretend to:
 
@@ -115,7 +115,7 @@ agent, and nothing that changes behaviour when the agent image is updated.
 
 **Binding is declared, never inferred.** The tool will not guess which artifact a
 statement describes from a filename or a content type. You say `--binding-mode`,
-or the evidence records that no binding was established.
+or the record says that no binding was established.
 
 **A policy is always required.** There is no default policy, because a default
 would be this tool making a trust decision on your behalf. Whether
@@ -256,11 +256,13 @@ Early. The verification core is exercised against real Microsoft Signing
 Transparency statements and its digests are cross-checked against two
 independent implementations, but the CLI surface should be considered unstable
 until v1.0. Known gaps are listed in [docs/limitations.md](docs/limitations.md)
-and reported at runtime in the `notChecked` field of every evidence record.
+and reported at runtime in the `appraisal.notChecked` field of every
+verification record.
 
 The output contract changed after v0.1.0: `verified` was replaced by the two
-artifact-aware verdicts, and the evidence schema moved to
-`scitt-verifier/evidence/v2`. If you pinned against v0.1.0 output, read
+artifact-aware verdicts, the record was restructured around the RFC 9943
+vocabulary, and `--evidence` became `--result`. The schema is now
+`scitt-verifier/result/v0`. If you pinned against v0.1.0 output, read
 [docs/output.md](docs/output.md) before upgrading.
 
 ## Contributing

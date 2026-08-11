@@ -27,9 +27,9 @@ success. If you add a check, make sure `fully_verified()` requires it explicitly
 assertion is not implemented, the tool exits 4 with an explanation. Accepting
 and silently skipping it reports success for a check nobody performed.
 
-**New limitations are added to `notChecked`.** If your change means something is
+**New limitations are added to `appraisal.notChecked`.** If your change means something is
 no longer verified, say so at runtime, not only in the documentation. There is a
-test asserting that `notChecked` is non-empty even on a passing run.
+test asserting that `appraisal.notChecked` is non-empty even on a passing run.
 
 **Exit codes are the public contract.** Pipelines branch on them. Changing what
 a code means is a breaking change.

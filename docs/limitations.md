@@ -1,7 +1,7 @@
 # Limitations
 
-Every limitation here is also reported at runtime, in the `notChecked` array of
-the evidence record, as a structured entry with a stable `code`, a `category`,
+Every limitation here is also reported at runtime, in the `appraisal.notChecked` array of
+the verification record, as a structured entry with a stable `code`, a `category`,
 and an `impact`. Nothing in this list requires reading the documentation to
 discover.
 
@@ -92,7 +92,7 @@ scope.
 
 ## Known rough edges
 
-* Only the first inclusion proof in a receipt is evaluated. The evidence record
+* Only the first inclusion proof in a receipt is evaluated. The verification record
   says so when there is more than one.
 * `iat` is read from the receipt's CWT claims and reported as a raw Unix
   timestamp. Time-based policy assertions use the *receipt's* registration time,

@@ -1,13 +1,13 @@
 //! `scitt-verifier` — an offline gate for SCITT transparent statements.
 //!
-//! Reads bytes, produces a verdict and an evidence record, and exits with a
+//! Reads bytes, produces a verdict and a verification record, and exits with a
 //! code a pipeline can branch on. Nothing here reaches the network: the trust
 //! material is an input, so a verification that succeeds on a laptop succeeds
 //! identically on an air-gapped build agent three months later.
 
 mod cli;
-mod evidence;
 mod outcome;
+mod record;
 mod report;
 
 use cli::{BindingMode, Command, Format, VerifyArgs};
@@ -258,45 +258,64 @@ fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
     }
 }
 
-/// Write the evidence, then print the result. One place, every path.
+/// Write the record and any facts projection, then print the result. One place,
+/// every path.
 ///
-/// Takes the assessment by value because a failed evidence write has to change
-/// it. Printing a document that says `artifact-transparent` while exiting 4
-/// would hand a consumer two contradictory answers from the same run.
+/// Takes the assessment by value because a failed write has to change it.
+/// Printing a document that says `artifact-transparent` while exiting 4 would
+/// hand a consumer two contradictory answers from the same run.
 fn emit(args: &VerifyArgs, mut assessment: Assessment, now: i64) -> Verdict {
-    let mut record = evidence::build(args, &assessment, now);
+    let mut failures = Vec::new();
 
-    if let Some(path) = &args.evidence {
-        if let Err(e) = std::fs::write(path, format!("{record:#}\n")) {
-            eprintln!("error: could not write evidence to {}: {e}", path.display());
-
-            let failure = Diagnostic::error(
-                "EvidenceWriteFailed",
-                Category::Internal,
-                format!("could not write evidence to {}: {e}", path.display()),
-                "Check that the evidence directory exists and is writable.",
-            );
-
-            // A pass whose audit trail vanished is not a pass a gate should
-            // act on. Failures keep their own, more important, verdict and
-            // primary diagnostic.
-            if assessment.verdict.is_pass() {
-                assessment.verdict = Verdict::UsageError;
-                assessment.primary = Some(failure.clone());
-            }
-            assessment.diagnostics.push(failure);
-
-            // Rebuild so stdout agrees with the exit code.
-            record = evidence::build(args, &assessment, now);
+    if let Some(path) = &args.result {
+        if let Err(d) = write_json(
+            path,
+            "verification record",
+            &record::build(args, &assessment, now),
+        ) {
+            failures.push(d);
+        }
+    }
+    if let Some(path) = &args.facts {
+        if let Err(d) = write_json(
+            path,
+            "facts document",
+            &record::facts(args, &assessment, now),
+        ) {
+            failures.push(d);
         }
     }
 
+    if !failures.is_empty() {
+        // A pass whose audit trail vanished is not a pass a gate should act on.
+        // Failures keep their own, more important, verdict and diagnostic.
+        if assessment.verdict.is_pass() {
+            assessment.verdict = Verdict::UsageError;
+            assessment.primary = Some(failures[0].clone());
+        }
+        assessment.diagnostics.extend(failures);
+    }
+
+    // Built after the write outcome is known, so stdout agrees with the exit
+    // code even when the file could not be written.
     match args.format {
-        Format::Json => println!("{record:#}"),
+        Format::Json => println!("{:#}", record::build(args, &assessment, now)),
         Format::Text => report::verify(&assessment),
     }
 
     assessment.verdict
+}
+
+fn write_json(path: &Path, what: &str, document: &serde_json::Value) -> Result<(), Diagnostic> {
+    std::fs::write(path, format!("{document:#}\n")).map_err(|e| {
+        eprintln!("error: could not write {what} to {}: {e}", path.display());
+        Diagnostic::error(
+            "RecordWriteFailed",
+            Category::Internal,
+            format!("could not write {what} to {}: {e}", path.display()),
+            "Check that the output directory exists and is writable.",
+        )
+    })
 }
 
 fn signature_state(facts: &StatementFacts) -> CheckState {

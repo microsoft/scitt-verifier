@@ -32,14 +32,14 @@ steps:
         --scitt-keys .well-known/scitt-keys.cbor \
         --policy .pipelines/policies/release-gate.json \
         --issuer your-ledger.confidential-ledger.azure.com \
-        --evidence "$(Build.ArtifactStagingDirectory)/scitt-evidence.json"
+        --result "$(Build.ArtifactStagingDirectory)/scitt-result.json"
       code=$?
 
       case "$code" in
         0)
           # Exit 0 covers two different claims. Read the verdict to tell them
           # apart: only artifact-transparent says anything about these bytes.
-          verdict=$(jq -r '.verdict' "$(Build.ArtifactStagingDirectory)/scitt-evidence.json")
+          verdict=$(jq -r '.appraisal.verdict' "$(Build.ArtifactStagingDirectory)/scitt-result.json")
           if [ "$verdict" != "artifact-transparent" ]; then
             echo "##vso[task.logissue type=error]Verdict was '$verdict'. The artifact binding was not established, so this gate proves nothing about the deployed bytes."
             exit 1
@@ -53,7 +53,7 @@ steps:
       esac
     displayName: Verify transparency gate
 
-  - publish: $(Build.ArtifactStagingDirectory)/scitt-evidence.json
-    artifact: scitt-evidence
+  - publish: $(Build.ArtifactStagingDirectory)/scitt-result.json
+    artifact: scitt-result
     condition: always()
     displayName: Archive the evidence record

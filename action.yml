@@ -33,10 +33,10 @@ inputs:
     description: 'Scope the key set to a single transparency service. Recommended.'
     required: false
     default: ''
-  evidence:
-    description: 'Where to write the evidence record. Attach it to your release.'
+  result:
+    description: 'Where to write the verification record. Attach it to your release.'
     required: false
-    default: 'scitt-evidence.json'
+    default: 'scitt-result.json'
   on-unevaluable:
     description: >-
       What to do when the tool cannot answer (exit 3) — typically stale trust
@@ -56,9 +56,9 @@ outputs:
   exit-code:
     description: 'The raw exit code from the verifier.'
     value: ${{ steps.verify.outputs.exit-code }}
-  evidence:
-    description: 'Path to the evidence record.'
-    value: ${{ steps.verify.outputs.evidence }}
+  result:
+    description: 'Path to the verification record.'
+    value: ${{ steps.verify.outputs.result }}
 
 runs:
   using: 'composite'
@@ -103,7 +103,7 @@ runs:
         ARTIFACT: ${{ inputs.artifact }}
         BINDING_MODE: ${{ inputs.binding-mode }}
         ISSUER: ${{ inputs.issuer }}
-        EVIDENCE: ${{ inputs.evidence }}
+        RESULT: ${{ inputs.result }}
         ON_UNEVALUABLE: ${{ inputs.on-unevaluable }}
       run: |
         # GitHub runs `shell: bash` as `bash --noprofile --norc -e -o pipefail`,
@@ -117,7 +117,7 @@ runs:
               --statement "${STATEMENT}"
               --scitt-keys "${SCITT_KEYS}"
               --policy "${POLICY}"
-              --evidence "${EVIDENCE}"
+              --result "${RESULT}"
               --format text)
 
         [ -n "${ISSUER}" ] && args+=(--issuer "${ISSUER}")
@@ -128,23 +128,23 @@ runs:
         scitt-verifier "${args[@]}"
         code=$?
 
-        verdict=$(jq -r '.verdict // "unknown"' "${EVIDENCE}" 2>/dev/null || echo unknown)
+        verdict=$(jq -r '.appraisal.verdict // "unknown"' "${RESULT}" 2>/dev/null || echo unknown)
         {
           echo "verdict=${verdict}"
           echo "exit-code=${code}"
-          echo "evidence=${EVIDENCE}"
+          echo "result=${RESULT}"
         } >> "${GITHUB_OUTPUT}"
 
         # Surface what was *not* checked, even on success. A green gate that
         # quietly skipped the artifact binding is the failure mode worth
-        # designing against. notChecked entries are objects (evidence/v2), so
+        # designing against. notChecked entries are objects (result/v0), so
         # render the code and message rather than concatenating a bare string.
-        if [ -f "${EVIDENCE}" ]; then
-          jq -r '.notChecked[]? | "::notice title=Not checked (" + .code + ")::" + .message' "${EVIDENCE}" || true
-          jq -r 'select(.primaryDiagnostic != null)
-                 | "::error title=SCITT " + .primaryDiagnostic.code + "::"
-                   + .primaryDiagnostic.message + " — " + .primaryDiagnostic.action' \
-             "${EVIDENCE}" || true
+        if [ -f "${RESULT}" ]; then
+          jq -r '.appraisal.notChecked[]? | "::notice title=Not checked (" + .code + ")::" + .message' "${RESULT}" || true
+          jq -r 'select(.appraisal.primaryDiagnostic != null)
+                 | "::error title=SCITT " + .appraisal.primaryDiagnostic.code + "::"
+                   + .appraisal.primaryDiagnostic.message + " — " + .appraisal.primaryDiagnostic.action' \
+             "${RESULT}" || true
         fi
 
         case "${code}" in

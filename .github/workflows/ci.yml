@@ -119,8 +119,9 @@ jobs:
             --statement corpus/fixtures/transparent-statement.cose \
             --scitt-keys corpus/fixtures/musa-mst-july-scitt-keys.cbor \
             --policy corpus/policies/fixture-mst.json \
-            --evidence /tmp/evidence.json \
+            --result /tmp/result.json \
             --format text
           test $? -eq 0
-          jq -e '.verdict == "verified"' /tmp/evidence.json
-          jq -e '.notChecked | length > 0' /tmp/evidence.json
+          jq -e '.appraisal.verdict == "statement-transparent"' /tmp/result.json
+          jq -e '.appraisal.notChecked | length > 0' /tmp/result.json
+          jq -e '.signedStatement.provenance.coveredBy == "statement-signer"' /tmp/result.json

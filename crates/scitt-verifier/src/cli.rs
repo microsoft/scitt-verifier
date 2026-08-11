@@ -23,7 +23,9 @@ VERIFY OPTIONS:
     --artifact <FILE>        The artifact the statement should describe.
     --binding-mode <MODE>    none | payload-bytes                          [default: none]
     --format <FORMAT>        text | json                                   [default: text]
-    --evidence <FILE>        Write the machine-readable evidence record here.
+    --result <FILE>          Write the machine-readable verification record here.
+    --facts <FILE>           Write the observations only — no verdict, no policy.
+                             For systems that make their own decision.
     --now <UNIX_SECONDS>     Override the clock, for reproducible runs.
 
 EXIT CODES:
@@ -71,7 +73,14 @@ pub struct VerifyArgs {
     pub artifact: Option<PathBuf>,
     pub binding_mode: BindingMode,
     pub format: Format,
-    pub evidence: Option<PathBuf>,
+    pub result: Option<PathBuf>,
+    /// Where to write the observations-only projection, if asked for.
+    ///
+    /// There is deliberately no way to produce this without a full
+    /// verification. Facts about a statement nobody authenticated are worth
+    /// nothing, and a keyless extraction path is how unauthenticated claims
+    /// find their way into an admission policy.
+    pub facts: Option<PathBuf>,
     pub now: Option<i64>,
 }
 
@@ -100,7 +109,8 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     let mut artifact = None;
     let mut binding_mode = None;
     let mut format = Format::Text;
-    let mut evidence = None;
+    let mut result = None;
+    let mut facts = None;
     let mut now = None;
 
     while let Some(flag) = it.next() {
@@ -110,7 +120,20 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             "--policy" => policy = Some(PathBuf::from(value(&mut it, flag)?)),
             "--issuer" => issuer = Some(value(&mut it, flag)?),
             "--artifact" => artifact = Some(PathBuf::from(value(&mut it, flag)?)),
-            "--evidence" => evidence = Some(PathBuf::from(value(&mut it, flag)?)),
+            "--result" => result = Some(PathBuf::from(value(&mut it, flag)?)),
+            "--facts" => facts = Some(PathBuf::from(value(&mut it, flag)?)),
+            // Renamed rather than aliased. In RATS (RFC 9334 §8.1) "Evidence"
+            // is the *input* being appraised, so the old name pointed at the
+            // wrong end of the pipeline. A loud failure here is better than
+            // quietly honouring a name we intend to retire.
+            "--evidence" => {
+                return Err(
+                    "--evidence was renamed to --result (the document is this tool's output; \
+                     in RFC 9334 'Evidence' means the input being appraised). For the \
+                     observations without a verdict, see --facts."
+                        .into(),
+                )
+            }
             "--binding-mode" => {
                 let raw = value(&mut it, flag)?;
                 binding_mode = Some(match raw.as_str() {
@@ -187,7 +210,8 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         artifact,
         binding_mode,
         format,
-        evidence,
+        result,
+        facts,
         now,
     })))
 }
