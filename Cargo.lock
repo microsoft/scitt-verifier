@@ -604,7 +604,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "scitt-policy"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "scitt-receipt",
  "serde",
@@ -613,7 +613,7 @@ dependencies = [
 
 [[package]]
 name = "scitt-receipt"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "sha2",
  "tee-attestation-verification-cose",
@@ -622,7 +622,7 @@ dependencies = [
 
 [[package]]
 name = "scitt-verifier"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "scitt-policy",
  "scitt-receipt",

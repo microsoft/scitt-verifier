@@ -1,10 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
 Breaking changes to the output contract. All of them landed together and before
 v1.0 deliberately: the schema is easier to change now than after it has
 consumers. See [docs/output.md](docs/output.md) for the full contract.
+
+**Upgrading from 0.1.0:** gate on `appraisal.verdict` rather than the top-level
+`verdict`, and expect `artifact-transparent` or `statement-transparent` where
+0.1.0 emitted `verified`. The GitHub Action's `evidence` input is now `result`.
 
 ### Documented which standards are actually implemented
 
@@ -158,11 +162,28 @@ documented contract.
 
 ### Fixed
 
+- The `issuer` policy assertion accepted any receipt's self-declared `iss`,
+  including receipts whose signature never verified or whose key was never
+  found. Receipts travel in the statement's *unprotected* bucket, so anyone
+  holding the file can append one. It now considers only fully verified
+  receipts, matching `registeredAfter` and `minReceipts`, and reports
+  `cannotEvaluate` when none of them declares an issuer.
+- `Assessment::incomplete()` emitted an empty `appraisal.notChecked`, so every
+  run that stopped early — unreadable statement, malformed policy, unusable
+  trust material — reported that nothing had been skipped. Those runs skip
+  more than a complete one, not less.
+- `docs/limitations.md` offered `signerSubjectContains` and
+  `signerIssuerContains` as the mitigation for an unvalidated certificate
+  chain. Against the attacker described there they mitigate nothing, because
+  he mints the certificate and therefore chooses the strings. Both documents
+  now say what actually protects you, and the assertion table in
+  `docs/policy.md` marks the two as weak.
 - `action.yml` rendered `notChecked` entries by string concatenation, which
   breaks against the new object form. It now reports the code and message, and
   surfaces `primaryDiagnostic` as an annotation.
 - The GitHub Actions example gated on `verdict == 'verified'`; it now gates on
-  `artifact-transparent`.
+  `artifact-transparent`. It also passed the removed `evidence:` input, which
+  `action.yml` renamed to `result:`.
 - The Azure Pipelines example treated any exit 0 as success; it now checks the
   verdict before deploying.
 

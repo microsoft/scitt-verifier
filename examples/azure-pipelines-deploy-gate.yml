@@ -4,6 +4,9 @@
 # fail the step on a non-zero exit code from a native program, so a gate written
 # with `powershell:` reports success no matter what the verifier decides. If you
 # must use PowerShell, check `$LASTEXITCODE` explicitly.
+#
+# v0.2.0 is the first release emitting the verdicts and `.appraisal.*` record
+# shape used here; v0.1.0 emitted `verified` and a flat record. See CHANGELOG.md.
 
 trigger: none
 
@@ -11,7 +14,9 @@ pool:
   vmImage: ubuntu-latest
 
 variables:
-  SCITT_VERIFIER_VERSION: v0.1.0
+  # Pin to an exact release. A deploy gate that follows a moving ref can change
+  # what it enforces without a reviewed change to this file.
+  SCITT_VERIFIER_VERSION: v0.2.0
 
 steps:
   - checkout: self

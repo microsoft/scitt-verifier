@@ -4,6 +4,13 @@
 # trust material committed to this repository. Nothing in this job talks to the
 # transparency service, so the gate keeps working during an outage — and cannot
 # be tricked by one.
+#
+# ⚠️ Pin `uses:` to a release tag, as below — never to a branch. A deploy gate
+# that follows a moving ref can change what it enforces without a reviewed
+# change to this file, which defeats the point of having it.
+#
+# v0.2.0 is the first release emitting the verdicts and `.appraisal.*` record
+# shape used here; v0.1.0 emitted `verified` and a flat record. See CHANGELOG.md.
 
 name: Deploy
 
@@ -36,7 +43,7 @@ jobs:
 
       - name: Verify the SBOM was registered on the transparency service
         id: scitt
-        uses: microsoft/scitt-verifier@v0
+        uses: microsoft/scitt-verifier@v0.2.0
         with:
           statement: sbom.spdx.json.cose
           artifact: sbom.spdx.json
@@ -44,7 +51,7 @@ jobs:
           scitt-keys: .well-known/scitt-keys.cbor
           policy: .github/policies/release-gate.json
           issuer: your-ledger.confidential-ledger.azure.com
-          evidence: scitt-result.json
+          result: scitt-result.json
           on-unevaluable: fail
 
       # Keep the evidence. Six months from now the question will not be "did it
