@@ -11,7 +11,7 @@ so changing one is a breaking change and moves the evidence `schemaVersion`.
 |---|---|---|
 | `artifact-transparent` | 0 | The artifact you supplied is the one that was registered, the receipt proves inclusion, and your policy is satisfied. |
 | `statement-transparent` | 0 | The statement is transparent and your policy is satisfied — but **no artifact was checked**. |
-| `untrusted` | 1 | A signature, inclusion proof, or artifact binding did not hold. Do not deploy. |
+| `untrusted` | 1 | The statement's own signature or the artifact binding did not hold. Do not deploy. |
 | `policy-failed` | 2 | Everything is cryptographically sound; your own rules rejected it. |
 | `cannot-evaluate` | 3 | The tool could not answer the question. **This is not a pass.** |
 | `usage-error` | 4 | The invocation or its inputs were wrong. Nothing was established. |
@@ -44,6 +44,11 @@ interchangeable, and the human output spells them out rather than using symbols.
 | `fail` | Asked, and the answer was no. |
 | `not-checked` | Nobody asked. Usually because a flag was not supplied. |
 | `cannot-evaluate` | Asked, and could not find out. |
+
+`receiptInclusion` never reports `fail`. A receipt that did not verify is not
+an answer of "no" — receipts are unauthenticated in transit, so a broken one
+may never have come from a transparency service at all. Transparency is either
+established by a verified receipt (`pass`) or left open (`cannot-evaluate`).
 
 `not-checked` and `cannot-evaluate` are the pair most worth keeping apart. The
 first is an incomplete invocation; the second is a broken one.
@@ -156,7 +161,17 @@ Four kinds of failure that must not look alike:
 | Malformed statement or key set | `cannot-evaluate` | 3 | A truncated download is not evidence of compromise. Never a pass. |
 | Unknown kid, stale keys, issuer mismatch | `cannot-evaluate` | 3 | An operational chore, not an incident. |
 | Unsupported algorithm or VDS | `cannot-evaluate` | 3 | A limitation of the tool, not a finding about the artifact. |
-| Invalid signature, bad inclusion proof, binding mismatch | `untrusted` | 1 | An incident. |
+| No receipt verified | `cannot-evaluate` | 3 | Registration was not proven. An unproven claim is not a disproven one. |
+| Invalid statement signature, binding mismatch | `untrusted` | 1 | An incident. |
+
+A broken receipt is **not** exit 1. Receipts arrive in the unprotected header,
+which no signature covers, so anyone who handles the file can append one
+without holding a key. If a broken receipt could flip the verdict, every
+mirror, registry, and CI cache would hold a veto over the gate, and the
+operator would be told to stop shipping an artifact whose own signature is
+sound. One verified receipt establishes transparency and noise appended beside
+it cannot retract it; see RFC 9943 §7.1. Broken receipts are reported as
+warnings, and a statement with none that verify is exit 3.
 
 A malformed statement is **exit 3, not 1**. Earlier releases returned 1 on the
 reasoning that a gate should stop on garbage input — but exit 1 means "this

@@ -9,6 +9,46 @@ consumers. See [docs/output.md](docs/output.md) for the full contract.
 **Upgrading from 0.1.0:** gate on `appraisal.verdict` rather than the top-level
 `verdict`, and expect `artifact-transparent` or `statement-transparent` where
 0.1.0 emitted `verified`. The GitHub Action's `evidence` input is now `result`.
+Note also that a broken receipt no longer produces exit 1 — see below.
+
+### A broken receipt no longer decides the verdict
+
+Receipts travel in the Signed Statement's *unprotected* header, which no
+signature covers. Anyone who hands you the file — a mirror, a registry, a CI
+cache — can append one without holding a key. Until now the verdict was decided
+by scanning *every* receipt, so a single appended receipt with a corrupted
+signature turned exit 0 into exit 1, reporting `untrusted` and telling the
+operator *"Do not deploy this artifact"* about an artifact whose own signature
+verified perfectly. That handed every party in the delivery path a veto over
+the gate, and made the tool accuse the wrong thing.
+
+`untrusted` (exit 1) is now reserved for the two findings that actually indict
+the bytes in front of you:
+
+- the Signed Statement's own signature failing
+- an artifact binding mismatch
+
+Transparency is a *positive* proof. One verified receipt establishes it, and
+noise appended beside it cannot retract it. This follows RFC 9943 §7.1, which
+sets the bar at trusting "at least one Issuer of a Receipt" and permits a
+Relying Party to "verify only a single Receipt that is acceptable to them" and
+disregard the rest.
+
+**What changes for you:**
+
+- A statement with at least one verified receipt passes, whatever else is
+  attached. Broken receipts are reported as **warnings** in `diagnostics`, with
+  remediation text that describes the receipt rather than the artifact.
+- A statement with *no* verified receipt is now `cannot-evaluate` (exit 3)
+  rather than `untrusted` (exit 1). Nothing was disproven; registration simply
+  could not be established. If you gate on exit 1 alone, you must now also
+  treat exit 3 as non-passing — as the documentation has always advised.
+- `checks.receiptInclusion` no longer takes the value `fail`. It is `pass` when
+  something verified and `cannot-evaluate` otherwise.
+
+Two fixtures pin this: `appended-receipt.cose` (a corrupted receipt appended
+beside a genuine one — still passes) and `tampered-statement.cose` (its only
+receipt broken — exit 3, not exit 1).
 
 ### Policy assertions read only verified receipts
 
@@ -33,6 +73,7 @@ they answer.
 still decided by scanning every receipt, so an appended receipt with a broken
 signature still turns a passing verify into exit 1. That is tracked
 separately; see [docs/limitations.md](docs/limitations.md).
+
 
 ### `artifactBinding` distinguishes "could not compare" from "did not match"
 

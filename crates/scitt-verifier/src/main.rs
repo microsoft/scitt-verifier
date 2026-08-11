@@ -332,19 +332,22 @@ fn signature_state(facts: &StatementFacts) -> CheckState {
     }
 }
 
+/// Whether the statement's transparency was established.
+///
+/// A receipt that failed is deliberately *not* a `Fail` here. Receipts arrive
+/// in the unprotected header, which no signature covers, so their presence is
+/// not attributable to the issuer, the transparency service, or anyone else.
+/// Treating a broken one as a failed check would let whoever handed us the
+/// file decide the answer. See RFC 9943 s7.1: a Relying Party need only trust
+/// "at least one Issuer of a Receipt", and MAY verify a single acceptable
+/// Receipt and disregard the rest.
 fn receipt_state(facts: &StatementFacts) -> CheckState {
-    if facts
-        .receipts
-        .iter()
-        .any(|r| r.root_signature_valid == Some(false) || r.bound_to_statement == Some(false))
-    {
-        return CheckState::Fail;
-    }
     if facts.any_receipt_verified() {
         return CheckState::Pass;
     }
-    // No receipts at all, or receipts we could not resolve a key for. Either
-    // way the transparency question is open, not answered in the negative.
+    // No receipts, none we could resolve a key for, or none that verified.
+    // Either way the transparency question is open, not answered in the
+    // negative.
     CheckState::CannotEvaluate
 }
 
@@ -366,6 +369,12 @@ fn policy_state(decision: &PolicyDecision) -> CheckState {
 /// inability to evaluate, then policy. A run that both failed a signature and
 /// failed a policy rule is reported as untrusted, because that is the finding
 /// that matters.
+///
+/// `Untrusted` is reserved for the two findings that indict the bytes in front
+/// of us: the statement's own signature, and a binding mismatch. A broken
+/// receipt indicts neither. Receipts live in the unprotected header, so anyone
+/// who handles the file can add one without holding a key; letting that decide
+/// the verdict would hand every courier a veto over the gate.
 fn decide(
     facts: &StatementFacts,
     binding: &BindingResult,
@@ -375,16 +384,11 @@ fn decide(
     if facts.signature_valid == Some(false) || binding.outcome == Binding::Mismatch {
         return Verdict::Untrusted;
     }
-    if facts
-        .receipts
-        .iter()
-        .any(|r| r.root_signature_valid == Some(false) || r.bound_to_statement == Some(false))
-    {
-        return Verdict::Untrusted;
-    }
 
     // No verified receipt means the statement is, at best, merely signed.
-    // That can never be a pass, whatever the policy says.
+    // That can never be a pass, whatever the policy says. Note this is the
+    // only receipt-derived gate: transparency is a positive proof, and a proof
+    // that holds cannot be retracted by appending noise beside it.
     if !facts.any_receipt_verified() {
         return Verdict::CannotEvaluate;
     }
@@ -443,20 +447,25 @@ fn diagnose(
 
     for (i, r) in facts.receipts.iter().enumerate() {
         let n = i + 1;
+        // These are warnings, not errors, however alarming they read. Neither
+        // says anything about the artifact: a receipt that fails to verify is
+        // indistinguishable from one an attacker appended, because appending
+        // one requires no key. What it does say is that this receipt carried
+        // no weight in the verdict.
         if r.root_signature_valid == Some(false) {
-            out.push(Diagnostic::error(
+            out.push(Diagnostic::warning(
                 "ReceiptRootSignatureInvalid",
                 Category::Crypto,
                 format!("receipt {n}: the Merkle root signature did not verify"),
-                "Treat this artifact as untrusted. Do not deploy it.",
+                "This receipt proves nothing and was disregarded; the verdict rests on the receipts that did verify. If you expected it to count, re-fetch the transparent statement from the transparency service.",
             ));
         }
         if r.bound_to_statement == Some(false) {
-            out.push(Diagnostic::error(
+            out.push(Diagnostic::warning(
                 "ReceiptNotBoundToStatement",
                 Category::Crypto,
                 format!("receipt {n}: the inclusion proof is for a different statement"),
-                "Treat this artifact as untrusted. Do not deploy it.",
+                "This receipt describes another statement and was disregarded; the verdict rests on the receipts that did verify. If you expected it to count, confirm you fetched the receipt issued for this statement.",
             ));
         }
         match r.key_lookup {

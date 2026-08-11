@@ -88,6 +88,92 @@ fn a_tampered_payload_exits_one() {
     assert!(r.stdout.contains("untrusted"));
 }
 
+/// A broken receipt beside a good one must not deny the gate.
+///
+/// Receipts ride in the statement's *unprotected* header, which no signature
+/// covers, so anyone who handles the file — a mirror, a registry, a CI cache —
+/// can append one without holding any key. If a broken receipt could flip the
+/// verdict, every courier would hold a veto over the gate, and the operator
+/// would be told "do not deploy this artifact" about an artifact that is fine.
+///
+/// RFC 9943 s7.1 sets the bar at "at least one Issuer of a Receipt" and lets a
+/// Relying Party verify a single acceptable Receipt and disregard the rest.
+/// Transparency is a positive proof; noise appended beside it cannot retract it.
+#[test]
+fn an_appended_broken_receipt_does_not_deny_the_gate() {
+    let statement = corpus(&["fixtures", "appended-receipt.cose"]);
+    let keys = corpus(&["fixtures", "musa-mst-july-scitt-keys.cbor"]);
+    let policy = corpus(&["policies", "fixture-mst.json"]);
+    let r = run(&[
+        "verify",
+        "--statement",
+        &statement,
+        "--scitt-keys",
+        &keys,
+        "--policy",
+        &policy,
+    ]);
+    assert_eq!(
+        r.code, 0,
+        "a genuine receipt still verifies, so the gate must pass:\n{}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.starts_with("PASS statement-transparent"),
+        "{}",
+        r.stdout
+    );
+    // Passing is not the same as staying silent. The junk receipt is still
+    // reported, because a file that grew a receipt in transit is worth knowing
+    // about even when it changes nothing.
+    assert!(
+        r.stdout.contains("ReceiptRootSignatureInvalid"),
+        "the disregarded receipt must still be reported: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains("Do not deploy"),
+        "a broken receipt says nothing about the artifact and must not be \
+         described as though it did: {}",
+        r.stdout
+    );
+}
+
+/// When nothing verifies, the answer is "could not tell", not "untrusted".
+///
+/// `tampered-statement.cose` carries a valid Issuer signature and one receipt
+/// whose Merkle root signature does not verify. Nothing here indicts the
+/// artifact: the bytes are exactly what the Issuer signed. What is missing is
+/// proof that they were ever registered, and an unproven claim is not a
+/// disproven one.
+#[test]
+fn a_statement_whose_only_receipt_fails_exits_three_not_one() {
+    let statement = corpus(&["fixtures", "tampered-statement.cose"]);
+    let keys = corpus(&["fixtures", "musa-mst-july-scitt-keys.cbor"]);
+    let policy = corpus(&["policies", "fixture-mst.json"]);
+    let r = run(&[
+        "verify",
+        "--statement",
+        &statement,
+        "--scitt-keys",
+        &keys,
+        "--policy",
+        &policy,
+    ]);
+    assert_eq!(
+        r.code, 3,
+        "no verified receipt means the transparency question is open, not \
+         answered in the negative:\n{}",
+        r.stdout
+    );
+    assert!(r.stdout.contains("cannot-evaluate"), "{}", r.stdout);
+    assert!(
+        r.stdout.contains("NoVerifiedReceipt"),
+        "the run must name why it could not decide: {}",
+        r.stdout
+    );
+}
+
 #[test]
 fn stale_trust_material_exits_three_not_one() {
     // The distinction this test defends: a rotated signing key must not be
@@ -151,6 +237,7 @@ fn fixtures_are_byte_exact() {
         ("bad-artifact.bin", 20),
         ("transparent-statement.cose", 9270),
         ("tampered-statement.cose", 9270),
+        ("appended-receipt.cose", 10074),
         ("payload-tampered.cose", 9270),
         ("musa-mst-july-scitt-keys.cbor", 1219),
         ("stale-scitt-keys.cbor", 523),

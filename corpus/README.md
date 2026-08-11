@@ -8,7 +8,8 @@ implementing SCITT receipt verification independently.
 | File | What it is |
 |---|---|
 | `transparent-statement.cose` | A genuine transparent statement from Microsoft Signing Transparency: PS256, a four-certificate chain, and one CCF receipt |
-| `tampered-statement.cose` | The same statement with a byte flipped in the signed region |
+| `tampered-statement.cose` | The same statement with a byte flipped inside the *receipt* — the Issuer's signature over the statement still verifies, but the transparency service's signature over the Merkle root does not |
+| `appended-receipt.cose` | The genuine statement with a second, corrupted receipt appended to the unprotected header — no key required, since nothing signs that bucket |
 | `payload-tampered.cose` | The same statement with a modified payload — the receipt is untouched and still valid *for the original statement* |
 | `artifact.bin` | The 21-byte artifact the genuine statement's payload equals — `Hello from MST Team\r\n`, **CRLF included** |
 | `bad-artifact.bin` | A different artifact, for the negative binding case |
@@ -31,6 +32,18 @@ suite fails loudly if that ever happens again.
 rotated key must produce a different outcome from a forged artifact. One is an
 operational chore, the other is an incident, and a verifier that reports them
 identically will train its users to ignore both.
+
+`appended-receipt.cose` and `tampered-statement.cose` together pin what a
+broken receipt may and may not do. Receipts travel in the unprotected header,
+which no signature covers, so anyone who handles the file can append one
+without holding a key. If that could flip a verdict, every mirror, registry,
+and CI cache would hold a veto over the gate — and the operator would be told
+not to deploy an artifact that is provably fine. So `appended-receipt.cose`
+still passes (a genuine receipt verifies, and RFC 9943 §7.1 asks for "at least
+one"), while `tampered-statement.cose`, whose only receipt fails, is
+`cannot-evaluate` rather than `untrusted`: its bytes are exactly what the
+Issuer signed, and what is missing is proof of registration. An unproven claim
+is not a disproven one.
 
 ## Pinned values
 

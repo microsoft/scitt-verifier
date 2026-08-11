@@ -108,34 +108,28 @@ fails if they erode — mostly in
 [`crates/scitt-verifier/tests/`](crates/scitt-verifier/tests/). The exception is
 noted where it appears.
 
-**Offline by default.** Verification never opens a socket. The trust material is
+- **Offline by default.** Verification never opens a socket. The trust material is
 an input you commit to your repository. A gate that phones home is a gate that
 fails during an outage, and one that can be steered by whoever controls the
 network.
-
-**No prerequisites.** A single static binary. No runtime to install on the build
+- **No prerequisites.** A single static binary. No runtime to install on the build
 agent, and nothing that changes behaviour when the agent image is updated.
 *This one is enforced by the release pipeline rather than by a test:* the
 published artifacts are `musl` and MSVC static builds, so a dynamic dependency
 shows up as a broken release, not a red suite.
-
-**Binding is declared, never inferred.** The tool will not guess which artifact a
+- **Binding is declared, never inferred.** The tool will not guess which artifact a
 statement describes from a filename or a content type. You say `--binding-mode`,
 or the record says that no binding was established.
-
-**A policy is always required.** There is no default policy, because a default
+- **A policy is always required.** There is no default policy, because a default
 would be this tool making a trust decision on your behalf. Whether
 `did:x509:0:sha256:…` is an identity you accept is not knowable here.
-
-**Unimplemented options are refused, not ignored.** Pass a flag this build does
+- **Unimplemented options are refused, not ignored.** Pass a flag this build does
 not implement and it exits 4. A gate that silently skips a renamed check is
 worse than no gate, because it reports success.
-
-**"I cannot tell" is a distinct answer.** Exit 3 means the tool could not
+- **"I cannot tell" is a distinct answer.** Exit 3 means the tool could not
 answer — usually stale trust material. It is not folded into "pass" and not
 folded into "compromised", because the response to each is different.
-
-**What was not checked is reported, always.** Including on success. A green
+- **What was not checked is reported, always.** Including on success. A green
 result that quietly skipped the artifact binding is more dangerous than a red
 one, because nobody goes looking for the caveat.
 
@@ -174,7 +168,7 @@ and is the next substantial piece of verification work.
 |---|---|---|---|
 | 0 | `artifact-transparent` | The artifact you supplied was registered | Proceed |
 | 0 | `statement-transparent` | Transparent, but no artifact was checked | Proceed only if you meant to skip binding |
-| 1 | `untrusted` | Cryptographic or binding failure | **Stop.** Treat as an incident |
+| 1 | `untrusted` | Statement signature or artifact binding failed | **Stop.** Treat as an incident |
 | 2 | `policy-failed` | Genuine, but your policy rejected it | Review the policy or the artifact |
 | 3 | `cannot-evaluate` | Could not be evaluated | Refresh trust material; do not proceed |
 | 4 | `usage-error` | Usage or input error | Fix the invocation |

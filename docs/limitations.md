@@ -109,17 +109,6 @@ scope.
 
 ## Known rough edges
 
-* **An appended receipt can deny the gate.** Receipts travel in the Signed
-  Statement's *unprotected* header bucket, which no signature covers, so
-  anyone who can hand you the file — a mirror, a registry, a CI cache — can
-  append a receipt without holding any key. The verdict is currently decided
-  by scanning *every* receipt, so one appended receipt with a broken signature
-  turns exit 0 into exit 1 (`untrusted`, `ReceiptRootSignatureInvalid`) even
-  though the genuine receipt still verifies. This is a denial-of-gate, not a
-  forgery: it can stop a good artifact from shipping, but it cannot make a bad
-  one pass. Until it is fixed, treat a receipt-signature failure on a
-  previously passing artifact as a possible tampering-in-transit signal rather
-  than as evidence about the artifact itself.
 * Only the first inclusion proof in a receipt is evaluated. The verification record
   says so when there is more than one.
 * `iat` is read from the receipt's CWT claims and reported as a raw Unix
