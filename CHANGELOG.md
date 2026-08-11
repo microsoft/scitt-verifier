@@ -10,7 +10,7 @@ consumers. See [docs/output.md](docs/output.md) for the full contract.
 `verdict`, and expect `artifact-transparent` or `statement-transparent` where
 0.1.0 emitted `verified`. The GitHub Action's `evidence` input is now `result`.
 
-### An appended receipt can no longer deny the gate
+### Policy assertions read only verified receipts
 
 `requireKidBoundToKey` considered every receipt on the statement, including
 ones whose signing key never resolved. Receipts arrive in the Signed
@@ -28,6 +28,11 @@ method rather than a convention repeated at each call site, which is how the
 `issuer` assertion came to be missing it too. `inspect` and the record's receipt
 listing still enumerate every receipt, because "what is present" is the question
 they answer.
+
+**This does not close the appended-receipt problem.** The verdict itself is
+still decided by scanning every receipt, so an appended receipt with a broken
+signature still turns a passing verify into exit 1. That is tracked
+separately; see [docs/limitations.md](docs/limitations.md).
 
 ### `artifactBinding` distinguishes "could not compare" from "did not match"
 
