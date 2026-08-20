@@ -13,6 +13,13 @@ const EXPECTED_CLAIM_DIGEST: &str =
     "5207494c12c986e33324c602e535717f67f0a6b56235f413e4a07d4d66d59565";
 /// Length of the statement re-encoded with an empty unprotected bucket.
 const EXPECTED_SIGNED_LEN: usize = 8462;
+/// COSE algorithm of the Issuer's signature over the statement: PS256.
+const EXPECTED_STATEMENT_ALG: i64 = -37;
+/// COSE algorithm of the transparency service's signature over the Merkle
+/// root: ES384. Pinned because it selects the curve used to verify the root
+/// signature, so a change here is a change to which key material can satisfy
+/// this receipt — not a cosmetic detail.
+const EXPECTED_RECEIPT_ALG: i64 = -35;
 
 fn fixture(name: &str) -> Vec<u8> {
     let path: PathBuf = [
@@ -111,6 +118,14 @@ fn genuine_statement_verifies_end_to_end() {
         receipt.claims_digest.as_deref(),
         Some(EXPECTED_CLAIM_DIGEST)
     );
+
+    // Both algorithms are pinned. They are not decoration: the receipt's `alg`
+    // selects the curve the root signature is verified against, so an
+    // unnoticed change here changes which key material can satisfy this
+    // receipt. `corpus/README.md` documented ES256 for four releases while the
+    // fixture was ES384, because nothing asserted it.
+    assert_eq!(facts.alg, Some(EXPECTED_STATEMENT_ALG));
+    assert_eq!(receipt.algorithm, Some(EXPECTED_RECEIPT_ALG));
 }
 
 #[test]

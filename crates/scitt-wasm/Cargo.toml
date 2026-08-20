@@ -1,0 +1,47 @@
+[package]
+name = "scitt-wasm"
+description = "WebAssembly bindings for the SCITT transparent statement verification core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# ---------------------------------------------------------------------------
+# This crate is the browser's `scitt-verifier`: it plays the same role for a
+# web page that the CLI plays for a terminal. It serialises facts for a caller
+# to render, and it decides nothing.
+#
+# It depends on `scitt-receipt` only. Pulling in `scitt-policy` would put a
+# trust decision inside a bundle anyone can re-host, which is exactly the
+# consumer concern the core boundary exists to keep out.
+# ---------------------------------------------------------------------------
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+scitt-receipt = { path = "../scitt-receipt", default-features = false }
+serde_json = "1"
+wasm-bindgen = ">=0.2, <0.3"
+
+[features]
+# The pure-Rust backend is synchronous, so `verify_statement` stays a plain
+# function and the JavaScript shim needs no async plumbing. WebCrypto is async
+# all the way down and would force a change to the core's API.
+default = ["crypto_pure_rust"]
+crypto_pure_rust = ["scitt-receipt/crypto_pure_rust"]
+crypto_webcrypto = ["scitt-receipt/crypto_webcrypto"]
+
+[dev-dependencies]
+wasm-bindgen-test = ">=0.3, <0.4"
+
+# Recent rustc emits bulk-memory and non-trapping float-to-int by default, which
+# wasm-pack's bundled `wasm-opt` rejects unless the features are named. Without
+# these the release build fails at validation, not at runtime.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ['-O4', '--enable-bulk-memory', '--enable-nontrapping-float-to-int']
+
+[package.metadata.wasm-pack.profile.profiling]
+wasm-opt = ['-O', '--enable-bulk-memory', '--enable-nontrapping-float-to-int']

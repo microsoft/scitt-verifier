@@ -55,7 +55,7 @@ Independently confirmed against the .NET prototype and `pyscitt`:
 | Claim digest (SHA-256) | `5207494c12c986e33324c602e535717f67f0a6b56235f413e4a07d4d66d59565` |
 | Merkle root | `f369f5f4ce1e2bf6aa120e7f86e907130ede4ed75944e663d4c7b0a14da35993` |
 | Statement algorithm | PS256 (COSE −37) |
-| Receipt algorithm | ES256 (COSE −7) |
+| Receipt algorithm | ES384 (COSE −35) |
 
 These are asserted in `crates/scitt-receipt/tests/conformance.rs`. **A failure
 there is not a test to update.** If the claim digest changes, the definition of

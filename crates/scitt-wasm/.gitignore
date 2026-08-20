@@ -1,0 +1,3 @@
+# wasm-pack output. Regenerate with the commands in README.md.
+pkg-node/
+pkg-web/
