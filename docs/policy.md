@@ -45,16 +45,68 @@ apart has no other way to tell them apart.
 | `registeredBefore` | `number` | Registration at or before this Unix timestamp |
 | `maxAgeDays` | `number` | Registration within N days of now |
 | `minSvn` | `number` | Minimum security version number, for anti-rollback |
-| `requireKidBoundToKey` | `boolean` | Every receipt's kid must be the digest of its key |
+| `requireKidBoundToKey` | `boolean` | Every receipt's kid must be the digest of its signing key |
+| `statementSubject` | `object` | The CWT `sub` claim the statement makes about itself |
 
 An empty `assertions` object is rejected: a policy that asserts nothing accepts
 everything, which is almost never what someone meant to write.
+
+### `statementSubject`
+
+`sub` is the name the issuer gave the thing the statement is about. It lives in
+the protected CWT claims, so the issuer's signature covers it — and because the
+claim digest covers the signed statement, the receipt the ledger issued covers
+it too.
+
+Write it as an object with **exactly one** match mode:
+
+```json
+{ "statementSubject": { "equals": "amd-hbom-F434386R50002-100-000001527" } }
+{ "statementSubject": { "startsWith": "amd-hbom-" } }
+{ "statementSubject": { "oneOf": ["pkg-a", "pkg-b"] } }
+```
+
+| Mode | Meaning |
+|---|---|
+| `equals` | The subject must be exactly this string |
+| `startsWith` | The subject must begin with this prefix |
+| `oneOf` | The subject must be exactly one of these strings |
+
+There is deliberately no `contains`. A substring rule for `amd-hbom-1` would
+also accept `not-amd-hbom-12`, which is the opposite of what someone pinning an
+identity wants. Use `startsWith` when a family of subjects is meant.
+
+Two policies are refused when the document is parsed rather than allowed to
+report a pass:
+
+- `{}`, or more than one mode at once — there is no single rule to apply.
+- A mode that cannot reject anything: `startsWith: ""` matches every subject,
+  and `oneOf: []` matches none. Either would appear in the report as an
+  assertion that ran and passed while having examined nothing.
+
+If the statement carries no `sub` claim the outcome is `cannotEvaluate`, not
+`fail` — "makes no claim" and "makes the wrong claim" call for different
+responses.
+
+`statementSubject` is most useful when the artifact cannot be hashed. Binding a
+physical part to a statement is impossible with `--artifact`, because the
+relying party is holding a component, not a file; the serial number in `sub` is
+the only join key available.
+
+Note what it does **not** establish: that the *right issuer* said it. Any key
+can sign a statement claiming any subject. Pair it with `issuer` and
+`minReceipts` so the claim is only accepted from a ledger whose registration
+policy governs who may claim which subject.
 
 ### These assertions are not equally strong
 
 `issuer`, `minReceipts`, `registeredAfter`, `registeredBefore`, `maxAgeDays` and
 `minSvn` read facts that a transparency service signed, or that this tool
 verified. They are load-bearing.
+
+`statementSubject` reads a claim the issuer signed and the ledger's receipt
+covers. It is stronger than the certificate assertions below, but it identifies
+the *subject*, not the *signer*.
 
 `signerSubjectContains` and `signerIssuerContains` read the leaf certificate
 embedded in the statement, which is **not validated to a trusted root** — see

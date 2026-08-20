@@ -73,6 +73,99 @@ pub struct Assertions {
     /// Require that each receipt's kid was derived from its key material.
     #[serde(default)]
     pub require_kid_bound_to_key: Option<bool>,
+    /// The subject the statement must claim, from the protected CWT claims.
+    ///
+    /// Unlike `signerSubjectContains`, which reads a certificate the statement
+    /// carries, this reads a claim inside the signed payload — so it is covered
+    /// by the issuer's signature and, through the claim digest, by the receipt
+    /// the ledger issued. Pinning it answers "is this statement about the thing
+    /// I am holding?" for artifacts that cannot be hashed, such as a physical
+    /// part identified by serial number.
+    #[serde(default)]
+    pub statement_subject: Option<StringMatch>,
+}
+
+/// How a policy matches a string-valued claim.
+///
+/// Exactly one mode must be set, and it must be capable of rejecting something.
+/// Both an empty object and a criterion every value satisfies are refused when
+/// the policy is parsed, because either would appear in the report as a rule
+/// that ran and passed while having examined nothing.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct StringMatch {
+    /// The claim must be exactly this value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub equals: Option<String>,
+    /// The claim must begin with this prefix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starts_with: Option<String>,
+    /// The claim must be exactly one of these values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub one_of: Option<Vec<String>>,
+}
+
+impl StringMatch {
+    fn validate(&self, field: &str) -> Result<(), String> {
+        let declared = [
+            self.equals.is_some(),
+            self.starts_with.is_some(),
+            self.one_of.is_some(),
+        ]
+        .iter()
+        .filter(|set| **set)
+        .count();
+
+        if declared == 0 {
+            return Err(format!(
+                "{field} declares no match criteria; it would accept any value"
+            ));
+        }
+        if declared > 1 {
+            return Err(format!(
+                "{field} declares more than one of equals, startsWith, oneOf; use exactly one"
+            ));
+        }
+        // A criterion that cannot reject anything is worse than no criterion at
+        // all, because the report shows it passing.
+        if self.starts_with.as_deref() == Some("") {
+            return Err(format!(
+                "{field}.startsWith is empty; every value starts with the empty string"
+            ));
+        }
+        if self.one_of.as_deref().is_some_and(<[String]>::is_empty) {
+            return Err(format!(
+                "{field}.oneOf is empty; no value could ever satisfy it"
+            ));
+        }
+        Ok(())
+    }
+
+    fn matches(&self, value: &str) -> bool {
+        if let Some(expected) = &self.equals {
+            return value == expected;
+        }
+        if let Some(prefix) = &self.starts_with {
+            return value.starts_with(prefix);
+        }
+        if let Some(accepted) = &self.one_of {
+            return accepted.iter().any(|c| c == value);
+        }
+        false
+    }
+
+    fn describe(&self) -> String {
+        if let Some(expected) = &self.equals {
+            return format!("must equal '{expected}'");
+        }
+        if let Some(prefix) = &self.starts_with {
+            return format!("must start with '{prefix}'");
+        }
+        if let Some(accepted) = &self.one_of {
+            return format!("must be one of {accepted:?}");
+        }
+        "has no criteria".into()
+    }
 }
 
 /// The outcome of one assertion.
@@ -131,20 +224,25 @@ impl Policy {
                 "policy declares no assertions; an empty policy would accept anything".into(),
             );
         }
+        if let Some(subject) = &policy.assertions.statement_subject {
+            subject.validate("statementSubject")?;
+        }
         Ok(policy)
     }
 
+    /// Whether the policy declares no assertion at all.
+    ///
+    /// Derived from the serialised form rather than a hand-written chain of
+    /// `is_none` checks. The chain had to be extended every time an assertion
+    /// was added, and forgetting to do so would reject a policy that used only
+    /// the new assertion as though it were empty.
     fn is_empty(&self) -> bool {
-        let a = &self.assertions;
-        a.issuer.is_none()
-            && a.signer_subject_contains.is_none()
-            && a.signer_issuer_contains.is_none()
-            && a.min_receipts.is_none()
-            && a.registered_after.is_none()
-            && a.registered_before.is_none()
-            && a.max_age_days.is_none()
-            && a.min_svn.is_none()
-            && a.require_kid_bound_to_key.is_none()
+        match serde_json::to_value(&self.assertions) {
+            Ok(serde_json::Value::Object(fields)) => {
+                fields.values().all(serde_json::Value::is_null)
+            }
+            _ => false,
+        }
     }
 
     /// Evaluate the policy against verified facts.
@@ -193,6 +291,31 @@ impl Policy {
                     Outcome::Fail,
                     format!("receipt issuer {issuers:?} is not in the accepted list {accepted:?}"),
                 )
+            });
+        }
+
+        if let Some(expected) = &a.statement_subject {
+            // The claim is absent rather than wrong, which is a different
+            // message to the reader and must never read as a pass.
+            results.push(match &facts.cwt.sub {
+                None => result(
+                    "statementSubject",
+                    Outcome::CannotEvaluate,
+                    "statement declares no CWT subject claim",
+                ),
+                Some(subject) if expected.matches(subject) => result(
+                    "statementSubject",
+                    Outcome::Pass,
+                    format!("subject '{subject}' {}", expected.describe()),
+                ),
+                Some(subject) => result(
+                    "statementSubject",
+                    Outcome::Fail,
+                    format!(
+                        "subject '{subject}' does not match: it {}",
+                        expected.describe()
+                    ),
+                ),
             });
         }
 
@@ -405,6 +528,82 @@ mod tests {
     fn an_empty_policy_is_refused() {
         let json = br#"{"policyId":"p","policyVersion":"1","assertions":{}}"#;
         assert!(Policy::from_json(json).is_err());
+    }
+
+    fn subject_policy(criteria: &str) -> Result<Policy, String> {
+        let json = format!(
+            r#"{{"policyId":"p","policyVersion":"1","assertions":{{"statementSubject":{criteria}}}}}"#
+        );
+        Policy::from_json(json.as_bytes())
+    }
+
+    #[test]
+    fn a_policy_of_only_a_new_assertion_is_not_empty() {
+        // Guards the reflective `is_empty`. The hand-written chain it replaced
+        // had to be extended for every assertion, and forgetting to do so
+        // rejected a valid policy as though it declared nothing.
+        subject_policy(r#"{"startsWith":"amd-hbom-"}"#).unwrap();
+    }
+
+    #[test]
+    fn a_subject_match_with_no_criteria_is_refused() {
+        let err = subject_policy("{}").unwrap_err();
+        assert!(err.contains("no match criteria"), "{err}");
+    }
+
+    #[test]
+    fn a_subject_match_that_cannot_reject_anything_is_refused() {
+        // `startsWith: ""` is satisfied by every string. Accepting it would put
+        // a rule in the report that passed without examining anything — the
+        // same class of failure as an assertion nobody ran.
+        let err = subject_policy(r#"{"startsWith":""}"#).unwrap_err();
+        assert!(err.contains("empty string"), "{err}");
+    }
+
+    #[test]
+    fn a_subject_match_nothing_can_satisfy_is_refused() {
+        let err = subject_policy(r#"{"oneOf":[]}"#).unwrap_err();
+        assert!(err.contains("oneOf is empty"), "{err}");
+    }
+
+    #[test]
+    fn a_subject_match_with_two_modes_is_refused() {
+        let err = subject_policy(r#"{"equals":"a","startsWith":"b"}"#).unwrap_err();
+        assert!(err.contains("exactly one"), "{err}");
+    }
+
+    #[test]
+    fn an_unknown_subject_match_mode_is_refused() {
+        // `contains` is deliberately absent: `signerSubjectContains` reads a
+        // certificate, and a substring match on an identity claim invites a
+        // policy for 'amd-hbom-1' to accept 'not-amd-hbom-12'.
+        assert!(subject_policy(r#"{"contains":"amd"}"#).is_err());
+    }
+
+    #[test]
+    fn an_absent_subject_claim_cannot_evaluate_rather_than_fail() {
+        // "the statement claims no subject" and "the statement claims the wrong
+        // subject" call for different responses from whoever reads the report.
+        let policy = subject_policy(r#"{"equals":"amd-hbom-1"}"#).unwrap();
+        let facts = StatementFacts::default();
+        assert_eq!(facts.cwt.sub, None);
+        let decision = policy.evaluate(&facts, 0);
+        assert!(decision.unevaluable(), "{decision:?}");
+        assert!(!decision.failed(), "{decision:?}");
+        assert!(!decision.satisfied(), "{decision:?}");
+    }
+
+    #[test]
+    fn a_subject_prefix_does_not_match_in_the_middle() {
+        let policy = subject_policy(r#"{"startsWith":"amd-hbom-"}"#).unwrap();
+        let facts = StatementFacts {
+            cwt: scitt_receipt::statement::CwtClaims {
+                sub: Some("evil-amd-hbom-1".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(policy.evaluate(&facts, 0).failed());
     }
 
     #[test]

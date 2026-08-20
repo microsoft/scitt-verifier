@@ -937,3 +937,75 @@ fn hash_envelope_fixtures_keep_their_exact_bytes() {
         );
     }
 }
+
+/// `statementSubject` reads a claim the issuer signed and the ledger's claim
+/// digest covers, so unlike `signerSubjectContains` it survives re-signing by
+/// a different certificate. These pin the exit codes a gate branches on.
+fn verify_with_subject_policy(name: &str, criteria: &str) -> Run {
+    let dir = std::env::temp_dir().join(format!("scitt-verifier-subject-{name}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let policy = dir.join("policy.json");
+    std::fs::write(
+        &policy,
+        format!(
+            r#"{{"policyId":"subject","policyVersion":"1","assertions":{{"minReceipts":1,"statementSubject":{criteria}}}}}"#
+        ),
+    )
+    .unwrap();
+
+    let statement = corpus(&["fixtures", "transparent-statement.cose"]);
+    let keys = corpus(&["fixtures", "musa-mst-july-scitt-keys.cbor"]);
+    let r = run(&[
+        "verify",
+        "--statement",
+        &statement,
+        "--scitt-keys",
+        &keys,
+        "--policy",
+        &policy.display().to_string(),
+    ]);
+    let _ = std::fs::remove_dir_all(&dir);
+    r
+}
+
+#[test]
+fn a_matching_statement_subject_passes() {
+    let r = verify_with_subject_policy("match", r#"{"equals":"unknown.intent"}"#);
+    assert_eq!(r.code, 0, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("[pass] statementSubject"),
+        "the assertion must be shown as having run: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn a_statement_about_something_else_fails_the_policy() {
+    // The whole point: a genuine, transparent statement from an accepted
+    // issuer must still be refused when it is about a different subject.
+    let r = verify_with_subject_policy("mismatch", r#"{"equals":"some.other.thing"}"#);
+    assert_eq!(
+        r.code, 2,
+        "a subject mismatch is a policy failure, not a crypto failure: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("[FAIL] statementSubject"),
+        "the failing assertion must be named: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn a_vacuous_subject_match_is_refused_before_anything_is_verified() {
+    // `startsWith: ""` accepts every subject. Refusing it at parse time is
+    // what keeps it from appearing in the report as a rule that passed.
+    let r = verify_with_subject_policy("vacuous", r#"{"startsWith":""}"#);
+    assert_eq!(r.code, 4, "a rule that cannot reject is a usage error");
+    assert!(
+        !r.stdout.starts_with("PASS"),
+        "a refused policy must never print a pass: {}",
+        r.stdout
+    );
+}
