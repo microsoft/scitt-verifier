@@ -126,7 +126,10 @@ pub fn inspect_statement(statement: &[u8]) -> Result<String, JsValue> {
 
     // `claim_digest()` already returns the digest. Hex-encode it; hashing it
     // again would produce a plausible-looking string that matches nothing.
-    let claim_digest = parsed.claim_digest().ok().map(|d| scitt_receipt::cbor::hex(&d));
+    let claim_digest = parsed
+        .claim_digest()
+        .ok()
+        .map(|d| scitt_receipt::cbor::hex(&d));
 
     let out = json!({
         "wasTagged": parsed.was_tagged,
