@@ -37,7 +37,7 @@ VERIFY OPTIONS:
     --policy <FILE>          Relying-party policy document (JSON).         [required]
     --issuer <URL>           Scope the key set to one issuer. Recommended.
     --artifact <FILE>        The artifact the statement should describe.
-    --binding-mode <MODE>    none | payload-bytes                          [default: none]
+    --binding-mode <MODE>    none | payload-bytes | payload-digest         [default: none]
     --format <FORMAT>        text | json                                   [default: text]
     --result <FILE>          Write the verification record to a file. This is
                              byte-for-byte the same document --format json
@@ -69,6 +69,10 @@ pub enum BindingMode {
     None,
     /// The statement's payload is the artifact, byte for byte.
     PayloadBytes,
+    /// The statement is a COSE Hash Envelope (RFC 9995): its payload is a
+    /// digest of the artifact, produced with the algorithm named in the
+    /// protected header.
+    PayloadDigest,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,17 +169,11 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 binding_mode = Some(match raw.as_str() {
                     "none" => BindingMode::None,
                     "payload-bytes" => BindingMode::PayloadBytes,
-                    // Named explicitly so the error says "not yet" rather than
-                    // "unknown". A user who asks for hash-envelope binding is
-                    // asking the right question; we just cannot answer it yet.
-                    "payload-digest" => return Err(
-                        "binding mode 'payload-digest' (COSE Hash Envelope) is not implemented \
-                             in this release. Refusing rather than reporting an unchecked binding."
-                            .into(),
-                    ),
+                    "payload-digest" => BindingMode::PayloadDigest,
                     other => {
                         return Err(format!(
-                            "unknown binding mode '{other}'; expected 'none' or 'payload-bytes'"
+                            "unknown binding mode '{other}'; expected 'none', 'payload-bytes' \
+                             or 'payload-digest'"
                         ))
                     }
                 });
@@ -220,7 +218,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     if artifact.is_some() && binding_mode == BindingMode::None {
         return Err(
             "--artifact was supplied but --binding-mode is 'none', so the artifact would be \
-             ignored. Pass --binding-mode payload-bytes, or drop --artifact."
+             ignored. Pass --binding-mode payload-bytes or payload-digest, or drop --artifact."
                 .into(),
         );
     }
@@ -308,8 +306,43 @@ mod tests {
         assert!(err.contains("--payload"), "{err}");
     }
 
+    /// Every advertised mode must parse. A mode named in `--help` that the
+    /// parser rejects sends the operator looking for a bug in their pipeline.
     #[test]
-    fn unimplemented_binding_mode_is_refused_not_ignored() {
+    fn every_advertised_binding_mode_parses() {
+        for (text, expected) in [
+            ("payload-bytes", BindingMode::PayloadBytes),
+            ("payload-digest", BindingMode::PayloadDigest),
+        ] {
+            let parsed = parse(&args(&[
+                "verify",
+                "--statement",
+                "a",
+                "--scitt-keys",
+                "b",
+                "--policy",
+                "c",
+                "--artifact",
+                "d",
+                "--binding-mode",
+                text,
+            ]))
+            .unwrap_or_else(|e| panic!("{text} must parse: {e}"));
+            let Command::Verify(v) = parsed else {
+                panic!("expected a verify command");
+            };
+            assert_eq!(v.binding_mode, expected);
+            assert!(
+                USAGE.contains(text),
+                "{text} parses but is not documented in --help"
+            );
+        }
+    }
+
+    /// An unknown mode must be refused rather than quietly treated as `none`,
+    /// which would report a binding nobody performed as one nobody asked for.
+    #[test]
+    fn an_unknown_binding_mode_is_refused() {
         let err = parse(&args(&[
             "verify",
             "--statement",
@@ -321,10 +354,10 @@ mod tests {
             "--artifact",
             "d",
             "--binding-mode",
-            "payload-digest",
+            "payload-sha256",
         ]))
         .unwrap_err();
-        assert!(err.contains("not implemented"), "{err}");
+        assert!(err.contains("payload-sha256"), "{err}");
     }
 
     #[test]

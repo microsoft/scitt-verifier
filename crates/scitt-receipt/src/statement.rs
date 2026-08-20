@@ -134,6 +134,49 @@ impl Sign1 {
         }
     }
 
+    /// The COSE Hash Envelope payload hash algorithm (RFC 9995 label 258), if
+    /// this statement is a hash envelope.
+    ///
+    /// Read from the **protected** bucket only. RFC 9995 §4 requires label 258
+    /// there and forbids it in the unprotected bucket, and the reason is not
+    /// pedantry: an attacker who could add an unprotected 258 would be choosing
+    /// the hash function used to check the artifact.
+    pub fn payload_hash_alg(&self) -> Option<i64> {
+        cbor::opt_int_key(&self.protected, labels::PAYLOAD_HASH_ALG)
+            .and_then(|v| cbor::as_int(v).ok())
+    }
+
+    /// Whether this statement is a COSE Hash Envelope — that is, whether its
+    /// payload is a digest of some other resource rather than the resource.
+    ///
+    /// Label 258's presence is the discriminator, so a caller never has to be
+    /// told which shape it is holding.
+    pub fn is_hash_envelope(&self) -> bool {
+        self.payload_hash_alg().is_some()
+    }
+
+    /// The content type of the bytes that were hashed (RFC 9995 label 259).
+    ///
+    /// This is *not* [`Self::content_type`]. Label 3 describes the payload,
+    /// which in a hash envelope is a digest; label 259 describes the preimage.
+    pub fn payload_preimage_content_type(&self) -> Option<String> {
+        match cbor::opt_int_key(&self.protected, labels::PAYLOAD_PREIMAGE_CONTENT_TYPE)? {
+            CborValue::TextString(s) => Some(s.clone()),
+            CborValue::Int(i) => Some(format!("coap-content-format({i})")),
+            _ => None,
+        }
+    }
+
+    /// Where the preimage can be retrieved from (RFC 9995 label 260).
+    ///
+    /// A hint for a human. This tool is offline and will never fetch it.
+    pub fn payload_location(&self) -> Option<String> {
+        match cbor::opt_int_key(&self.protected, labels::PAYLOAD_LOCATION)? {
+            CborValue::TextString(s) => Some(s.clone()),
+            _ => None,
+        }
+    }
+
     /// The `x5t` certificate thumbprint: the COSE hash algorithm and the digest.
     pub fn x5t(&self) -> Option<(i64, String)> {
         let value = cbor::opt_int_key(&self.protected, labels::X5T)?;
@@ -485,4 +528,18 @@ fn hex_prefix(bytes: &[u8]) -> String {
 /// Digest of an artifact, for binding a statement to the thing it describes.
 pub fn sha256_hex(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
+}
+
+/// Digest `bytes` with a COSE hash algorithm identifier.
+///
+/// Returns `None` for algorithms this build cannot compute, so a caller
+/// reports "not evaluated" rather than silently choosing a different function
+/// than the signer named.
+pub fn digest_with(cose_alg: i64, bytes: &[u8]) -> Option<Vec<u8>> {
+    match cose_alg {
+        labels::alg::SHA256 => Some(Sha256::digest(bytes).to_vec()),
+        labels::alg::SHA384 => Some(sha2::Sha384::digest(bytes).to_vec()),
+        labels::alg::SHA512 => Some(sha2::Sha512::digest(bytes).to_vec()),
+        _ => None,
+    }
 }

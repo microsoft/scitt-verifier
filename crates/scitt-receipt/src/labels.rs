@@ -9,6 +9,23 @@ pub const X5CHAIN: i64 = 33;
 /// Certificate thumbprint: `[hash-alg, digest]`.
 pub const X5T: i64 = 34;
 
+/// COSE Hash Envelope (RFC 9995). The payload is the *digest* of some other
+/// resource rather than the resource itself.
+///
+/// Note that RFC 9995 §4 forbids [`CONTENT_TYPE`] in either bucket of a hash
+/// envelope, precisely because label 3 describes the payload while
+/// [`PAYLOAD_PREIMAGE_CONTENT_TYPE`] describes what was hashed to produce it.
+/// Confusing the two is how a verifier ends up comparing an artifact against a
+/// digest.
+///
+/// The hash algorithm used to produce the payload. REQUIRED in the protected
+/// header, and its presence is what identifies a hash envelope.
+pub const PAYLOAD_HASH_ALG: i64 = 258;
+/// The content type of the bytes that were hashed (the preimage).
+pub const PAYLOAD_PREIMAGE_CONTENT_TYPE: i64 = 259;
+/// Where the original resource (the preimage) can be retrieved from.
+pub const PAYLOAD_LOCATION: i64 = 260;
+
 /// SCITT receipts, carried in the statement's *unprotected* bucket.
 pub const RECEIPTS: i64 = 394;
 /// Verifiable data structure identifier.
@@ -66,6 +83,9 @@ pub fn header_name(label: i64) -> Option<&'static str> {
         CWT_CLAIMS => Some("cwtClaims"),
         X5CHAIN => Some("x5chain"),
         X5T => Some("x5t"),
+        PAYLOAD_HASH_ALG => Some("payloadHashAlg"),
+        PAYLOAD_PREIMAGE_CONTENT_TYPE => Some("payloadPreimageContentType"),
+        PAYLOAD_LOCATION => Some("payloadLocation"),
         RECEIPTS => Some("receipts"),
         VERIFIABLE_DATA_STRUCTURE => Some("verifiableDataStructure"),
         VDP => Some("verifiableDataProofs"),
@@ -88,6 +108,9 @@ pub fn header_display_name(label: i64) -> Option<&'static str> {
         CWT_CLAIMS => Some("cwt claims"),
         X5CHAIN => Some("x5chain"),
         X5T => Some("x5t"),
+        PAYLOAD_HASH_ALG => Some("payload hash alg"),
+        PAYLOAD_PREIMAGE_CONTENT_TYPE => Some("preimage cty"),
+        PAYLOAD_LOCATION => Some("payload location"),
         RECEIPTS => Some("receipts"),
         VERIFIABLE_DATA_STRUCTURE => Some("data structure"),
         VDP => Some("proofs"),
@@ -119,6 +142,12 @@ pub mod alg {
     pub const PS512: i64 = -39;
     pub const RS256: i64 = -257;
 
+    /// Hash algorithms from the same registry, used by `x5t` and by the COSE
+    /// Hash Envelope payload hash (RFC 9995 label 258).
+    pub const SHA256: i64 = -16;
+    pub const SHA384: i64 = -43;
+    pub const SHA512: i64 = -44;
+
     pub fn name(alg: i64) -> String {
         match alg {
             ES256 => "ES256".into(),
@@ -131,10 +160,9 @@ pub mod alg {
             -258 => "RS384".into(),
             -259 => "RS512".into(),
             -8 => "EdDSA".into(),
-            // Hash algorithms from the same registry, used by `x5t`.
-            -16 => "SHA-256".into(),
-            -43 => "SHA-384".into(),
-            -44 => "SHA-512".into(),
+            SHA256 => "SHA-256".into(),
+            SHA384 => "SHA-384".into(),
+            SHA512 => "SHA-512".into(),
             other => format!("alg({other})"),
         }
     }

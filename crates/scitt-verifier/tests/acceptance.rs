@@ -300,14 +300,6 @@ fn a_missing_policy_exits_four() {
 }
 
 #[test]
-fn an_unimplemented_binding_mode_is_refused() {
-    let artifact = corpus(&["fixtures", "artifact.bin"]);
-    let r = verify(&["--artifact", &artifact, "--binding-mode", "payload-digest"]);
-    assert_eq!(r.code, 4);
-    assert!(r.stderr.contains("not implemented"), "{}", r.stderr);
-}
-
-#[test]
 fn an_artifact_that_would_be_ignored_is_refused() {
     let artifact = corpus(&["fixtures", "artifact.bin"]);
     let r = verify(&["--artifact", &artifact]);
@@ -768,4 +760,180 @@ fn inspect_separates_unreadable_from_undecodable() {
 fn help_and_version_succeed() {
     assert_eq!(run(&["--help"]).code, 0);
     assert_eq!(run(&["--version"]).code, 0);
+}
+
+// ---------------------------------------------------------------------------
+// COSE Hash Envelope binding (RFC 9995)
+//
+// The fixture is a real `CoseSignTool indirect-sign` envelope, not a
+// hand-rolled one, so these tests fail if our reading of the RFC diverges from
+// an independent implementation's writing of it.
+//
+// It carries no receipt, so a bound run still stops at exit 3. That is the
+// honest answer — an artifact bound to a merely-signed statement is not
+// transparent — and it is why these tests assert on the binding *detail* as
+// well as the code.
+// ---------------------------------------------------------------------------
+
+fn verify_envelope(extra: &[&str]) -> Run {
+    let statement = corpus(&["fixtures", "hash-envelope.cose"]);
+    let keys = corpus(&["fixtures", "musa-mst-july-scitt-keys.cbor"]);
+    let policy = corpus(&["policies", "fixture-mst.json"]);
+    let mut args = vec![
+        "verify",
+        "--statement",
+        &statement,
+        "--scitt-keys",
+        &keys,
+        "--policy",
+        &policy,
+    ];
+    args.extend_from_slice(extra);
+    run(&args)
+}
+
+#[test]
+fn a_hash_envelope_binds_to_the_artifact_it_hashes() {
+    let artifact = corpus(&["fixtures", "hash-envelope-artifact.spdx.json"]);
+    let r = verify_envelope(&["--artifact", &artifact, "--binding-mode", "payload-digest"]);
+    assert!(
+        r.stdout.contains("SHA-256"),
+        "a bound digest run must name the algorithm it used: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains("do not"),
+        "a matching artifact must not be accused: {}",
+        r.stdout
+    );
+    // No receipt in this fixture, so transparency cannot be claimed even
+    // though the binding held.
+    assert_eq!(r.code, 3, "{}", r.stdout);
+}
+
+#[test]
+fn a_hash_envelope_rejects_a_different_artifact() {
+    // The signature is genuine and the envelope is well-formed. What is wrong
+    // is that this is not the file that was signed.
+    let artifact = corpus(&["fixtures", "hash-envelope-bad-artifact.spdx.json"]);
+    let r = verify_envelope(&["--artifact", &artifact, "--binding-mode", "payload-digest"]);
+    assert_eq!(
+        r.code, 1,
+        "a digest mismatch is a finding about the artifact: {}",
+        r.stdout
+    );
+}
+
+/// Naming the wrong mode must never look like a tampered artifact.
+///
+/// `payload-bytes` against an envelope compares the whole file to a 32-byte
+/// digest. Reported as a mismatch, that tells an operator to distrust a build
+/// that is in fact fine — the most damaging output this tool can produce.
+#[test]
+fn payload_bytes_against_a_hash_envelope_cannot_compare() {
+    let artifact = corpus(&["fixtures", "hash-envelope-artifact.spdx.json"]);
+    let r = verify_envelope(&["--artifact", &artifact, "--binding-mode", "payload-bytes"]);
+    assert_ne!(
+        r.code, 1,
+        "a mode error is not evidence about the artifact: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("payload-digest"),
+        "the refusal must name the mode that would work: {}",
+        r.stdout
+    );
+}
+
+/// The mirror image: `payload-digest` against an ordinary statement.
+#[test]
+fn payload_digest_against_a_plain_statement_cannot_compare() {
+    let artifact = corpus(&["fixtures", "artifact.bin"]);
+    let r = verify(&["--artifact", &artifact, "--binding-mode", "payload-digest"]);
+    assert_ne!(r.code, 1, "not an envelope is not a mismatch: {}", r.stdout);
+    assert!(
+        r.stdout.contains("258"),
+        "the refusal must say what was missing: {}",
+        r.stdout
+    );
+}
+
+/// The regression that would hurt most.
+///
+/// This corpus statement has a genuine receipt and a passing policy, so every
+/// gate except the binding succeeds. An earlier `decide()` enumerated binding
+/// modes by name; `payload-digest` was not in the list, fell through to the
+/// catch-all, and returned `PASS statement-transparent` with exit 0 — plus a
+/// diagnostic claiming binding "was not requested", when the operator had
+/// requested it and the tool had failed to perform it.
+///
+/// A requested-but-unperformed binding must never be reported as any kind of
+/// pass, whichever mode is named.
+#[test]
+fn a_requested_binding_that_cannot_be_performed_is_never_a_pass() {
+    let artifact = corpus(&["fixtures", "artifact.bin"]);
+    let r = verify(&["--artifact", &artifact, "--binding-mode", "payload-digest"]);
+    assert_ne!(
+        r.code, 0,
+        "the operator asked about an artifact and got no answer: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains("PASS"),
+        "an unevaluable binding is not a pass: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains("was not requested"),
+        "it was requested; saying otherwise misreports the operator: {}",
+        r.stdout
+    );
+}
+
+/// `inspect` must not publish a hash-of-a-hash as the payload digest.
+///
+/// For an envelope the payload *is* a digest, so a `sha256` field over it
+/// identifies nothing — and invites a consumer to compare it against their
+/// artifact's digest and conclude, wrongly, that they do not match.
+#[test]
+fn inspect_reports_a_hash_envelope_as_a_digest() {
+    let statement = corpus(&["fixtures", "hash-envelope.cose"]);
+    let r = run(&["inspect", "--statement", &statement, "--format", "json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let value: serde_json::Value = serde_json::from_str(&r.stdout).expect("stdout must be JSON");
+    let payload = &value["payload"];
+    assert!(
+        payload["sha256"].is_null(),
+        "a digest of a digest must not be published as the payload hash: {payload}"
+    );
+    assert_eq!(payload["hashEnvelope"]["hashAlg"], "SHA-256");
+    assert_eq!(
+        payload["hashEnvelope"]["preimageContentType"],
+        "application/spdx+json"
+    );
+    assert!(
+        payload["hashEnvelope"]["digest"].is_string(),
+        "the artifact digest must be published in full: {payload}"
+    );
+}
+
+/// The fixtures are hashed byte-for-byte, so a checkout that rewrites their
+/// line endings would break the binding tests in a way that looks like a code
+/// bug. Fail loudly and point at the cause instead.
+#[test]
+fn hash_envelope_fixtures_keep_their_exact_bytes() {
+    for (name, expected) in [
+        ("hash-envelope.cose", 702usize),
+        ("hash-envelope-artifact.spdx.json", 57),
+        ("hash-envelope-bad-artifact.spdx.json", 44),
+    ] {
+        let bytes = std::fs::read(corpus(&["fixtures", name])).unwrap();
+        assert_eq!(
+            bytes.len(),
+            expected,
+            "fixture {name} is {} bytes, expected {expected}. The checkout \
+             transformed it — check .gitattributes and core.autocrlf.",
+            bytes.len()
+        );
+    }
 }

@@ -17,7 +17,7 @@ use outcome::{
     Trust, Verdict,
 };
 use scitt_policy::{Outcome as AssertionOutcome, Policy, PolicyDecision};
-use scitt_receipt::{verify_statement, LedgerKeySet, Sign1, StatementFacts};
+use scitt_receipt::{labels, verify_statement, LedgerKeySet, Sign1, StatementFacts};
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -425,14 +425,19 @@ fn decide(
     // Everything held. Which success this is depends entirely on whether the
     // operator asked us to look at an artifact — a question the tool must
     // never answer on their behalf.
+    //
+    // Matched on the *outcome* rather than on each mode by name. Enumerating
+    // modes here meant that adding one silently opted it out of the
+    // `CannotCompare` guard below and handed it a pass.
     match (mode, binding.outcome) {
-        (BindingMode::PayloadBytes, Binding::Bound) => Verdict::ArtifactTransparent,
+        (BindingMode::None, _) | (_, Binding::NotRequested) => Verdict::StatementTransparent,
+        (_, Binding::Bound) => Verdict::ArtifactTransparent,
         // A requested comparison that could not be made is not a success of
         // either kind. Falling through to `statement-transparent` here would
         // quietly downgrade the operator's request into a claim about the
         // statement alone.
-        (BindingMode::PayloadBytes, Binding::CannotCompare) => Verdict::CannotEvaluate,
-        _ => Verdict::StatementTransparent,
+        (_, Binding::CannotCompare) => Verdict::CannotEvaluate,
+        (_, Binding::Mismatch) => Verdict::Untrusted,
     }
 }
 
@@ -790,6 +795,19 @@ fn check_binding(args: &VerifyArgs, statement_bytes: &[u8]) -> Result<BindingRes
     match args.binding_mode {
         BindingMode::None => Ok(BindingResult::not_requested()),
         BindingMode::PayloadBytes => {
+            // A hash envelope's payload is a digest, so comparing it to the
+            // artifact would always differ. Reporting Mismatch here would
+            // accuse the operator of shipping a tampered artifact when the
+            // real fault is the mode: exit 1 says "do not trust this
+            // artifact", which is a claim we have no evidence for.
+            if statement.is_hash_envelope() {
+                return Ok(BindingResult {
+                    outcome: Binding::CannotCompare,
+                    detail: "this statement is a COSE Hash Envelope, so its payload is a digest \
+                             rather than the artifact; re-run with --binding-mode payload-digest"
+                        .into(),
+                });
+            }
             let Some(payload) = statement.payload.as_deref() else {
                 // A detached payload is not a mismatch. There is nothing to
                 // compare, so `payload-bytes` cannot answer the question —
@@ -828,7 +846,92 @@ fn check_binding(args: &VerifyArgs, statement_bytes: &[u8]) -> Result<BindingRes
                 },
             })
         }
+        BindingMode::PayloadDigest => check_payload_digest(&statement, &artifact, artifact_path),
     }
+}
+
+/// COSE Hash Envelope binding (RFC 9995).
+///
+/// The payload is a digest of the artifact, produced with the algorithm named
+/// in protected header label 258. We hash the artifact with *that* algorithm
+/// rather than a default: the signer chose it, and quietly substituting
+/// another would mean checking something the signer never asserted.
+fn check_payload_digest(
+    statement: &Sign1,
+    artifact: &[u8],
+    artifact_path: &Path,
+) -> Result<BindingResult, String> {
+    let Some(alg) = statement.payload_hash_alg() else {
+        // Not a mismatch. The operator asked a question this statement cannot
+        // answer, which is a different thing from the artifact being wrong.
+        return Ok(BindingResult {
+            outcome: Binding::CannotCompare,
+            detail: "this statement is not a COSE Hash Envelope: protected header 258 \
+                     (payload hash algorithm) is absent, so its payload is not a digest"
+                .into(),
+        });
+    };
+
+    let Some(payload) = statement.payload.as_deref() else {
+        return Ok(BindingResult {
+            outcome: Binding::CannotCompare,
+            detail: "the statement payload is detached, so there is no digest to compare the \
+                     artifact against"
+                .into(),
+        });
+    };
+
+    let alg_name = labels::alg::name(alg);
+    let Some(computed) = scitt_receipt::digest_with(alg, artifact) else {
+        // An unsupported hash is a limitation of this tool, never a finding
+        // about the artifact.
+        return Ok(BindingResult {
+            outcome: Binding::CannotCompare,
+            detail: format!(
+                "the statement names payload hash algorithm {alg_name}, which this build \
+                 cannot compute; refusing to substitute a different one"
+            ),
+        });
+    };
+
+    // A length difference means the payload was not produced by the algorithm
+    // the header names. Say so, rather than reporting it as a content
+    // mismatch: the statement is internally inconsistent.
+    if payload.len() != computed.len() {
+        return Ok(BindingResult {
+            outcome: Binding::CannotCompare,
+            detail: format!(
+                "the statement names payload hash algorithm {alg_name} ({} bytes) but its \
+                 payload is {} bytes, so the payload is not a digest of that algorithm",
+                computed.len(),
+                payload.len()
+            ),
+        });
+    }
+
+    let bound = payload == computed.as_slice();
+    Ok(BindingResult {
+        outcome: if bound {
+            Binding::Bound
+        } else {
+            Binding::Mismatch
+        },
+        detail: if bound {
+            format!(
+                "{alg_name} of {} ({} bytes) equals the statement's hash-envelope payload",
+                artifact_path.display(),
+                artifact.len()
+            )
+        } else {
+            format!(
+                "the statement's hash-envelope payload ({alg_name} {}) does not equal \
+                 {alg_name} of {} ({})",
+                scitt_receipt::cbor::hex(payload),
+                artifact_path.display(),
+                scitt_receipt::cbor::hex(&computed),
+            )
+        },
+    })
 }
 
 fn read(path: &Path) -> Result<Vec<u8>, String> {

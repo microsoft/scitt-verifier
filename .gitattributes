@@ -5,3 +5,8 @@
 *.cose  binary
 *.cbor  binary
 *.bin   binary
+
+# Hash-envelope binding fixtures are hashed byte-for-byte by the test suite.
+# They are JSON, so `text=auto` would otherwise normalise their line endings
+# and silently change every digest computed from them.
+corpus/fixtures/*.spdx.json  binary

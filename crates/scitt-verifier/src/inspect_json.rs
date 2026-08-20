@@ -108,6 +108,12 @@ fn header_value(key: &CborValue, value: &CborValue, verbose: bool) -> Value {
             Ok(alg) => json!({ "id": alg, "name": labels::alg::name(alg) }),
             Err(_) => generic(value, verbose),
         },
+        // Same registry as `alg`, so render it the same way rather than
+        // leaving a bare integer for the reader to look up.
+        labels::PAYLOAD_HASH_ALG => match cbor::as_int(value) {
+            Ok(alg) => json!({ "id": alg, "name": labels::alg::name(alg) }),
+            Err(_) => generic(value, verbose),
+        },
         labels::CWT_CLAIMS => cwt_claims(value, verbose),
         // A CCF `kid` is a byte string holding ASCII hex, not raw digest
         // bytes. Hex-encoding it again would print the hex of the hex.
@@ -373,9 +379,40 @@ fn payload(statement: &Sign1, verbose: bool) -> Value {
     };
     let mut out = Map::new();
     out.insert("bytes".into(), json!(bytes.len()));
-    out.insert("sha256".into(), json!(scitt_receipt::sha256_hex(bytes)));
     if let Some(cty) = statement.content_type() {
         out.insert("contentType".into(), json!(cty));
+    }
+
+    // RFC 9995: the payload is a digest of something else, so a `sha256` of it
+    // would be a hash *of that digest* — a number that identifies nothing and
+    // invites a consumer to compare it against an artifact digest and conclude
+    // "mismatch". Emit the digest under its own key instead, and suppress
+    // `sha256` entirely so there is nothing to confuse it with.
+    match statement.payload_hash_alg() {
+        Some(alg) => {
+            let mut env = Map::new();
+            env.insert("hashAlg".into(), json!(labels::alg::name(alg)));
+            env.insert("hashAlgLabel".into(), json!(alg));
+            env.insert("digest".into(), json!(hex(bytes)));
+            if let Some(cty) = statement.payload_preimage_content_type() {
+                env.insert("preimageContentType".into(), json!(cty));
+            }
+            if let Some(loc) = statement.payload_location() {
+                env.insert("preimageLocation".into(), json!(loc));
+            }
+            out.insert("hashEnvelope".into(), Value::Object(env));
+        }
+        None => {
+            out.insert("sha256".into(), json!(scitt_receipt::sha256_hex(bytes)));
+        }
+    }
+
+    // For a hash envelope the payload is already published in full as
+    // `hashEnvelope.digest`. Re-rendering 32 opaque bytes as `text`/`hex` here
+    // would only invite the reader to treat the digest as content, so the
+    // verbose payload views apply to real payloads only.
+    if statement.payload_hash_alg().is_some() {
+        return Value::Object(out);
     }
 
     if verbose {

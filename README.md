@@ -118,8 +118,11 @@ agent, and nothing that changes behaviour when the agent image is updated.
 published artifacts are `musl` and MSVC static builds, so a dynamic dependency
 shows up as a broken release, not a red suite.
 - **Binding is declared, never inferred.** The tool will not guess which artifact a
-statement describes from a filename or a content type. You say `--binding-mode`,
-or the record says that no binding was established.
+statement describes from a filename or a content type. You say `--binding-mode`
+— `payload-bytes` when the statement carries the artifact, `payload-digest` when
+it carries a COSE Hash Envelope digest of it (RFC 9995) — or the record says that
+no binding was established. Naming the mode that does not apply is reported as
+*cannot compare*, never as a mismatch.
 - **A policy is always required.** There is no default policy, because a default
 would be this tool making a trust decision on your behalf. Whether
 `did:x509:0:sha256:…` is an identity you accept is not knowable here.

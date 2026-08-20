@@ -42,14 +42,23 @@ the underlying crypto crate.
 
 ### COSE Hash Envelope binding (`payload-digest`)
 
-When a statement is produced by indirect signing, the payload **is already a
-digest** of the artifact rather than the artifact itself. Comparing it to the
-artifact's bytes will always report a mismatch — and it is exactly the mode an
-SBOM signed with `CoseSignTool indirect-sign` uses.
+Supported. When a statement is produced by indirect signing (RFC 9995), the
+payload **is already a digest** of the artifact rather than the artifact itself,
+and protected header 258 names the hash algorithm used. `--binding-mode
+payload-digest` hashes your artifact with that algorithm and compares.
 
-Passing `--binding-mode payload-digest` is refused with exit 4 rather than
-approximated. A binding that appears to have been checked but was not is the
-failure this whole tool exists to prevent.
+*What is not automatic:* you must name the mode. The tool will not pick between
+`payload-bytes` and `payload-digest` for you, because the two answer different
+questions and silently switching would let a mode that was never checked look
+like one that passed. Naming the wrong mode is reported as *cannot compare*
+(exit 3), never as a mismatch — a mode error is not evidence about your artifact.
+
+*What is never fetched:* header 260 (`payload_location`) is displayed by
+`inspect` and otherwise ignored. This tool is offline; retrieving the preimage
+from a URL the statement itself chose would not establish anything anyway.
+
+Hash algorithms: SHA-256, SHA-384, and SHA-512. Any other value in header 258
+is reported as *cannot compare*, never approximated with a different hash.
 
 ### Certificate revocation
 

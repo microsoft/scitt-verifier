@@ -260,7 +260,26 @@ pub fn inspect(statement: &Sign1, verbose: bool) -> scitt_receipt::Result<()> {
             if let Some(cty) = statement.content_type() {
                 println!("  {:<19} {}", "content type", cty);
             }
-            println!("  {:<19} {}", "sha-256", scitt_receipt::sha256_hex(bytes));
+            // In a hash envelope the payload *is* a digest of something else
+            // (RFC 9995). Printing sha-256 of it would be the hash of a hash —
+            // a number that looks like the artifact digest a reader is hunting
+            // for, and is not. Show the digest itself instead.
+            if let Some(alg) = statement.payload_hash_alg() {
+                println!(
+                    "  {:<19} {} digest of the preimage, not the preimage itself",
+                    "hash envelope",
+                    scitt_receipt::labels::alg::name(alg)
+                );
+                println!("  {:<19} {}", "digest", scitt_receipt::cbor::hex(bytes));
+                if let Some(cty) = statement.payload_preimage_content_type() {
+                    println!("  {:<19} {}", "preimage cty", cty);
+                }
+                if let Some(loc) = statement.payload_location() {
+                    println!("  {:<19} {}", "preimage at", loc);
+                }
+            } else {
+                println!("  {:<19} {}", "sha-256", scitt_receipt::sha256_hex(bytes));
+            }
         }
         None => println!("  detached — the payload is not carried in this file"),
     }
@@ -344,6 +363,12 @@ fn header_value_text(key: &CborValue, value: &CborValue, verbose: bool, known: b
     };
     match *label {
         labels::ALG => cbor::as_int(value)
+            .map(labels::alg::name)
+            .unwrap_or_else(|_| scalar(value, verbose, known)),
+        // Same registry as `alg`, so the same naming applies. Left as a bare
+        // integer this reads as an opaque constant, when it is the single fact
+        // that decides how an artifact gets hashed.
+        labels::PAYLOAD_HASH_ALG => cbor::as_int(value)
             .map(labels::alg::name)
             .unwrap_or_else(|_| scalar(value, verbose, known)),
         // A CCF `kid` is a byte string holding ASCII hex, not raw digest bytes.

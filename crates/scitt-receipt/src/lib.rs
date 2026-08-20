@@ -55,7 +55,8 @@ pub use receipt::{
     ReceiptFacts, ReceiptSummary,
 };
 pub use statement::{
-    describe_certificate, render_scalar, sha256_hex, CertificateSummary, CwtClaims, Sign1,
+    describe_certificate, digest_with, render_scalar, sha256_hex, CertificateSummary, CwtClaims,
+    Sign1,
 };
 
 /// Re-exported so consumers can walk headers without depending on `tav-cose`

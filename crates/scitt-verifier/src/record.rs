@@ -301,6 +301,7 @@ fn binding_json(args: &VerifyArgs, assessment: &Assessment) -> Value {
     let mode = match args.binding_mode {
         BindingMode::None => "none",
         BindingMode::PayloadBytes => "payload-bytes",
+        BindingMode::PayloadDigest => "payload-digest",
     };
 
     // Derived from the outcome, not from whether `--artifact` was passed.
