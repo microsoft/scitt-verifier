@@ -669,6 +669,58 @@ fn a_failed_facts_write_is_also_fatal() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The record on disk must never contradict the exit code.
+///
+/// The mixed case is the dangerous one and neither test above reaches it: when
+/// `--result` succeeds and `--facts` fails, the run exits 4 while a file
+/// claiming `"pass": true` sits on disk. Stdout being correct is not enough —
+/// the terminal scrolls away and the record is what gets kept, attached to a
+/// release, and read months later by someone reconstructing what was verified.
+#[test]
+fn a_written_record_never_contradicts_the_exit_code() {
+    let dir = std::env::temp_dir().join("scitt-verifier-mixed-write");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let good = dir.join("result.json");
+    let bad = dir.join("no-such-dir").join("facts.json");
+
+    let r = verify(&[
+        "--result",
+        &good.display().to_string(),
+        "--facts",
+        &bad.display().to_string(),
+        "--format",
+        "json",
+    ]);
+
+    assert_eq!(r.code, 4, "a lost handoff file is still a lost audit trail");
+
+    let written = std::fs::read_to_string(&good).expect("the record that could be written must be");
+    let on_disk: serde_json::Value = serde_json::from_str(&written).unwrap();
+
+    assert_eq!(
+        on_disk["appraisal"]["exitCode"], 4,
+        "the persisted record disagrees with the process that wrote it: {on_disk}"
+    );
+    assert_eq!(on_disk["appraisal"]["verdict"], "usage-error");
+    assert_eq!(
+        on_disk["appraisal"]["pass"], false,
+        "a record claiming success for a failed run is worse than no record"
+    );
+
+    // The written record and stdout are the same document, which is what
+    // `--result` promises. Comparing them also catches a fix that corrects one
+    // path and leaves the other behind.
+    let printed: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    assert_eq!(
+        on_disk, printed,
+        "the file and stdout must be the same document"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The retired flag must fail loudly rather than being silently accepted.
 #[test]
 fn the_renamed_evidence_flag_explains_itself() {

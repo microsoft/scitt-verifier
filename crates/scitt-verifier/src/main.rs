@@ -286,46 +286,61 @@ fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
 /// Takes the assessment by value because a failed write has to change it.
 /// Printing a document that says `artifact-transparent` while exiting 4 would
 /// hand a consumer two contradictory answers from the same run.
+///
+/// The write order is load-bearing, not incidental. Only the record carries an
+/// `appraisal`, so only the record can be made wrong by a later demotion. The
+/// facts document is a projection of the observation blocks alone — what was
+/// seen, never what was concluded — so nothing that happens after it lands can
+/// falsify it, and it is safe to commit before the outcome is known. The record
+/// is written last, once every other write outcome has been folded in.
+///
+/// Reversed, the two files disagree: a successful `--result` followed by a
+/// failed `--facts` leaves `"pass": true, "exitCode": 0` on disk for a run that
+/// exits 4. Stdout would be correct and the file would be wrong, which is the
+/// worse way round — the terminal scrolls away, the audit record is kept.
 fn emit(args: &VerifyArgs, mut assessment: Assessment, now: i64) -> Verdict {
-    let mut failures = Vec::new();
-
-    if let Some(path) = &args.result {
-        if let Err(d) = write_json(
-            path,
-            "verification record",
-            &record::build(args, &assessment, now),
-        ) {
-            failures.push(d);
-        }
-    }
     if let Some(path) = &args.facts {
         if let Err(d) = write_json(
             path,
             "facts document",
             &record::facts(args, &assessment, now),
         ) {
-            failures.push(d);
+            demote(&mut assessment, d);
+        }
+    }
+    if let Some(path) = &args.result {
+        if let Err(d) = write_json(
+            path,
+            "verification record",
+            &record::build(args, &assessment, now),
+        ) {
+            // No stale file to worry about here: the write that failed is the
+            // one that would have carried the now-superseded verdict.
+            demote(&mut assessment, d);
         }
     }
 
-    if !failures.is_empty() {
-        // A pass whose audit trail vanished is not a pass a gate should act on.
-        // Failures keep their own, more important, verdict and diagnostic.
-        if assessment.verdict.is_pass() {
-            assessment.verdict = Verdict::UsageError;
-            assessment.primary = Some(failures[0].clone());
-        }
-        assessment.diagnostics.extend(failures);
-    }
-
-    // Built after the write outcome is known, so stdout agrees with the exit
-    // code even when the file could not be written.
+    // Built after every write outcome is known, so stdout agrees with the exit
+    // code and with the record on disk.
     match args.format {
         Format::Json => println!("{:#}", record::build(args, &assessment, now)),
         Format::Text => report::verify(&assessment),
     }
 
     assessment.verdict
+}
+
+/// A pass whose audit trail vanished is not a pass a gate should act on.
+///
+/// Only a pass is demoted: a run that already failed keeps its own, more
+/// important, verdict and primary diagnostic, and takes the write failure as an
+/// additional one.
+fn demote(assessment: &mut Assessment, failure: Diagnostic) {
+    if assessment.verdict.is_pass() {
+        assessment.verdict = Verdict::UsageError;
+        assessment.primary = Some(failure.clone());
+    }
+    assessment.diagnostics.push(failure);
 }
 
 fn write_json(path: &Path, what: &str, document: &serde_json::Value) -> Result<(), Diagnostic> {

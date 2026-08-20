@@ -128,9 +128,18 @@ it — during an incident.
 
 A pass whose audit trail vanished is not a pass a gate should act on. If
 `--result` or `--facts` is supplied and the write fails, a passing run is
-downgraded to `usage-error` (exit 4) and the emitted document is built from the
-downgraded assessment so that its `verdict` and `exitCode` agree with the
-process. A run that was already failing keeps its own, more important, verdict.
+downgraded to `usage-error` (exit 4). Both the printed document and any file
+that *was* written are built from the downgraded assessment, so their `verdict`
+and `exitCode` agree with the process. A run that was already failing keeps its
+own, more important, verdict.
+
+That guarantee is why `--facts` is written before `--result`. The facts
+projection carries no `appraisal`, so a downgrade decided after it lands cannot
+make what was written wrong. The record does carry one, so it is written last,
+once every other write outcome is known. In the other order a successful
+`--result` followed by a failed `--facts` would leave `"pass": true` and
+`"exitCode": 0` on disk for a run that exits 4 — and the file is what gets kept
+after the terminal output is gone.
 
 The most common cause is an output path whose parent directory does not exist.
 
