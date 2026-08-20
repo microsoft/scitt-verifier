@@ -1,0 +1,12 @@
+{
+  "policyId": "esrp-mst-prod",
+  "policyVersion": "1",
+  "assertions": {
+    "issuer": [
+      "esrp-cts-cp.confidential-ledger.azure.com",
+      "esrp-cts-db.confidential-ledger.azure.com"
+    ],
+    "minReceipts": 1,
+    "requireKidBoundToKey": true
+  }
+}

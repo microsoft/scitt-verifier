@@ -6,6 +6,7 @@
 //! identically on an air-gapped build agent three months later.
 
 mod cli;
+mod inspect_json;
 mod outcome;
 mod record;
 mod report;
@@ -44,7 +45,7 @@ fn main() -> ExitCode {
             println!("scitt-verifier {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
-        Command::Inspect { statement } => ExitCode::from(run_inspect(&statement)),
+        Command::Inspect(args) => ExitCode::from(run_inspect(&args)),
         Command::Verify(args) => ExitCode::from(run_verify(&args).exit_code()),
     }
 }
@@ -56,7 +57,8 @@ fn main() -> ExitCode {
 /// 2. It distinguishes two failures that are genuinely different: input we
 /// could not read (exit 4, the operator's problem) and input we could read but
 /// not decode (exit 3, a real finding about the file).
-fn run_inspect(path: &Path) -> u8 {
+fn run_inspect(args: &cli::InspectArgs) -> u8 {
+    let path = &args.statement;
     let bytes = match read(path) {
         Ok(b) => b,
         Err(e) => {
@@ -74,15 +76,30 @@ fn run_inspect(path: &Path) -> u8 {
             return Verdict::CannotEvaluate.exit_code();
         }
     };
-    match report::inspect(&statement) {
-        Ok(()) => 0,
-        Err(e) => {
-            eprintln!("error: {e}");
-            Verdict::CannotEvaluate.exit_code()
+
+    match args.format {
+        Format::Json => {
+            let document = inspect_json::document(&statement, args.verbose);
+            match serde_json::to_string_pretty(&document) {
+                Ok(text) => {
+                    println!("{text}");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("error: could not render the inspect document: {e}");
+                    Verdict::CannotEvaluate.exit_code()
+                }
+            }
         }
+        Format::Text => match report::inspect(&statement, args.verbose) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("error: {e}");
+                Verdict::CannotEvaluate.exit_code()
+            }
+        },
     }
 }
-
 fn run_verify(args: &VerifyArgs) -> Verdict {
     let now = args.now.unwrap_or_else(|| {
         SystemTime::now()

@@ -50,8 +50,17 @@ pub mod statement;
 
 pub use error::{Error, Result};
 pub use keys::{KeyLookup, LedgerKey, LedgerKeySet};
-pub use receipt::{verify_receipt, ReceiptFacts};
-pub use statement::{sha256_hex, CwtClaims, Sign1};
+pub use receipt::{
+    describe_inclusion_proof, describe_receipt, verify_receipt, InclusionProof, ProofStep,
+    ReceiptFacts, ReceiptSummary,
+};
+pub use statement::{
+    describe_certificate, render_scalar, sha256_hex, CertificateSummary, CwtClaims, Sign1,
+};
+
+/// Re-exported so consumers can walk headers without depending on `tav-cose`
+/// directly, and so the CBOR representation stays this crate's concern.
+pub use tav_cose::CborValue;
 
 /// Everything learned about one transparent statement.
 #[derive(Debug, Clone, Default)]

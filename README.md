@@ -288,11 +288,10 @@ until v1.0. Known gaps are listed in [docs/limitations.md](docs/limitations.md)
 and reported at runtime in the `appraisal.notChecked` field of every
 verification record.
 
-The output contract changed after v0.1.0: `verified` was replaced by the two
-artifact-aware verdicts, the record was restructured around the RFC 9943
-vocabulary, and `--evidence` became `--result`. The schema is now
-`scitt-verifier/result/v0`. If you pinned against v0.1.0 output, read
-[docs/output.md](docs/output.md) before upgrading.
+The verification record's schema is `scitt-verifier/result/v0`. The `v0` is
+deliberate — the shape is still moving, and it says so. It freezes at `v1` when
+this repository goes public. See [docs/output.md](docs/output.md) for the
+contract.
 
 ## Contributing
 

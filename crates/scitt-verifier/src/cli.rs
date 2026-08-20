@@ -12,8 +12,24 @@ pub const USAGE: &str = r#"scitt-verifier — verify SCITT transparent statement
 
 USAGE:
     scitt-verifier verify  --statement <FILE> --scitt-keys <FILE> --policy <FILE> [OPTIONS]
-    scitt-verifier inspect --statement <FILE>
+    scitt-verifier inspect --statement <FILE> [--verbose] [--format <FORMAT>]
     scitt-verifier --version | --help
+
+INSPECT OPTIONS:
+    --statement <FILE>       Transparent statement (COSE_Sign1).           [required]
+    --verbose, -v            Add the certificate chain, per-receipt headers,
+                             the decoded inclusion proof, and the full payload.
+                             Without it, large blobs are summarised; the JSON
+                             marks each one "elided": true so a consumer can
+                             tell a summary from the real thing.
+    --format <FORMAT>        text | json                                   [default: text]
+
+inspect reports what the file says. It verifies nothing — use `verify` to
+make a decision. Its JSON carries "verified": false for the same reason.
+
+To extract a payload, read it out of the JSON:
+    inspect --statement s.cose --format json --verbose | jq -r .payload.json
+Binary payloads appear as .payload.hex.
 
 VERIFY OPTIONS:
     --statement <FILE>       Transparent statement (COSE_Sign1).           [required]
@@ -23,8 +39,13 @@ VERIFY OPTIONS:
     --artifact <FILE>        The artifact the statement should describe.
     --binding-mode <MODE>    none | payload-bytes                          [default: none]
     --format <FORMAT>        text | json                                   [default: text]
-    --result <FILE>          Write the machine-readable verification record here.
+    --result <FILE>          Write the verification record to a file. This is
+                             byte-for-byte the same document --format json
+                             prints to stdout; the flag chooses the sink, not
+                             the content. Use both to gate on stdout and keep
+                             an audit trail.
     --facts <FILE>           Write the observations only — no verdict, no policy.
+                             A different document, not a different sink.
                              For systems that make their own decision.
     --now <UNIX_SECONDS>     Override the clock, for reproducible runs.
 
@@ -59,9 +80,26 @@ pub enum Format {
 #[derive(Debug, Clone)]
 pub enum Command {
     Verify(Box<VerifyArgs>),
-    Inspect { statement: PathBuf },
+    Inspect(InspectArgs),
     Help,
     Version,
+}
+
+/// Arguments for `inspect`.
+///
+/// `inspect` has no key set and no policy, and it never will. Its contract is
+/// that it reports what a file says without deciding whether any of it is true.
+#[derive(Debug, Clone)]
+pub struct InspectArgs {
+    pub statement: PathBuf,
+    /// Add the certificate chain, per-receipt detail, and proof shape.
+    pub verbose: bool,
+    /// Text for people, JSON for tooling.
+    ///
+    /// The JSON document carries `"verified": false` in its body rather than
+    /// relying on the reader remembering which command produced it. A file on
+    /// disk has no command line attached to it.
+    pub format: Format,
 }
 
 #[derive(Debug, Clone)]
@@ -122,18 +160,6 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             "--artifact" => artifact = Some(PathBuf::from(value(&mut it, flag)?)),
             "--result" => result = Some(PathBuf::from(value(&mut it, flag)?)),
             "--facts" => facts = Some(PathBuf::from(value(&mut it, flag)?)),
-            // Renamed rather than aliased. In RATS (RFC 9334 §8.1) "Evidence"
-            // is the *input* being appraised, so the old name pointed at the
-            // wrong end of the pipeline. A loud failure here is better than
-            // quietly honouring a name we intend to retire.
-            "--evidence" => {
-                return Err(
-                    "--evidence was renamed to --result (the document is this tool's output; \
-                     in RFC 9334 'Evidence' means the input being appraised). For the \
-                     observations without a verdict, see --facts."
-                        .into(),
-                )
-            }
             "--binding-mode" => {
                 let raw = value(&mut it, flag)?;
                 binding_mode = Some(match raw.as_str() {
@@ -218,6 +244,8 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
 
 fn parse_inspect<'a>(mut it: impl Iterator<Item = &'a String>) -> Result<Command, String> {
     let mut statement = None;
+    let mut verbose = false;
+    let mut format = Format::Text;
     while let Some(flag) = it.next() {
         match flag.as_str() {
             "--statement" => {
@@ -225,13 +253,25 @@ fn parse_inspect<'a>(mut it: impl Iterator<Item = &'a String>) -> Result<Command
                     it.next().ok_or("--statement requires a value")?,
                 ))
             }
+            "--format" => {
+                format = match value(&mut it, flag)?.as_str() {
+                    "text" => Format::Text,
+                    "json" => Format::Json,
+                    other => {
+                        return Err(format!("unknown format '{other}'; expected text or json"))
+                    }
+                }
+            }
+            "--verbose" | "-v" => verbose = true,
             "--help" | "-h" => return Ok(Command::Help),
             other => return Err(format!("unknown option '{other}' for inspect")),
         }
     }
-    Ok(Command::Inspect {
+    Ok(Command::Inspect(InspectArgs {
         statement: statement.ok_or("--statement is required")?,
-    })
+        verbose,
+        format,
+    }))
 }
 
 fn value<'a>(it: &mut impl Iterator<Item = &'a String>, flag: &str) -> Result<String, String> {
@@ -258,6 +298,14 @@ mod tests {
     fn policy_is_mandatory() {
         let err = parse(&args(&["verify", "--statement", "a", "--scitt-keys", "b"])).unwrap_err();
         assert!(err.contains("--policy is required"), "{err}");
+    }
+
+    /// A flag the parser does not know must fail, not be ignored. A gate that
+    /// silently drops an option reports success for a check nobody ran.
+    #[test]
+    fn an_unknown_inspect_flag_is_refused() {
+        let err = parse(&args(&["inspect", "--statement", "a", "--payload", "b"])).unwrap_err();
+        assert!(err.contains("--payload"), "{err}");
     }
 
     #[test]
