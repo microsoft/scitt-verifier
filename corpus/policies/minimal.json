@@ -1,8 +1,8 @@
 {
   "policyId": "example/minimal",
   "policyVersion": "1",
-  "description": "The smallest useful policy: at least one receipt must fully verify.",
+  "description": "The smallest useful policy: the statement must carry exactly one receipt.",
   "assertions": {
-    "minReceipts": 1
+    "receiptCount": 1
   }
 }

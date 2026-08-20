@@ -404,7 +404,10 @@ fn decide(
     // No verified receipt means the statement is, at best, merely signed.
     // That can never be a pass, whatever the policy says. Note this is the
     // only receipt-derived gate: transparency is a positive proof, and a proof
-    // that holds cannot be retracted by appending noise beside it.
+    // that holds cannot be retracted by appending noise beside it. An operator
+    // who needs the stricter "exactly one receipt arrived" rule declares it in
+    // policy, where it reads as their expectation rather than as this tool
+    // refusing a shape RFC 9943 s7.1 permits.
     if !facts.any_receipt_verified() {
         return Verdict::CannotEvaluate;
     }

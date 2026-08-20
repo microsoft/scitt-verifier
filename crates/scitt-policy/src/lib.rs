@@ -55,9 +55,25 @@ pub struct Assertions {
     /// Substring that must appear in the signing certificate's issuer.
     #[serde(default)]
     pub signer_issuer_contains: Option<String>,
-    /// Minimum number of receipts that must fully verify.
+    /// Exactly how many receipts the statement must carry. Must be 1.
+    ///
+    /// Counts receipts *present*, not receipts that verified, because the
+    /// thing it detects is insertion. Receipts ride in the unprotected header
+    /// bucket that no signature covers, so anyone who handled the file can add
+    /// one; a service this tool verifies against issues exactly one per
+    /// registration. A second receipt therefore means the file is not the file
+    /// the service returned, whether or not the extra one verifies.
+    ///
+    /// A value above 1 is refused rather than supported. Receipts are not
+    /// signed as a set, so `2` would be satisfied by attaching a copy of the
+    /// one that exists — counting twice while proving once. Verifying genuinely
+    /// independent registrations needs explicit support, not a larger number.
+    ///
+    /// Deliberately an exact count rather than a lower bound. A minimum of 1
+    /// could only restate what the verdict already guarantees — no run passes
+    /// without a verified receipt — so it would never reject anything.
     #[serde(default)]
-    pub min_receipts: Option<usize>,
+    pub receipt_count: Option<usize>,
     /// Registration must be no earlier than this Unix timestamp.
     #[serde(default)]
     pub registered_after: Option<i64>,
@@ -227,6 +243,20 @@ impl Policy {
         if let Some(subject) = &policy.assertions.statement_subject {
             subject.validate("statementSubject")?;
         }
+        if let Some(expected) = policy.assertions.receipt_count {
+            // Refused at parse time rather than evaluated to a failure, so the
+            // operator learns the policy asks for something unobtainable
+            // instead of watching every artifact fail and hunting for why.
+            if expected != 1 {
+                return Err(format!(
+                    "receiptCount is {expected}, but the only supported value is 1. Receipts are \
+                     not signed as a set, so a count above 1 can be met by attaching a copy of a \
+                     single receipt — counting twice while proving once — and no transparency \
+                     service this build verifies against issues more than one per registration. \
+                     A count of 0 would accept a statement with no proof at all."
+                ));
+            }
+        }
         Ok(policy)
     }
 
@@ -359,19 +389,28 @@ impl Policy {
             });
         }
 
-        if let Some(minimum) = a.min_receipts {
-            let verified = facts.verified_receipts().count();
-            results.push(if verified >= minimum {
+        if let Some(expected) = a.receipt_count {
+            // `receipts_present`, not `verified_receipts()`: this assertion
+            // exists to notice that the file grew a receipt after the service
+            // returned it, and an inserted receipt is unlikely to verify. That
+            // an inserted receipt is disregarded by the verdict is exactly why
+            // counting only the verified ones would never see it.
+            let present = facts.receipts_present;
+            results.push(if present == expected {
                 result(
-                    "minReceipts",
+                    "receiptCount",
                     Outcome::Pass,
-                    format!("{verified} receipt(s) fully verified, {minimum} required"),
+                    format!("statement carries {present} receipt(s), {expected} required"),
                 )
             } else {
                 result(
-                    "minReceipts",
+                    "receiptCount",
                     Outcome::Fail,
-                    format!("only {verified} receipt(s) fully verified, {minimum} required"),
+                    format!(
+                        "statement carries {present} receipt(s), {expected} required; \
+                         receipts are attached to a header no signature covers, so an \
+                         unexpected count means the file is not the one the service returned"
+                    ),
                 )
             });
         }
@@ -535,6 +574,64 @@ mod tests {
             r#"{{"policyId":"p","policyVersion":"1","assertions":{{"statementSubject":{criteria}}}}}"#
         );
         Policy::from_json(json.as_bytes())
+    }
+
+    fn receipt_count_policy(value: &str) -> Result<Policy, String> {
+        let json = format!(
+            r#"{{"policyId":"p","policyVersion":"1","assertions":{{"receiptCount":{value}}}}}"#
+        );
+        Policy::from_json(json.as_bytes())
+    }
+
+    #[test]
+    fn one_receipt_is_the_only_accepted_count() {
+        assert!(receipt_count_policy("1").is_ok());
+    }
+
+    #[test]
+    fn asking_for_two_receipts_is_refused_at_parse_time() {
+        // The count is unobtainable rather than merely strict: no service this
+        // tool verifies against issues two receipts, and the only way to reach
+        // two is to attach a copy of the one that exists. Refusing the policy
+        // tells the operator that; failing every artifact would not.
+        let err = receipt_count_policy("2").unwrap_err();
+        assert!(err.contains("only supported value is 1"), "{err}");
+    }
+
+    #[test]
+    fn a_large_receipt_count_is_refused_too() {
+        assert!(receipt_count_policy("99").is_err());
+    }
+
+    #[test]
+    fn a_zero_receipt_count_is_refused() {
+        // Zero would accept a statement carrying no proof of registration at
+        // all, which is the one thing this tool exists to require.
+        assert!(receipt_count_policy("0").is_err());
+    }
+
+    #[test]
+    fn an_extra_receipt_fails_the_count_even_though_it_is_disregarded() {
+        // The whole point of the assertion. An inserted receipt does not
+        // verify, so `verified_receipts()` cannot see it and the verdict
+        // rightly ignores it — but the file still is not the one the service
+        // returned, and an operator who asked for exactly one is told so.
+        let policy = receipt_count_policy("1").unwrap();
+        let facts = StatementFacts {
+            receipts_present: 2,
+            ..Default::default()
+        };
+        assert!(policy.evaluate(&facts, 0).failed());
+    }
+
+    #[test]
+    fn a_single_receipt_satisfies_the_count() {
+        let policy = receipt_count_policy("1").unwrap();
+        let facts = StatementFacts {
+            receipts_present: 1,
+            ..Default::default()
+        };
+        assert!(!policy.evaluate(&facts, 0).failed());
     }
 
     #[test]

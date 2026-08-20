@@ -1,0 +1,10 @@
+{
+  "policyId": "corpus/fixture-mst-unpinned-count",
+  "policyVersion": "1",
+  "description": "fixture-mst without receiptCount. Exists so the conformance suite can prove the verdict itself disregards an appended receipt, per RFC 9943 s7.1, separately from an operator opting in to receiptCount.",
+  "assertions": {
+    "issuer": ["musa-mst-july.confidential-ledger.azure.com"],
+    "signerIssuerContains": "Microsoft Corporation",
+    "requireKidBoundToKey": true
+  }
+}

@@ -251,7 +251,7 @@ rotation-as-a-pull-request pattern and support for self-hosted ledgers.
   "assertions": {
     "issuer": ["contoso.confidential-ledger.azure.com"],
     "signerIssuerContains": "Contoso Corporation",
-    "minReceipts": 1,
+    "receiptCount": 1,
     "maxAgeDays": 90,
     "requireKidBoundToKey": true
   }

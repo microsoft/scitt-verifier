@@ -103,7 +103,11 @@ fn a_tampered_payload_exits_one() {
 fn an_appended_broken_receipt_does_not_deny_the_gate() {
     let statement = corpus(&["fixtures", "appended-receipt.cose"]);
     let keys = corpus(&["fixtures", "musa-mst-july-scitt-keys.cbor"]);
-    let policy = corpus(&["policies", "fixture-mst.json"]);
+    // Deliberately a policy with no `receiptCount`. The property under test is
+    // the verdict's own behaviour: an unverifiable receipt beside a good one
+    // changes nothing. An operator who wants the stricter rule asks for it, and
+    // `an_appended_receipt_fails_a_policy_that_pins_the_count` covers that.
+    let policy = corpus(&["policies", "fixture-mst-unpinned-count.json"]);
     let r = run(&[
         "verify",
         "--statement",
@@ -135,6 +139,46 @@ fn an_appended_broken_receipt_does_not_deny_the_gate() {
         !r.stdout.contains("Do not deploy"),
         "a broken receipt says nothing about the artifact and must not be \
          described as though it did: {}",
+        r.stdout
+    );
+}
+
+/// The other half of the same fixture: what the verdict disregards, policy can
+/// still refuse.
+///
+/// `receiptCount` counts receipts *present*, so it sees the appended one that
+/// `verified_receipts()` cannot. This is the only way an operator learns the
+/// file is not the one the transparency service returned, and it fails as a
+/// policy decision — exit 2 — rather than as a claim about the artifact, which
+/// is still exactly what its Issuer signed.
+#[test]
+fn an_appended_receipt_fails_a_policy_that_pins_the_count() {
+    let statement = corpus(&["fixtures", "appended-receipt.cose"]);
+    let keys = corpus(&["fixtures", "musa-mst-july-scitt-keys.cbor"]);
+    let policy = corpus(&["policies", "fixture-mst.json"]);
+    let r = run(&[
+        "verify",
+        "--statement",
+        &statement,
+        "--scitt-keys",
+        &keys,
+        "--policy",
+        &policy,
+    ]);
+    assert_eq!(
+        r.code, 2,
+        "an inserted receipt must fail the operator's stated expectation:\n{}",
+        r.stdout
+    );
+    assert!(r.stdout.contains("policy-failed"), "{}", r.stdout);
+    assert!(
+        r.stdout.contains("receiptCount"),
+        "the run must name the assertion that refused it: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains("Do not deploy"),
+        "an inserted receipt indicts the file's handling, not the artifact: {}",
         r.stdout
     );
 }
@@ -949,7 +993,7 @@ fn verify_with_subject_policy(name: &str, criteria: &str) -> Run {
     std::fs::write(
         &policy,
         format!(
-            r#"{{"policyId":"subject","policyVersion":"1","assertions":{{"minReceipts":1,"statementSubject":{criteria}}}}}"#
+            r#"{{"policyId":"subject","policyVersion":"1","assertions":{{"receiptCount":1,"statementSubject":{criteria}}}}}"#
         ),
     )
     .unwrap();

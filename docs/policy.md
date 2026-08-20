@@ -18,7 +18,7 @@ tool making a trust decision on your behalf.
   "assertions": {
     "issuer": ["contoso.confidential-ledger.azure.com"],
     "signerIssuerContains": "Contoso Corporation",
-    "minReceipts": 1,
+    "receiptCount": 1,
     "maxAgeDays": 90,
     "requireKidBoundToKey": true
   }
@@ -40,7 +40,7 @@ apart has no other way to tell them apart.
 | `issuer` | `string[]` | A **fully verified** receipt's issuer must be in this list |
 | `signerSubjectContains` | `string` | Substring of the signing certificate's subject |
 | `signerIssuerContains` | `string` | Substring of the signing certificate's issuer |
-| `minReceipts` | `number` | How many receipts must *fully* verify |
+| `receiptCount` | `number` | How many receipts the statement carries; must be `1` |
 | `registeredAfter` | `number` | Registration at or after this Unix timestamp |
 | `registeredBefore` | `number` | Registration at or before this Unix timestamp |
 | `maxAgeDays` | `number` | Registration within N days of now |
@@ -95,14 +95,19 @@ the only join key available.
 
 Note what it does **not** establish: that the *right issuer* said it. Any key
 can sign a statement claiming any subject. Pair it with `issuer` and
-`minReceipts` so the claim is only accepted from a ledger whose registration
+`receiptCount` so the claim is only accepted from a ledger whose registration
 policy governs who may claim which subject.
 
 ### These assertions are not equally strong
 
-`issuer`, `minReceipts`, `registeredAfter`, `registeredBefore`, `maxAgeDays` and
+`issuer`, `registeredAfter`, `registeredBefore`, `maxAgeDays` and
 `minSvn` read facts that a transparency service signed, or that this tool
 verified. They are load-bearing.
+
+`receiptCount` reads the envelope rather than anything signed: it counts what
+arrived in an unprotected header. That is precisely what makes it useful — it
+sees an insertion the signed material cannot describe — but it detects tampering
+with the file, not a property the service attested.
 
 `statementSubject` reads a claim the issuer signed and the ledger's receipt
 covers. It is stronger than the certificate assertions below, but it identifies
@@ -165,7 +170,7 @@ a build agent and a human are arguing about why a gate failed.
 {
   "policyId": "example/minimal",
   "policyVersion": "1",
-  "assertions": { "minReceipts": 1 }
+  "assertions": { "receiptCount": 1 }
 }
 ```
 
@@ -182,30 +187,38 @@ identity:
   "assertions": {
     "issuer": ["contoso.confidential-ledger.azure.com"],
     "signerIssuerContains": "Contoso Corporation",
-    "minReceipts": 1,
+    "receiptCount": 1,
     "maxAgeDays": 30,
     "requireKidBoundToKey": true
   }
 }
 ```
 
-**Two independent services.** For artifacts where a single transparency service
-is itself a single point of failure:
+**Detecting an inserted receipt.** `receiptCount` counts the receipts the
+statement *carries*, not the ones that verified, and `1` is the only supported
+value:
 
 ```json
 {
-  "policyId": "contoso/dual-attested",
-  "policyVersion": "2",
+  "policyId": "contoso/exactly-one",
+  "policyVersion": "1",
   "assertions": {
-    "issuer": [
-      "contoso.confidential-ledger.azure.com",
-      "contoso-eu.confidential-ledger.azure.com"
-    ],
-    "minReceipts": 2
+    "issuer": ["contoso.confidential-ledger.azure.com"],
+    "receiptCount": 1
   }
 }
 ```
 
-Note that `minReceipts` counts receipts that *fully* verified — inclusion proof,
-root signature, and binding to this statement. A receipt that merely parsed does
-not count.
+Receipts ride in the statement's *unprotected* header bucket, which no signature
+covers, so anyone who handles the file can append one. A transparency service
+issues exactly one receipt per registration, so a second receipt means the file
+is not the one the service returned. Because the verdict disregards receipts
+that fail to verify — RFC 9943 §7.1 lets a Relying Party accept one good receipt
+and ignore the rest — an inserted receipt is otherwise invisible to the gate.
+This assertion is how an operator asks to be told about it.
+
+A value other than `1` is refused when the policy is loaded. Receipts are not
+signed as a set, so `2` could be satisfied by attaching a copy of the receipt
+that already exists: it would count twice while proving once. Requiring genuinely
+independent registrations is a different property than counting, and needs
+explicit support rather than a larger number here.

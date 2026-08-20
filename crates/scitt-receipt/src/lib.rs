@@ -84,6 +84,14 @@ pub struct StatementFacts {
     /// mean "everything present", as `inspect` and the record's receipt
     /// listing do.
     pub receipts: Vec<ReceiptFacts>,
+    /// How many receipt blobs the statement carried, evaluable or not.
+    ///
+    /// `receipts` holds only those that got far enough to produce facts, so a
+    /// blob that failed to parse is missing from it. A caller asking about the
+    /// *shape* of the envelope needs the number that arrived, not the number
+    /// that survived — otherwise appending an unparseable blob looks identical
+    /// to appending nothing.
+    pub receipts_present: usize,
     pub problems: Vec<String>,
 }
 
@@ -175,6 +183,7 @@ pub fn verify_statement(statement_bytes: &[u8], key_set: &LedgerKeySet) -> Resul
         leaf_subject,
         leaf_issuer,
         receipts,
+        receipts_present: receipt_blobs.len(),
         problems,
     })
 }

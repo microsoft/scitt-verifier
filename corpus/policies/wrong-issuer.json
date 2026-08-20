@@ -4,6 +4,6 @@
   "description": "Accepts only a transparency service the fixture was not registered with. Must fail.",
   "assertions": {
     "issuer": ["some-other-ledger.confidential-ledger.azure.com"],
-    "minReceipts": 1
+    "receiptCount": 1
   }
 }
