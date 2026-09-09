@@ -655,7 +655,7 @@ dependencies = [
 
 [[package]]
 name = "scitt-policy"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "scitt-receipt",
  "serde",
@@ -664,7 +664,7 @@ dependencies = [
 
 [[package]]
 name = "scitt-receipt"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "sha2",
  "tee-attestation-verification-cose",
@@ -673,7 +673,7 @@ dependencies = [
 
 [[package]]
 name = "scitt-verifier"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "scitt-policy",
  "scitt-receipt",
@@ -682,7 +682,7 @@ dependencies = [
 
 [[package]]
 name = "scitt-wasm"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "scitt-policy",
  "scitt-receipt",

@@ -202,7 +202,7 @@ crates.io does not permit git dependencies. See [docs/distribution.md](docs/dist
 GitHub Actions:
 
 ```yaml
-- uses: microsoft/scitt-verifier@v0.2.0
+- uses: microsoft/scitt-verifier@v0.3.0
   with:
     statement: sbom.spdx.json.cose
     artifact: sbom.spdx.json
