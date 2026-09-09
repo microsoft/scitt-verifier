@@ -915,6 +915,165 @@ $ scitt-verifier verify \
 `corpus/policies/` holds several more, each written against an artifact that
 exists.
 
+## Starter policies by payload type
+
+There is no `contentType` assertion. A media type is an ordinary protected
+header, so it is pinned with [`protectedHeaders`](#protectedheaders). Which
+label carries it depends on how the payload is carried, and picking the wrong
+one is the most common mistake in this area.
+
+| How the payload is carried | Label | Header |
+|---|---|---|
+| Inline in the statement | `[3]` | `contentType` |
+| Replaced by its hash (hash envelope) | `[259]` | `payloadPreimageContentType` |
+
+A hash envelope also carries the hash algorithm at `[258]` and may carry a
+location at `[260]`. Its purpose is to keep the document itself out of the log,
+so a large SBOM is a natural candidate — and for those the type is at `[259]`,
+not `[3]`.
+
+Choosing the wrong label does not quietly pass. Pinning `[3]` on a hash
+envelope reports
+
+```
+[CANNOT EVALUATE] protectedHeaders — [3]: no such protected header
+```
+
+and exits 3. The gate did not reach a verdict, which is the correct answer to a
+question that was never asked — but it does mean one template cannot cover both
+shapes. Run `inspect` first and pin the label your producer actually emits.
+
+### An SBOM or HBOM, carried inline
+
+A **hardware BOM is not a distinct media type**. An HBOM is an SPDX or
+CycloneDX document that happens to describe hardware, so it uses these
+templates unchanged. There is no `application/hbom+json` to pin.
+
+This one is complete rather than a fragment; the rest build on it.
+
+```json
+{
+  "policyId": "example/sbom-inline",
+  "policyVersion": "1",
+  "description": "An SPDX document registered on our ledger by our identity.",
+  "assertions": {
+    "issuer": ["contoso.confidential-ledger.azure.com"],
+    "receiptCount": 1,
+    "requireKidBoundToKey": true,
+    "protectedHeaders": [
+      { "path": [3], "text": { "equals": "application/spdx+json" } }
+    ]
+  }
+}
+```
+
+SPDX 3.x is a **different media type**, `application/spdx3+json`. A policy
+pinning only `application/spdx+json` rejects an SPDX 3 document with exit 2,
+which reads as a policy failure rather than a version mismatch. Use
+`{ "oneOf": ["application/spdx+json", "application/spdx3+json"] }` if you accept
+both.
+
+### The same document as a hash envelope
+
+The type moves to `[259]`. Pin the hash algorithm too: `[258]` is what makes
+the digest comparison meaningful, and leaving it open accepts whatever the
+producer chose.
+
+```json
+"protectedHeaders": [
+  { "path": [259], "text": { "equals": "application/spdx+json" } },
+  { "path": [258], "alg":  { "oneOf": ["SHA-256", "SHA-384", "SHA-512"] } }
+]
+```
+
+Verify the artifact as well as the type — `--artifact sbom.json --binding-mode
+payload-digest` is what establishes that the statement describes *this*
+document. The header only says what kind of thing was registered.
+
+### CycloneDX
+
+```json
+"protectedHeaders": [
+  { "path": [3], "text": { "oneOf": ["application/vnd.cyclonedx+json",
+                                     "application/vnd.cyclonedx+xml"] } }
+]
+```
+
+`oneOf` rather than `equals` because CycloneDX has both encodings and most
+consumers accept either. Use `equals` if you accept only one.
+
+### in-toto attestations and SLSA provenance
+
+```json
+"protectedHeaders": [
+  { "path": [3], "text": { "startsWith": "application/vnd.in-toto" } }
+]
+```
+
+`startsWith` rather than `equals`, because in-toto also defines
+predicate-specific variants of the form
+`application/vnd.in-toto.<predicate>+json`; an `equals` on the bare type rejects
+them. Narrow it to `equals` if your producer emits exactly one.
+
+Note what this cannot reach. in-toto's own guidance is that consumers "SHOULD
+NOT rely upon the media type ... as faithful indicators of predicate type" and
+should read the `predicateType` field instead. That field is inside the payload,
+which this tool does not parse — so an in-toto pin here constrains the envelope
+only, and the predicate must be checked by whatever consumes the payload.
+
+### A JSON document with no more specific type
+
+```json
+"protectedHeaders": [
+  { "path": [3], "text": { "equals": "application/json" } }
+]
+```
+
+Weak on its own: it distinguishes JSON from a binary blob and nothing else. Pair
+it with `statementSubject` so the policy says *which* document.
+
+### An opaque artifact
+
+```json
+"protectedHeaders": [
+  { "path": [3], "text": { "equals": "application/octet-stream" } }
+]
+```
+
+For a container image or a release binary, the type carries almost no
+information. The load is borne by `--artifact` with a binding mode; the header
+pin only catches a producer that changed shape.
+
+### The strings
+
+| Media type | Registered with IANA |
+|---|---|
+| `application/spdx+json`, `application/spdx3+json` | yes |
+| `application/vnd.cyclonedx+json`, `+xml` | yes |
+| `application/json`, `application/octet-stream`, `application/cose` | yes |
+| `application/vnd.in-toto+json` | **no** — used by convention |
+
+The in-toto type is not in the IANA registry. It is what the in-toto and SLSA
+tooling emits, so it is the right string to pin, but it is a community
+convention rather than a registration and could be superseded.
+
+### What a content-type pin does not establish
+
+**The declared type is a claim by the producer, not a measurement of the
+bytes.** Nothing verifies that a payload labelled `application/spdx+json`
+parses as SPDX, or as JSON at all.
+
+This is not hypothetical. `corpus/fixtures/transparent-statement.cose` declares
+`application/cose`, and its payload is 21 bytes of ASCII text — not a COSE
+object of any kind. It is a real statement from a production service, mislabelled
+when it was registered and registered anyway, because a transparency service
+does not parse what it is handed. A policy pinning `application/cose` accepts it
+and learns nothing about what is inside.
+
+Treat the pin as a check that the producer is emitting the shape you expect.
+Use `--artifact` with a binding mode to establish which bytes, and parse the
+payload with a real parser before trusting its contents.
+
 ## Testing your policy
 
 Treat a policy as code that can be wrong, because it is the only part of this
