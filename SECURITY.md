@@ -29,8 +29,9 @@ This is a verification tool, so the severe class of bug is one where it says
 * Any input that causes a panic or unbounded resource use — a gate that crashes
   is a gate that gets bypassed
 
-Also in scope, though lower severity: a limitation that is **not** reported in
-the `appraisal.notChecked` field of the verification record. Silent gaps in coverage are the
+Also in scope, though lower severity: a limitation that is reported **nowhere** in
+the verification record — not in `appraisal.notChecked`, not in
+`trust.limitations`, and not as a refusal. Silent gaps in coverage are the
 thing this design is most concerned with.
 
 ## Out of scope

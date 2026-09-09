@@ -1,7 +1,7 @@
 # The output contract
 
 Everything in this document is a contract. A pipeline branches on these values,
-so changing one is a breaking change and moves the evidence `schemaVersion`.
+so changing one is a breaking change and moves the record's `schemaVersion`.
 
 ## The verdict
 
@@ -96,7 +96,6 @@ answers reliably.
 ```json
 "trust": {
   "mode": "unsigned-scitt-keys",
-  "issuerScope": "contoso.confidential-ledger.azure.com",
   "limitations": [
     "the key set carries no publisher signature",
     "no revocation status is available offline",
@@ -128,9 +127,18 @@ it — during an incident.
 
 A pass whose audit trail vanished is not a pass a gate should act on. If
 `--result` or `--facts` is supplied and the write fails, a passing run is
-downgraded to `usage-error` (exit 4) and the emitted document is built from the
-downgraded assessment so that its `verdict` and `exitCode` agree with the
-process. A run that was already failing keeps its own, more important, verdict.
+downgraded to `usage-error` (exit 4). Both the printed document and any file
+that *was* written are built from the downgraded assessment, so their `verdict`
+and `exitCode` agree with the process. A run that was already failing keeps its
+own, more important, verdict.
+
+That guarantee is why `--facts` is written before `--result`. The facts
+projection carries no `appraisal`, so a downgrade decided after it lands cannot
+make what was written wrong. The record does carry one, so it is written last,
+once every other write outcome is known. In the other order a successful
+`--result` followed by a failed `--facts` would leave `"pass": true` and
+`"exitCode": 0` on disk for a run that exits 4 — and the file is what gets kept
+after the terminal output is gone.
 
 The most common cause is an output path whose parent directory does not exist.
 
@@ -151,6 +159,44 @@ on which way the run failed.
 to honour, because the flag that would have selected it is the thing that did
 not parse. That case prints usage to stderr and exits 4.
 
+### `--format json` and `--result` are the same document
+
+There are two axes here, not three flags:
+
+| | stdout | file |
+|---|---|---|
+| verification record | `--format json` | `--result <FILE>` |
+| observations only | — | `--facts <FILE>` |
+
+`verify --format json` and `verify --result <FILE>` emit **byte-for-byte the
+same document**; both are `record::build`. The flag chooses the sink, not the
+content, and supplying both is the normal case: gate on stdout, archive the
+file.
+
+`--facts` is a different *document*, not a different sink. It is the
+observations with the verdict and the policy decision removed, for a system
+that makes its own decision. See "The facts projection" below.
+
+## Reading the payload
+
+The payload travels in the inspect document, so extracting it is a `jq`
+expression rather than a separate mode:
+
+```bash
+scitt-verifier inspect --statement s.cose --format json --verbose | jq -r .payload.json
+```
+
+A text payload appears under `.payload.text`, a JSON one is parsed into
+`.payload.json`, and a binary one is hex under `.payload.hex`.
+
+`--verbose` matters here: without it the payload is summarised, and the object
+carries `"elided": true` so a consumer can tell a summary from the real thing.
+
+`.payload.text` and `.payload.hex` are byte-exact. `.payload.json` is **not** —
+it is parsed and re-serialised, so key order and whitespace are the
+serialiser's, not the signer's. Anything hashing the payload must use
+`.payload.hex`.
+
 ## Where the failure boundaries sit
 
 Four kinds of failure that must not look alike:
@@ -159,7 +205,7 @@ Four kinds of failure that must not look alike:
 |---|---|---|---|
 | Missing or unreadable file, malformed policy | `usage-error` | 4 | The operator's problem. Nothing was established. |
 | Malformed statement or key set | `cannot-evaluate` | 3 | A truncated download is not evidence of compromise. Never a pass. |
-| Unknown kid, stale keys, issuer mismatch | `cannot-evaluate` | 3 | An operational chore, not an incident. |
+| Unknown kid, stale keys | `cannot-evaluate` | 3 | An operational chore, not an incident. |
 | Unsupported algorithm or VDS | `cannot-evaluate` | 3 | A limitation of the tool, not a finding about the artifact. |
 | No receipt verified | `cannot-evaluate` | 3 | Registration was not proven. An unproven claim is not a disproven one. |
 | Invalid statement signature, binding mismatch | `untrusted` | 1 | An incident. |
@@ -216,27 +262,22 @@ observations-only projection written by `--facts` is
 `v0` is deliberate: this shape is still moving, and it says so. It freezes at
 `v1` when the repository goes public.
 
-The `scitt-verifier/evidence/*` name is **retired and will not be reused**.
-`evidence/v1` means what v0.1.0 emitted, permanently — reusing the string for a
-different shape would leave a consumer no way to tell them apart. The name
-changed because in RATS (RFC 9334 §8.1) "Evidence" is the *input* being
-appraised, while this document is the tool's *output*; the old name pointed at
-the wrong end of the pipeline.
+The document is named *result* rather than *evidence* because in RATS
+(RFC 9334 §8.1) "Evidence" is the *input* being appraised, while this document
+is the tool's *output*.
 
-Relative to the retired `evidence/v2` draft:
+The shape follows RFC 9943 §3: `signedStatement`, `receipts`, and
+`artifactBinding` are top-level observation sections, and everything that is
+this tool's judgement — `verdict`, `exitCode`, `checks`, `primaryDiagnostic`,
+`diagnostics`, `notChecked` — sits under `appraisal`. The separation is the
+point: a consumer that disagrees with our judgement can read the observations
+and decide for itself.
 
-- the `details` bag is gone. `signedStatement`, `receipts`, and
-  `artifactBinding` are now top-level sections, named after RFC 9943 §3
-- `verdict`, `exitCode`, `checks`, `primaryDiagnostic`, `diagnostics`, and
-  `notChecked` moved under `appraisal`
-- the policy moved to `relyingPartyPolicy` — named for *whose* rules they are,
-  because RFC 9943 §3 reserves "Registration Policy" for the transparency
-  service's own admission rules. It is populated from the `--policy` document.
-- every observation block carries a `provenance` object and a `status`
-- `fullyVerified` was removed from receipt entries: it was our judgement
-  leaking into the observations. Read `appraisal.checks.receiptInclusion`
-- `--evidence` was renamed `--result`; the old flag is refused with an
-  explanation rather than silently accepted
+The policy is `relyingPartyPolicy`, named for *whose* rules they are, because
+RFC 9943 §3 reserves "Registration Policy" for the transparency service's own
+admission rules. It is populated from the `--policy` document.
+
+Every observation block carries a `provenance` object and a `status`.
 
 ## Sections
 

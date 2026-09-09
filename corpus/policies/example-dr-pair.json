@@ -1,0 +1,13 @@
+{
+  "policyId": "example/dr-pair",
+  "policyVersion": "1",
+  "description": "A production gate for a transparency service that runs under more than one hostname, such as a primary and a disaster recovery instance. Both are listed because issuer matching is exact: a receipt from the DR instance would otherwise be rejected during a failover, when a gate is least able to absorb a false denial. Replace both hostnames with your own before use.",
+  "assertions": {
+    "issuer": [
+      "contoso-cp.confidential-ledger.azure.com",
+      "contoso-db.confidential-ledger.azure.com"
+    ],
+    "receiptCount": 1,
+    "requireKidBoundToKey": true
+  }
+}

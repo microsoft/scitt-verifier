@@ -1,0 +1,9 @@
+# wasm-pack output. Regenerate with the commands in README.md.
+pkg-node/
+pkg-web/
+pkg-nomodules/
+
+# The built demo page. A megabyte of inlined WebAssembly and base64 that is
+# fully reproducible from demo/build.mjs, so committing it would put a binary
+# in every diff for no reviewable gain.
+dist/

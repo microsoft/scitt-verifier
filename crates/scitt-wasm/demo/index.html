@@ -1,0 +1,652 @@
+<!DOCTYPE html>
+<!--
+  Copyright (c) Microsoft Corporation.
+  Licensed under the MIT License.
+
+  Authored source for the demo. This file is not usable on its own: the
+  placeholders below are filled by demo/build.mjs, which emits a single
+  self-contained dist/demo.html.
+
+  Self-contained on purpose. The WebAssembly is inlined as base64 rather than
+  fetched, so the page needs no server, no MIME configuration and no network —
+  which is also the claim it makes about itself. A page that says "nothing
+  leaves this browser" while fetching its own engine is not making that claim
+  honestly.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SCITT transparent statement — evidence</title>
+<style>
+  :root {
+    --bg: #10131a; --panel: #171b24; --line: #262c39; --ink: #e6e9ef;
+    --dim: #98a1b3; --pass: #3fb950; --fail: #f85149; --warn: #d29922;
+    --none: #6e7681; --link: #58a6ff; --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.55 -apple-system, "Segoe UI", system-ui, sans-serif;
+  }
+  main { max-width: 1080px; margin: 0 auto; padding: 28px 22px 80px; }
+  h1 { font-size: 20px; margin: 0 0 4px; font-weight: 600; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
+       color: var(--dim); margin: 0 0 12px; font-weight: 600; }
+  .sub { color: var(--dim); margin: 0 0 22px; }
+  .panel { background: var(--panel); border: 1px solid var(--line);
+           border-radius: 10px; padding: 18px; margin-bottom: 16px; }
+  .offline { display: inline-flex; gap: 7px; align-items: center;
+             border: 1px solid var(--line); border-radius: 999px;
+             padding: 3px 11px; color: var(--dim); font-size: 12px; }
+  .offline b { color: var(--pass); font-weight: 600; }
+
+  button {
+    background: #21262d; color: var(--ink); border: 1px solid var(--line);
+    border-radius: 7px; padding: 7px 13px; cursor: pointer; font-size: 13px;
+    font-family: inherit;
+  }
+  button:hover { border-color: #3d4757; }
+  button.primary { background: #1f6feb; border-color: #1f6feb; }
+  .row { display: flex; gap: 9px; flex-wrap: wrap; align-items: center; }
+  .row + .row { margin-top: 11px; }
+  label.file { color: var(--dim); font-size: 12.5px; display: inline-flex;
+               gap: 7px; align-items: center; }
+  input[type=file] { display: none; }
+  .chip { border: 1px dashed var(--line); border-radius: 7px; padding: 6px 11px;
+          cursor: pointer; color: var(--dim); font-size: 12.5px; }
+  .chip.loaded { border-style: solid; color: var(--ink); }
+  select { background: #21262d; color: var(--ink); border: 1px solid var(--line);
+           border-radius: 7px; padding: 6px 9px; font-family: var(--mono);
+           font-size: 12px; cursor: pointer; }
+
+  #verdict { display: none; }
+  #verdict.on { display: block; }
+  .banner { border-radius: 10px; padding: 16px 18px; margin-bottom: 16px;
+            border: 1px solid; display: flex; gap: 14px; align-items: flex-start; }
+  .banner .mark { font-size: 22px; line-height: 1; }
+  .banner .headline { font-size: 16px; font-weight: 600; margin-bottom: 3px; }
+  .banner .because { color: var(--dim); font-size: 13px; }
+  .v-pass { border-color: #1c6b2b; background: #0d2b13; }
+  .v-fail { border-color: #7d2620; background: #2d1211; }
+  .v-warn { border-color: #7a5a15; background: #2b2109; }
+  .v-none { border-color: var(--line); background: #1a1e27; }
+
+  table { width: 100%; border-collapse: collapse; }
+  td { padding: 8px 4px; border-top: 1px solid var(--line); vertical-align: top; }
+  tr:first-child td { border-top: 0; }
+  td.k { color: var(--dim); width: 210px; }
+  td.v { font-family: var(--mono); font-size: 12.5px; word-break: break-all; }
+  .tag { font-size: 11px; font-weight: 600; text-transform: uppercase;
+         letter-spacing: .05em; padding: 2px 7px; border-radius: 5px;
+         border: 1px solid; white-space: nowrap; }
+  .t-pass { color: var(--pass); border-color: #1c6b2b; }
+  .t-fail { color: var(--fail); border-color: #7d2620; }
+  .t-warn { color: var(--warn); border-color: #7a5a15; }
+  .t-none { color: var(--none); border-color: var(--line); }
+  .detail { color: var(--dim); font-size: 12.5px; margin-top: 3px; }
+
+  textarea {
+    width: 100%; min-height: 190px; background: #0d1017; color: var(--ink);
+    border: 1px solid var(--line); border-radius: 7px; padding: 11px;
+    font-family: var(--mono); font-size: 12.5px; resize: vertical;
+  }
+  .hint { color: var(--dim); font-size: 12.5px; margin: 9px 0 0; }
+  .hint code { background: #0d1017; padding: 1px 5px; border-radius: 4px; }
+  ul.gaps { margin: 0; padding-left: 18px; color: var(--dim); }
+  ul.gaps li { margin-bottom: 7px; }
+  ul.gaps b { color: var(--ink); font-weight: 600; }
+  details { border-top: 1px solid var(--line); padding-top: 12px; margin-top: 4px; }
+  summary { cursor: pointer; color: var(--dim); font-size: 13px; }
+  pre { background: #0d1017; border: 1px solid var(--line); border-radius: 7px;
+        padding: 12px; overflow: auto; max-height: 420px;
+        font-size: 11.5px; font-family: var(--mono); }
+  .err { color: var(--fail); font-family: var(--mono); font-size: 12.5px; }
+  footer { color: var(--none); font-size: 12px; margin-top: 26px;
+           border-top: 1px solid var(--line); padding-top: 14px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>SCITT transparent statement &mdash; evidence</h1>
+  <p class="sub">
+    The drill-down behind &ldquo;View evidence&rdquo;: what was checked, what it
+    proves, and what it does not.
+  </p>
+
+  <div class="panel">
+    <div class="row">
+      <span class="offline"><b>&#9679;</b> Verification runs in this page &mdash;
+        no bytes are sent anywhere</span>
+      <span class="offline" id="ver"></span>
+    </div>
+
+    <div class="row" style="margin-top:16px">
+      <span style="color:var(--dim);font-size:12.5px">Scenarios</span>
+      <span id="scenarios" class="row"></span>
+    </div>
+
+    <div class="row">
+      <span style="color:var(--dim);font-size:12.5px">Or load your own</span>
+      <label class="file"><span class="chip" id="c-statement">Statement (.cose)</span>
+        <input type="file" id="f-statement"></label>
+      <label class="file"><span class="chip" id="c-keys">Ledger keys (.cbor)</span>
+        <input type="file" id="f-keys"></label>
+      <label class="file"><span class="chip" id="c-artifact">Artifact (optional)</span>
+        <input type="file" id="f-artifact"></label>
+      <span id="binding-controls" class="row" style="display:none">
+        <select id="binding-mode">
+          <option value="payload-bytes">payload-bytes</option>
+          <option value="payload-digest">payload-digest</option>
+        </select>
+        <button id="clear-artifact">Clear</button>
+      </span>
+      <button class="primary" id="run">Verify</button>
+    </div>
+    <p class="hint" id="loaded-note"></p>
+    <p class="hint" id="binding-hint" style="display:none">
+      You declare how the artifact relates to the statement; it is never
+      inferred. <b>payload-bytes</b> says the payload <i>is</i> the artifact.
+      <b>payload-digest</b> says it is a digest of it (RFC 9995 hash envelope).
+      Choosing for you would report a relationship you never asserted &mdash;
+      so a mode that does not fit says so rather than guessing.
+    </p>
+  </div>
+
+  <div id="error" class="panel" style="display:none"><div class="err" id="error-text"></div></div>
+
+  <div id="verdict">
+    <div class="banner" id="banner">
+      <div class="mark" id="banner-mark"></div>
+      <div>
+        <div class="headline" id="banner-headline"></div>
+        <div class="because" id="banner-because"></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Evidence</h2>
+      <table id="evidence"></table>
+    </div>
+
+    <div class="panel">
+      <h2>Relying-party policy</h2>
+      <p class="hint" style="margin-top:0">
+        Your rules, not the tool's. Edit and re-evaluate &mdash; nothing is
+        rebuilt and nothing is fetched.
+      </p>
+      <textarea id="policy" spellcheck="false"></textarea>
+      <div class="row" style="margin-top:10px">
+        <button class="primary" id="reeval">Re-evaluate</button>
+        <span class="hint" id="policy-meta"></span>
+      </div>
+      <table id="assertions" style="margin-top:14px"></table>
+    </div>
+
+    <div class="panel">
+      <h2>Payload</h2>
+      <p class="hint" style="margin-top:0" id="payload-note"></p>
+      <table id="payload-meta"></table>
+      <details id="payload-details" style="margin-top:10px">
+        <summary id="payload-summary">Payload content</summary>
+        <pre id="payload-body"></pre>
+      </details>
+    </div>
+
+    <div class="panel">
+      <h2>Not checked</h2>
+      <p class="hint" style="margin-top:0">
+        Shown on success as well as failure. A gap a report only mentions when
+        it fails is a gap its readers never learn about.
+      </p>
+      <ul class="gaps">
+        <li><b>The certificate chain was not validated to a trusted root.</b>
+          The statement's signature was checked against the leaf certificate
+          carried inside it. Nothing here establishes that the leaf belongs to
+          the organisation named in it.</li>
+        <li><b>Revocation was not checked.</b> No CRL or OCSP was consulted, and
+          could not be &mdash; this page makes no network requests.</li>
+        <li id="gap-artifact"><b>The artifact was not bound.</b> This build takes a statement, not
+          the artifact it describes, so it cannot tell you the statement
+          describes the file you are about to deploy. The CLI does that with
+          <code>--artifact</code>.</li>
+        <li><b>The transparency service's registration policy is trusted, not
+          re-checked.</b> A receipt proves the statement was registered. It does
+          not prove the service was right to register it.</li>
+      </ul>
+    </div>
+
+    <div class="panel">
+      <h2>Raw</h2>
+      <details><summary>Verified facts (JSON)</summary><pre id="raw-facts"></pre></details>
+      <details><summary>Structure, with no trust material (JSON)</summary><pre id="raw-inspect"></pre></details>
+    </div>
+  </div>
+
+  <footer id="footer"></footer>
+</main>
+
+<script>__WASM_BINDGEN_JS__</script>
+<script>
+"use strict";
+
+const WASM_B64 = "__WASM_B64__";
+const SCENARIOS = __SCENARIOS_JSON__;
+
+const $ = (id) => document.getElementById(id);
+const b64 = (s) => {
+  const bin = atob(s);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+};
+const text = (bytes) => new TextDecoder().decode(bytes);
+const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+
+// State: the bytes currently loaded. Kept as bytes rather than as parsed
+// results so that re-evaluating a policy re-derives the facts from the same
+// source, instead of from something the page has been holding and could have
+// altered.
+const state = { statement: null, keys: null, artifact: null, artifactName: null, label: null };
+
+const TAG = { pass: 't-pass', fail: 't-fail', warn: 't-warn', none: 't-none' };
+const tag = (kind, label) => `<span class="tag ${TAG[kind]}">${esc(label)}</span>`;
+
+// ---------------------------------------------------------------------------
+// The verdict is decided here, by the consumer, from facts the library
+// reported. `evaluatePolicy` returns outcomes and no verdict; `verifyStatement`
+// returns observations and no verdict; `bindArtifact` returns a comparison and
+// no verdict. Precedence mirrors the CLI's `decide()`: a cryptographic failure
+// outranks an inability to evaluate, which outranks policy, which outranks
+// binding. A page that let a policy pass paper over a broken signature would be
+// a worse tool than no page at all.
+// ---------------------------------------------------------------------------
+function decide(facts, policy, binding) {
+  const receipts = facts.receipts || [];
+
+  if (facts.signatureValid === false) {
+    return { kind: 'fail', mark: '\u2718', headline: 'Failed',
+      because: "The statement's own signature did not verify. These bytes are " +
+               'not what the signer signed, so nothing else here is evidence about them.' };
+  }
+
+  if (!facts.anyReceiptVerified) {
+    if (receipts.some((r) => r.boundToStatement === false)) {
+      return { kind: 'fail', mark: '\u2718', headline: 'Failed',
+        because: 'A receipt verified against the ledger but commits to a different ' +
+                 'claim digest. It is genuine evidence about some other statement, not this one.' };
+    }
+    if (receipts.some((r) => r.rootSignatureValid === false)) {
+      return { kind: 'fail', mark: '\u2718', headline: 'Failed',
+        because: "The receipt's root signature did not verify against the supplied key set." };
+    }
+    return { kind: 'none', mark: '\u2014', headline: 'Unavailable',
+      because: receipts.length === 0
+        ? 'The statement carries no receipt, so it has not been shown to be transparent. ' +
+          'That is unproven, not disproven.'
+        : 'No receipt could be checked with this key set \u2014 the key that signed it is ' +
+          'not present. A rotation looks exactly like this, and so does a forgery.' };
+  }
+
+  if (policy) {
+    if (policy.failed) {
+      return { kind: 'warn', mark: '\u26a0', headline: 'Policy not satisfied',
+        because: 'The statement is transparent and its signature verified. It does not meet ' +
+                 'the rules you supplied \u2014 which is a different finding from tampering.' };
+    }
+    if (policy.unevaluable) {
+      return { kind: 'none', mark: '\u2014', headline: 'Unavailable',
+        because: 'The statement does not carry a claim your policy asks about, so that rule ' +
+                 'could not be answered either way.' };
+    }
+  }
+
+  // Binding comes last, exactly as in the CLI. Note the three-way split: a
+  // comparison that could not be made is never reported as a mismatch, because
+  // "I could not check" and "this is the wrong file" send an operator to very
+  // different places.
+  if (binding) {
+    if (binding.outcome === 'mismatch') {
+      return { kind: 'fail', mark: '\u2718', headline: 'Wrong artifact',
+        because: 'The statement is genuine and transparent \u2014 and it is not about this ' +
+                 'file. That is the failure a signature check alone cannot catch.' };
+    }
+    if (binding.outcome === 'cannotCompare') {
+      return { kind: 'none', mark: '\u2014', headline: 'Unavailable',
+        because: 'You asked for an artifact comparison that could not be made, so this is ' +
+                 'not a statement about your file either way. It is a limitation of the ' +
+                 'request, not a finding about the artifact.' };
+    }
+    return { kind: 'pass', mark: '\u2713', headline: 'Verified \u2014 and about this artifact',
+      because: 'The signature verified, a receipt proves registration in the transparency ' +
+               'service, that receipt commits to these exact bytes, your policy is satisfied, ' +
+               'and the statement describes the file you supplied.' };
+  }
+
+  return { kind: 'pass', mark: '\u2713', headline: 'Verified',
+    because: 'The signature verified, a receipt proves registration in the transparency ' +
+             'service, that receipt commits to these exact bytes, and your policy is satisfied. ' +
+             'No artifact was supplied, so this says nothing about which file it describes.' };
+}
+
+function rows(pairs) {
+  return pairs.map(([k, v, d]) =>
+    `<tr><td class="k">${esc(k)}</td><td class="v">${v}` +
+    (d ? `<div class="detail">${esc(d)}</div>` : '') + '</td></tr>').join('');
+}
+
+const hexish = (s, n) => (s && s.length > n ? s.slice(0, n) + '\u2026' : (s || '\u2014'));
+
+// Artifact binding, rendered as its own row because it answers a different
+// question from everything above it. The rest of the table says the statement
+// is genuine; this says whether it is about your file. The two fail
+// independently, and a reader who conflates them will ship the wrong binary
+// with a green tick beside it.
+function bindingRow(binding) {
+  if (!binding) {
+    return ['Artifact binding', tag('none', 'Not requested'),
+      'No artifact was supplied, so nothing here identifies which file this statement ' +
+      'describes. Load one above to check.'];
+  }
+  const kind = binding.outcome === 'bound' ? 'pass'
+             : binding.outcome === 'mismatch' ? 'fail' : 'none';
+  const label = binding.outcome === 'bound' ? 'Bound'
+              : binding.outcome === 'mismatch' ? 'Mismatch' : 'Cannot compare';
+  return ['Artifact binding', tag(kind, label),
+    `${binding.detail} \u2014 declared mode ${binding.mode}`];
+}
+
+// The "Not checked" list must stop naming a gap the run just closed. Leaving
+// it there would train readers to skim past the panel, which defeats the one
+// thing it exists for.
+function renderBindingGap(binding) {
+  const li = $('gap-artifact');
+  if (binding && binding.outcome === 'bound') {
+    li.style.display = 'none';
+    return;
+  }
+  li.style.display = '';
+  li.innerHTML = binding
+    ? '<b>The artifact was not bound.</b> A comparison was requested but did not ' +
+      'establish that this statement describes your file.'
+    : '<b>The artifact was not bound.</b> No artifact was supplied, so this run ' +
+      'cannot tell you the statement describes the file you are about to deploy. ' +
+      'Load one above, or use the CLI\u2019s <code>--artifact</code>.';
+}
+
+function renderEvidence(facts, inspected, binding) {
+  const r = (facts.receipts || [])[0] || {};
+  const cwt = facts.cwt || {};
+  const when = r.registeredAt
+    ? new Date(r.registeredAt * 1000).toISOString().replace('T', ' ').replace('.000Z', 'Z')
+    : '\u2014';
+
+  const sig = facts.signatureValid === true ? tag('pass', 'Valid')
+            : facts.signatureValid === false ? tag('fail', 'Invalid')
+            : tag('none', 'Not checked');
+  const root = r.rootSignatureValid === true ? tag('pass', 'Valid')
+             : r.rootSignatureValid === false ? tag('fail', 'Invalid')
+             : tag('none', 'Not checked');
+  const bound = r.boundToStatement === true ? tag('pass', 'Bound')
+              : r.boundToStatement === false ? tag('fail', 'Not this statement')
+              : tag('none', 'Not checked');
+
+  $('evidence').innerHTML = rows([
+    ['Evidence subject', esc(cwt.sub || '\u2014'), 'CWT sub \u2014 what the statement is about'],
+    ['Signed by', esc(cwt.iss || '\u2014'), 'CWT iss \u2014 the identity the signer claims'],
+    ['Signer certificate', esc(facts.leafSubject || '\u2014'),
+      `Leaf of a ${facts.certificateChainLength || 0}-certificate chain, issued by ` +
+      (facts.leafIssuer || 'an unnamed issuer')],
+    ['Statement signature', sig, 'Checked against the leaf certificate above'],
+    ['Claim digest', `<span title="${esc(facts.claimDigest || '')}">${esc(hexish(facts.claimDigest, 32))}</span>`,
+      'The identity of these bytes. This is what a receipt commits to.'],
+    ['Transparency service', esc(r.issuer || '\u2014'),
+      'Reported, not enforced \u2014 assert on it in policy if it matters'],
+    ['Receipt signature', root, `Signed with key ${hexish(r.kid, 16)}`],
+    ['Receipt commits to these bytes', bound,
+      'The check that separates a receipt about this artifact from a genuine receipt about another'],
+    ['Registered', esc(when), r.registeredAt ? `Unix ${r.registeredAt}` : ''],
+    ['Inclusion proof', esc(r.pathLength != null ? r.pathLength + ' step(s) to the root' : '\u2014'),
+      r.root ? 'Merkle root ' + hexish(r.root, 32) : ''],
+    ['Receipts on the statement',
+      esc(`${facts.verifiedReceiptCount || 0} verified of ${facts.receiptsPresent || 0} present`),
+      'Receipts sit in the unprotected header, so anyone handling the file can append one. ' +
+      'One that fails is not a veto.'],
+    bindingRow(binding),
+    ['Attested hardware identity', tag('none', 'Not evaluated'),
+      'Out of scope for this tool. Binding an SNP attestation to this evidence is a separate check.'],
+  ]);
+
+  $('raw-facts').textContent = JSON.stringify(facts, null, 2);
+  $('raw-inspect').textContent = JSON.stringify(inspected, null, 2);
+}
+
+// ---------------------------------------------------------------------------
+// The payload is what the statement actually says. Everything else on this page
+// is about whether to believe it.
+//
+// The three cases are kept apart on purpose. A detached payload has nothing to
+// show and nothing wrong with it. A hash envelope carries a digest rather than
+// content, and calling that "the payload" would invite a reader to treat 32
+// opaque bytes as the document. Only the third case is a document.
+// ---------------------------------------------------------------------------
+function renderPayload(p) {
+  const meta = $('payload-meta');
+  const details = $('payload-details');
+  const body = $('payload-body');
+
+  if (p.detached) {
+    $('payload-note').textContent =
+      'The payload is detached \u2014 it travels separately from this statement. ' +
+      'There is nothing missing here; the signature still covers it.';
+    meta.innerHTML = rows([['Payload', tag('none', 'Detached'), '']]);
+    details.style.display = 'none';
+    return;
+  }
+
+  if (p.hashEnvelope) {
+    const h = p.hashEnvelope;
+    $('payload-note').textContent =
+      'This is a COSE Hash Envelope: the signed payload is a digest of the artifact, ' +
+      'not the artifact itself. The statement commits to content it does not carry.';
+    meta.innerHTML = rows([
+      ['Payload', tag('warn', 'Digest, not content'), 'RFC 9995 hash envelope'],
+      ['Digest algorithm', esc(h.hashAlg || '\u2014'),
+        h.hashAlgLabel != null ? `COSE label ${h.hashAlgLabel}` : ''],
+      ['Digest of the artifact', esc(h.digest || '\u2014'),
+        'Compare this against the artifact you hold. The CLI does it with --artifact ' +
+        'and --binding-mode payload-digest.'],
+      ['Artifact content type', esc(h.preimageContentType || '\u2014'), ''],
+      ['Artifact location', esc(h.preimageLocation || '\u2014'),
+        'A hint from the signer, not something this tool resolved.'],
+    ]);
+    details.style.display = 'none';
+    return;
+  }
+
+  const kb = (p.length / 1024).toFixed(1);
+  $('payload-note').textContent =
+    'The signed content itself, carried inside the statement and covered by the ' +
+    "signer's signature.";
+  meta.innerHTML = rows([
+    ['Content type', esc(p.contentType || 'not declared'),
+      p.contentType ? '' : 'The signer did not say what this is.'],
+    ['Size', esc(`${p.length} bytes (${kb} KB)`), ''],
+    ['SHA-256 of the payload', esc(p.sha256 || '\u2014'),
+      'Of the payload alone. Not the claim digest, which covers the whole signed statement.'],
+  ]);
+
+  details.style.display = '';
+  if (p.text !== null && p.text !== undefined) {
+    // Pretty-print JSON so an SPDX document is readable rather than one line.
+    let shown = p.text;
+    try { shown = JSON.stringify(JSON.parse(p.text), null, 2); } catch { /* not JSON */ }
+    $('payload-summary').textContent = `Payload content (${kb} KB, text)`;
+    body.textContent = shown;
+  } else {
+    $('payload-summary').textContent = `Payload content (${kb} KB, binary \u2014 shown as hex)`;
+    body.textContent = (p.hex || '').replace(/(.{64})/g, '$1\n');
+  }
+}
+
+function renderPolicy(decision) {
+  if (!decision) {
+    $('assertions').innerHTML = rows([['Policy', tag('none', 'Not evaluated'), '']]);
+    $('policy-meta').textContent = '';
+    return;
+  }
+  $('policy-meta').textContent =
+    `${decision.policyId} v${decision.policyVersion} \u2014 ${decision.assertions.length} assertion(s)`;
+
+  $('assertions').innerHTML = decision.assertions.map((a) => {
+    const kind = a.outcome === 'pass' ? 'pass' : a.outcome === 'fail' ? 'fail' : 'none';
+    const label = a.outcome === 'cannotEvaluate' ? 'Cannot evaluate' : a.outcome;
+    return `<tr><td class="k">${esc(a.name)}</td><td class="v">${tag(kind, label)}` +
+           `<div class="detail">${esc(a.detail)}</div></td></tr>`;
+  }).join('');
+}
+
+function showError(e) {
+  $('error').style.display = 'block';
+  $('error-text').textContent = String(e && e.message ? e.message : e);
+  $('verdict').classList.remove('on');
+}
+
+// `now` is pinned to the receipt's own registration time rather than read from
+// the clock, so the page shows the same thing today and at a demo next month.
+// Freshness rules still work; they are just evaluated against a stated instant.
+function run() {
+  $('error').style.display = 'none';
+  if (!state.statement || !state.keys) {
+    return showError('Load a statement and a key set first.');
+  }
+  try {
+    const facts = JSON.parse(wasm_bindgen.verifyStatement(state.statement, state.keys));
+    const inspected = JSON.parse(wasm_bindgen.inspectStatement(state.statement));
+    const payload = JSON.parse(wasm_bindgen.statementPayload(state.statement));
+
+    let decision = null;
+    const src = $('policy').value.trim();
+    if (src) {
+      const r0 = (facts.receipts || [])[0];
+      const now = r0 && r0.registeredAt ? r0.registeredAt + 60 : Math.floor(Date.now() / 1000);
+      decision = JSON.parse(wasm_bindgen.evaluatePolicy(
+        state.statement, state.keys, new TextEncoder().encode(src), now));
+    }
+
+    // Only when an artifact was actually supplied. Comparing against nothing
+    // and reporting the result would be a binding nobody asked for.
+    let binding = null;
+    if (state.artifact) {
+      binding = JSON.parse(wasm_bindgen.bindArtifact(
+        state.statement, state.artifact, $('binding-mode').value,
+        state.artifactName || ''));
+    }
+
+    const v = decide(facts, decision, binding);
+    $('banner').className = 'banner v-' + v.kind;
+    $('banner-mark').textContent = v.mark;
+    $('banner-headline').textContent = v.headline;
+    $('banner-because').textContent = v.because;
+
+    renderEvidence(facts, inspected, binding);
+    renderPayload(payload);
+    renderPolicy(decision);
+    renderBindingGap(binding);
+    $('verdict').classList.add('on');
+  } catch (e) {
+    showError(e);
+  }
+}
+
+function clearArtifact() {
+  state.artifact = null;
+  state.artifactName = null;
+  $('f-artifact').value = '';
+  $('c-artifact').classList.remove('loaded');
+  $('c-artifact').textContent = 'Artifact (optional)';
+  $('binding-controls').style.display = 'none';
+  $('binding-hint').style.display = 'none';
+}
+
+function loadScenario(s) {
+  state.statement = b64(s.statement);
+  state.keys = b64(s.keys);
+  state.label = s.label;
+  $('policy').value = s.policy ? text(b64(s.policy)) : '';
+  $('c-statement').classList.remove('loaded');
+  $('c-keys').classList.remove('loaded');
+  $('c-statement').textContent = 'Statement (.cose)';
+  $('c-keys').textContent = 'Ledger keys (.cbor)';
+  // A scenario replaces the statement, so an artifact left over from the last
+  // one would be compared against bytes it was never meant to describe.
+  clearArtifact();
+  if (s.artifact) {
+    state.artifact = b64(s.artifact);
+    state.artifactName = s.artifactName || 'artifact';
+    $('c-artifact').classList.add('loaded');
+    $('c-artifact').textContent = state.artifactName;
+    $('binding-mode').value = s.bindingMode || 'payload-bytes';
+    $('binding-controls').style.display = '';
+    $('binding-hint').style.display = '';
+  }
+  $('loaded-note').textContent = s.note || '';
+  run();
+}
+
+function wireFile(inputId, chipId, field) {
+  $(inputId).addEventListener('change', async (ev) => {
+    const f = ev.target.files[0];
+    if (!f) return;
+    state[field] = new Uint8Array(await f.arrayBuffer());
+    const chip = $(chipId);
+    chip.classList.add('loaded');
+    chip.textContent = f.name;
+    $('loaded-note').textContent =
+      'Loaded from disk. These bytes stay in this tab \u2014 there is nowhere for them to go.';
+  });
+}
+
+(async function main() {
+  await wasm_bindgen(b64(WASM_B64));
+
+  $('ver').innerHTML = 'scitt-verifier core <b>v' + esc(wasm_bindgen.version()) + '</b>';
+  $('footer').textContent =
+    'Verified by the scitt-verifier core v' + wasm_bindgen.version() +
+    ' compiled to WebAssembly \u2014 the same implementation the command-line tool uses, ' +
+    'so a result here and a result in CI cannot disagree.';
+
+  $('scenarios').innerHTML = SCENARIOS
+    .map((s, i) => `<button data-i="${i}">${esc(s.label)}</button>`).join('');
+  $('scenarios').addEventListener('click', (ev) => {
+    const i = ev.target.getAttribute('data-i');
+    if (i !== null) loadScenario(SCENARIOS[+i]);
+  });
+
+  $('run').addEventListener('click', run);
+  $('reeval').addEventListener('click', run);
+  wireFile('f-statement', 'c-statement', 'statement');
+  wireFile('f-keys', 'c-keys', 'keys');
+
+  // The artifact is wired separately: loading one reveals the mode selector,
+  // and the mode is a decision the operator makes rather than a default the
+  // page picks on their behalf.
+  $('f-artifact').addEventListener('change', async (ev) => {
+    const f = ev.target.files[0];
+    if (!f) return;
+    state.artifact = new Uint8Array(await f.arrayBuffer());
+    state.artifactName = f.name;
+    $('c-artifact').classList.add('loaded');
+    $('c-artifact').textContent = f.name;
+    $('binding-controls').style.display = '';
+    $('binding-hint').style.display = '';
+    run();
+  });
+  $('clear-artifact').addEventListener('click', () => { clearArtifact(); run(); });
+  $('binding-mode').addEventListener('change', run);
+
+  if (SCENARIOS.length) loadScenario(SCENARIOS[0]);
+})();
+</script>
+</body>
+</html>

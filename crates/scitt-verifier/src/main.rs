@@ -6,6 +6,7 @@
 //! identically on an air-gapped build agent three months later.
 
 mod cli;
+mod inspect_json;
 mod outcome;
 mod record;
 mod report;
@@ -16,6 +17,9 @@ use outcome::{
     Trust, Verdict,
 };
 use scitt_policy::{Outcome as AssertionOutcome, Policy, PolicyDecision};
+use scitt_receipt::binding::{
+    Binding as CoreBinding, BindingMode as CoreBindingMode, BindingReason as CoreBindingReason,
+};
 use scitt_receipt::{verify_statement, LedgerKeySet, Sign1, StatementFacts};
 use std::path::Path;
 use std::process::ExitCode;
@@ -44,7 +48,7 @@ fn main() -> ExitCode {
             println!("scitt-verifier {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
-        Command::Inspect { statement } => ExitCode::from(run_inspect(&statement)),
+        Command::Inspect(args) => ExitCode::from(run_inspect(&args)),
         Command::Verify(args) => ExitCode::from(run_verify(&args).exit_code()),
     }
 }
@@ -56,7 +60,8 @@ fn main() -> ExitCode {
 /// 2. It distinguishes two failures that are genuinely different: input we
 /// could not read (exit 4, the operator's problem) and input we could read but
 /// not decode (exit 3, a real finding about the file).
-fn run_inspect(path: &Path) -> u8 {
+fn run_inspect(args: &cli::InspectArgs) -> u8 {
+    let path = &args.statement;
     let bytes = match read(path) {
         Ok(b) => b,
         Err(e) => {
@@ -74,15 +79,30 @@ fn run_inspect(path: &Path) -> u8 {
             return Verdict::CannotEvaluate.exit_code();
         }
     };
-    match report::inspect(&statement) {
-        Ok(()) => 0,
-        Err(e) => {
-            eprintln!("error: {e}");
-            Verdict::CannotEvaluate.exit_code()
+
+    match args.format {
+        Format::Json => {
+            let document = inspect_json::document(&statement, args.verbose);
+            match serde_json::to_string_pretty(&document) {
+                Ok(text) => {
+                    println!("{text}");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("error: could not render the inspect document: {e}");
+                    Verdict::CannotEvaluate.exit_code()
+                }
+            }
         }
+        Format::Text => match report::inspect(&statement, args.verbose) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("error: {e}");
+                Verdict::CannotEvaluate.exit_code()
+            }
+        },
     }
 }
-
 fn run_verify(args: &VerifyArgs) -> Verdict {
     let now = args.now.unwrap_or_else(|| {
         SystemTime::now()
@@ -101,7 +121,7 @@ fn run_verify(args: &VerifyArgs) -> Verdict {
 /// guarantee cheap: there is exactly one return type, so there is exactly one
 /// place that has to know how to serialise a partial result.
 fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
-    let trust = Trust::unsigned_key_set(args.issuer.clone());
+    let trust = Trust::unsigned_key_set();
 
     let statement_bytes = match read(&args.statement) {
         Ok(b) => b,
@@ -168,7 +188,7 @@ fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
         }
     };
 
-    let key_set = match LedgerKeySet::from_cose_key_set(&key_bytes, args.issuer.clone()) {
+    let key_set = match LedgerKeySet::from_cose_key_set(&key_bytes) {
         Ok(k) => k,
         // Unusable trust material is not evidence that the artifact is bad.
         // Exit 3, not 1.
@@ -269,46 +289,61 @@ fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
 /// Takes the assessment by value because a failed write has to change it.
 /// Printing a document that says `artifact-transparent` while exiting 4 would
 /// hand a consumer two contradictory answers from the same run.
+///
+/// The write order is load-bearing, not incidental. Only the record carries an
+/// `appraisal`, so only the record can be made wrong by a later demotion. The
+/// facts document is a projection of the observation blocks alone — what was
+/// seen, never what was concluded — so nothing that happens after it lands can
+/// falsify it, and it is safe to commit before the outcome is known. The record
+/// is written last, once every other write outcome has been folded in.
+///
+/// Reversed, the two files disagree: a successful `--result` followed by a
+/// failed `--facts` leaves `"pass": true, "exitCode": 0` on disk for a run that
+/// exits 4. Stdout would be correct and the file would be wrong, which is the
+/// worse way round — the terminal scrolls away, the audit record is kept.
 fn emit(args: &VerifyArgs, mut assessment: Assessment, now: i64) -> Verdict {
-    let mut failures = Vec::new();
-
-    if let Some(path) = &args.result {
-        if let Err(d) = write_json(
-            path,
-            "verification record",
-            &record::build(args, &assessment, now),
-        ) {
-            failures.push(d);
-        }
-    }
     if let Some(path) = &args.facts {
         if let Err(d) = write_json(
             path,
             "facts document",
             &record::facts(args, &assessment, now),
         ) {
-            failures.push(d);
+            demote(&mut assessment, d);
+        }
+    }
+    if let Some(path) = &args.result {
+        if let Err(d) = write_json(
+            path,
+            "verification record",
+            &record::build(args, &assessment, now),
+        ) {
+            // No stale file to worry about here: the write that failed is the
+            // one that would have carried the now-superseded verdict.
+            demote(&mut assessment, d);
         }
     }
 
-    if !failures.is_empty() {
-        // A pass whose audit trail vanished is not a pass a gate should act on.
-        // Failures keep their own, more important, verdict and diagnostic.
-        if assessment.verdict.is_pass() {
-            assessment.verdict = Verdict::UsageError;
-            assessment.primary = Some(failures[0].clone());
-        }
-        assessment.diagnostics.extend(failures);
-    }
-
-    // Built after the write outcome is known, so stdout agrees with the exit
-    // code even when the file could not be written.
+    // Built after every write outcome is known, so stdout agrees with the exit
+    // code and with the record on disk.
     match args.format {
         Format::Json => println!("{:#}", record::build(args, &assessment, now)),
         Format::Text => report::verify(&assessment),
     }
 
     assessment.verdict
+}
+
+/// A pass whose audit trail vanished is not a pass a gate should act on.
+///
+/// Only a pass is demoted: a run that already failed keeps its own, more
+/// important, verdict and primary diagnostic, and takes the write failure as an
+/// additional one.
+fn demote(assessment: &mut Assessment, failure: Diagnostic) {
+    if assessment.verdict.is_pass() {
+        assessment.verdict = Verdict::UsageError;
+        assessment.primary = Some(failure.clone());
+    }
+    assessment.diagnostics.push(failure);
 }
 
 fn write_json(path: &Path, what: &str, document: &serde_json::Value) -> Result<(), Diagnostic> {
@@ -387,7 +422,10 @@ fn decide(
     // No verified receipt means the statement is, at best, merely signed.
     // That can never be a pass, whatever the policy says. Note this is the
     // only receipt-derived gate: transparency is a positive proof, and a proof
-    // that holds cannot be retracted by appending noise beside it.
+    // that holds cannot be retracted by appending noise beside it. An operator
+    // who needs the stricter "exactly one receipt arrived" rule declares it in
+    // policy, where it reads as their expectation rather than as this tool
+    // refusing a shape RFC 9943 s7.1 permits.
     if !facts.any_receipt_verified() {
         return Verdict::CannotEvaluate;
     }
@@ -408,14 +446,19 @@ fn decide(
     // Everything held. Which success this is depends entirely on whether the
     // operator asked us to look at an artifact — a question the tool must
     // never answer on their behalf.
+    //
+    // Matched on the *outcome* rather than on each mode by name. Enumerating
+    // modes here meant that adding one silently opted it out of the
+    // `CannotCompare` guard below and handed it a pass.
     match (mode, binding.outcome) {
-        (BindingMode::PayloadBytes, Binding::Bound) => Verdict::ArtifactTransparent,
+        (BindingMode::None, _) | (_, Binding::NotRequested) => Verdict::StatementTransparent,
+        (_, Binding::Bound) => Verdict::ArtifactTransparent,
         // A requested comparison that could not be made is not a success of
         // either kind. Falling through to `statement-transparent` here would
         // quietly downgrade the operator's request into a claim about the
         // statement alone.
-        (BindingMode::PayloadBytes, Binding::CannotCompare) => Verdict::CannotEvaluate,
-        _ => Verdict::StatementTransparent,
+        (_, Binding::CannotCompare) => Verdict::CannotEvaluate,
+        (_, Binding::Mismatch) => Verdict::Untrusted,
     }
 }
 
@@ -476,12 +519,6 @@ fn diagnose(
                     r.kid.as_deref().unwrap_or("(none)")
                 ),
                 "Refresh the committed SCITT key set: tools/scitt-keys.py fetch.",
-            )),
-            Some(scitt_receipt::KeyLookup::IssuerMismatch) => out.push(Diagnostic::error(
-                "ReceiptIssuerNotInScope",
-                Category::Trust,
-                format!("receipt {n}: the key set is scoped to a different issuer"),
-                "Check --issuer against the transparency service that registered this statement.",
             )),
             Some(scitt_receipt::KeyLookup::Revoked) => out.push(Diagnostic::error(
                 "ReceiptKeyRevoked",
@@ -643,15 +680,6 @@ fn classify_core_error(e: &scitt_receipt::Error) -> (Verdict, Diagnostic) {
                 "Refresh the committed SCITT key set: tools/scitt-keys.py fetch.",
             ),
         ),
-        IssuerMismatch { .. } => (
-            Verdict::CannotEvaluate,
-            Diagnostic::error(
-                "ReceiptIssuerNotInScope",
-                Category::Trust,
-                e.to_string(),
-                "Check --issuer against the transparency service that registered this statement.",
-            ),
-        ),
         Crypto(_) => (
             Verdict::CannotEvaluate,
             Diagnostic::error(
@@ -698,16 +726,6 @@ fn gaps(
         ));
     }
 
-    if args.issuer.is_none() {
-        gaps.push(Gap::new(
-            "IssuerScopeNotPinned",
-            Category::Trust,
-            "The key set was not scoped to an issuer (--issuer), so a receipt from a different \
-             transparency service using a known kid would not be rejected on issuer grounds.",
-            "receipt validity does not establish which service issued it",
-        ));
-    }
-
     // The statement signature is checked against the key in its own certificate.
     // Chain validation to a trusted root is a separate question this release
     // does not answer, and saying so is the whole point of this section.
@@ -737,6 +755,25 @@ fn gaps(
 
     match decision {
         Some(d) => {
+            // A passing external-signature check proves possession of a private
+            // key, and nothing about whose key it is: the certificate that
+            // carried it was not validated to any root. Saying so here keeps
+            // the report from reading as an endorsement of the named signer.
+            if d.results
+                .iter()
+                .any(|r| r.name == "externalSignatures" && r.outcome == AssertionOutcome::Pass)
+            {
+                gaps.push(Gap::new(
+                    "ExternalSignerChainNotValidated",
+                    Category::SignerIdentity,
+                    "A detached signature in the protected header verified against the \
+                     certificate carried alongside it, but that certificate chain was not \
+                     validated to a trusted root.",
+                    "the external signature proves possession of a key, not the identity of its \
+                     holder",
+                ));
+            }
+
             for r in &d.results {
                 if r.outcome == AssertionOutcome::CannotEvaluate {
                     gaps.push(Gap::new(
@@ -767,51 +804,47 @@ fn check_binding(args: &VerifyArgs, statement_bytes: &[u8]) -> Result<BindingRes
         return Ok(BindingResult::not_requested());
     };
 
+    // `none` never reaches the core, which has no such mode. Modelling "no
+    // binding was requested" as a mode invites a caller to ask for a
+    // comparison and receive a pass for one nobody performed.
+    let mode = match args.binding_mode {
+        BindingMode::None => return Ok(BindingResult::not_requested()),
+        BindingMode::PayloadBytes => CoreBindingMode::PayloadBytes,
+        BindingMode::PayloadDigest => CoreBindingMode::PayloadDigest,
+    };
+
     let artifact = read(artifact_path)?;
     let statement = Sign1::parse(statement_bytes).map_err(|e| e.to_string())?;
 
-    match args.binding_mode {
-        BindingMode::None => Ok(BindingResult::not_requested()),
-        BindingMode::PayloadBytes => {
-            let Some(payload) = statement.payload.as_deref() else {
-                // A detached payload is not a mismatch. There is nothing to
-                // compare, so `payload-bytes` cannot answer the question —
-                // reporting Some(false) here accused the operator of shipping
-                // a tampered artifact when the real problem is that this
-                // binding mode does not apply to a detached statement.
-                return Ok(BindingResult {
-                    outcome: Binding::CannotCompare,
-                    detail: "the statement payload is detached, so binding-mode payload-bytes \
-                             has nothing to compare the artifact against"
-                        .into(),
-                });
-            };
-            let bound = payload == artifact.as_slice();
-            Ok(BindingResult {
-                outcome: if bound {
-                    Binding::Bound
-                } else {
-                    Binding::Mismatch
-                },
-                detail: if bound {
-                    format!(
-                        "the statement payload is byte-identical to {} ({} bytes)",
-                        artifact_path.display(),
-                        artifact.len()
-                    )
-                } else {
-                    format!(
-                        "the statement payload ({} bytes, sha256 {}) does not equal {} ({} bytes, sha256 {})",
-                        payload.len(),
-                        scitt_receipt::sha256_hex(payload),
-                        artifact_path.display(),
-                        artifact.len(),
-                        scitt_receipt::sha256_hex(&artifact),
-                    )
-                },
-            })
+    // The comparison lives in scitt-receipt so this tool and every other
+    // embedder — the WASM build, and whatever Ledger Explorer becomes — cannot
+    // reach different conclusions about the same two files. A browser that
+    // compared bytes its own way would eventually disagree here, and the
+    // disagreement would surface as a release that should have been stopped.
+    let report = scitt_receipt::bind(&statement, &artifact, mode);
+
+    // The finding is the core's; the remedy is ours. A browser cannot act on
+    // advice to pass a command-line flag, so the core declines to offer one
+    // and each caller appends what its own user can actually do.
+    let mut detail = report.reason.describe(&artifact_path.display().to_string());
+    match report.reason {
+        CoreBindingReason::HashEnvelopeNeedsDigestMode => {
+            detail.push_str("; re-run with --binding-mode payload-digest");
         }
+        CoreBindingReason::NotAHashEnvelope => {
+            detail.push_str("; re-run with --binding-mode payload-bytes");
+        }
+        _ => {}
     }
+
+    Ok(BindingResult {
+        outcome: match report.outcome {
+            CoreBinding::Bound => Binding::Bound,
+            CoreBinding::Mismatch => Binding::Mismatch,
+            CoreBinding::CannotCompare => Binding::CannotCompare,
+        },
+        detail,
+    })
 }
 
 fn read(path: &Path) -> Result<Vec<u8>, String> {

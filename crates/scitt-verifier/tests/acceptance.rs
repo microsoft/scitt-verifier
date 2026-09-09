@@ -103,7 +103,11 @@ fn a_tampered_payload_exits_one() {
 fn an_appended_broken_receipt_does_not_deny_the_gate() {
     let statement = corpus(&["fixtures", "appended-receipt.cose"]);
     let keys = corpus(&["fixtures", "musa-mst-july-scitt-keys.cbor"]);
-    let policy = corpus(&["policies", "fixture-mst.json"]);
+    // Deliberately a policy with no `receiptCount`. The property under test is
+    // the verdict's own behaviour: an unverifiable receipt beside a good one
+    // changes nothing. An operator who wants the stricter rule asks for it, and
+    // `an_appended_receipt_fails_a_policy_that_pins_the_count` covers that.
+    let policy = corpus(&["policies", "fixture-mst-unpinned-count.json"]);
     let r = run(&[
         "verify",
         "--statement",
@@ -135,6 +139,46 @@ fn an_appended_broken_receipt_does_not_deny_the_gate() {
         !r.stdout.contains("Do not deploy"),
         "a broken receipt says nothing about the artifact and must not be \
          described as though it did: {}",
+        r.stdout
+    );
+}
+
+/// The other half of the same fixture: what the verdict disregards, policy can
+/// still refuse.
+///
+/// `receiptCount` counts receipts *present*, so it sees the appended one that
+/// `verified_receipts()` cannot. This is the only way an operator learns the
+/// file is not the one the transparency service returned, and it fails as a
+/// policy decision — exit 2 — rather than as a claim about the artifact, which
+/// is still exactly what its Issuer signed.
+#[test]
+fn an_appended_receipt_fails_a_policy_that_pins_the_count() {
+    let statement = corpus(&["fixtures", "appended-receipt.cose"]);
+    let keys = corpus(&["fixtures", "musa-mst-july-scitt-keys.cbor"]);
+    let policy = corpus(&["policies", "fixture-mst.json"]);
+    let r = run(&[
+        "verify",
+        "--statement",
+        &statement,
+        "--scitt-keys",
+        &keys,
+        "--policy",
+        &policy,
+    ]);
+    assert_eq!(
+        r.code, 2,
+        "an inserted receipt must fail the operator's stated expectation:\n{}",
+        r.stdout
+    );
+    assert!(r.stdout.contains("policy-failed"), "{}", r.stdout);
+    assert!(
+        r.stdout.contains("receiptCount"),
+        "the run must name the assertion that refused it: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains("Do not deploy"),
+        "an inserted receipt indicts the file's handling, not the artifact: {}",
         r.stdout
     );
 }
@@ -290,6 +334,18 @@ fn an_unknown_option_exits_four() {
     assert!(r.stderr.contains("unknown option"));
 }
 
+/// `--issuer` was removed: a receipt from another service is signed by that
+/// service's key and so fails receipt verification anyway, and requiring a
+/// particular issuer is a relying-party rule that belongs in the policy
+/// document. A pipeline still passing the flag must fail loudly rather than
+/// silently drop a check its author believed was running.
+#[test]
+fn the_removed_issuer_flag_is_refused_rather_than_ignored() {
+    let r = verify(&["--issuer", "musa-mst-aug-2.confidential-ledger.azure.com"]);
+    assert_eq!(r.code, 4, "{}", r.stderr);
+    assert!(r.stderr.contains("unknown option"), "{}", r.stderr);
+}
+
 #[test]
 fn a_missing_policy_exits_four() {
     let statement = corpus(&["fixtures", "transparent-statement.cose"]);
@@ -297,14 +353,6 @@ fn a_missing_policy_exits_four() {
     let r = run(&["verify", "--statement", &statement, "--scitt-keys", &keys]);
     assert_eq!(r.code, 4);
     assert!(r.stderr.contains("--policy is required"));
-}
-
-#[test]
-fn an_unimplemented_binding_mode_is_refused() {
-    let artifact = corpus(&["fixtures", "artifact.bin"]);
-    let r = verify(&["--artifact", &artifact, "--binding-mode", "payload-digest"]);
-    assert_eq!(r.code, 4);
-    assert!(r.stderr.contains("not implemented"), "{}", r.stderr);
 }
 
 #[test]
@@ -633,6 +681,58 @@ fn a_failed_facts_write_is_also_fatal() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The record on disk must never contradict the exit code.
+///
+/// The mixed case is the dangerous one and neither test above reaches it: when
+/// `--result` succeeds and `--facts` fails, the run exits 4 while a file
+/// claiming `"pass": true` sits on disk. Stdout being correct is not enough —
+/// the terminal scrolls away and the record is what gets kept, attached to a
+/// release, and read months later by someone reconstructing what was verified.
+#[test]
+fn a_written_record_never_contradicts_the_exit_code() {
+    let dir = std::env::temp_dir().join("scitt-verifier-mixed-write");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let good = dir.join("result.json");
+    let bad = dir.join("no-such-dir").join("facts.json");
+
+    let r = verify(&[
+        "--result",
+        &good.display().to_string(),
+        "--facts",
+        &bad.display().to_string(),
+        "--format",
+        "json",
+    ]);
+
+    assert_eq!(r.code, 4, "a lost handoff file is still a lost audit trail");
+
+    let written = std::fs::read_to_string(&good).expect("the record that could be written must be");
+    let on_disk: serde_json::Value = serde_json::from_str(&written).unwrap();
+
+    assert_eq!(
+        on_disk["appraisal"]["exitCode"], 4,
+        "the persisted record disagrees with the process that wrote it: {on_disk}"
+    );
+    assert_eq!(on_disk["appraisal"]["verdict"], "usage-error");
+    assert_eq!(
+        on_disk["appraisal"]["pass"], false,
+        "a record claiming success for a failed run is worse than no record"
+    );
+
+    // The written record and stdout are the same document, which is what
+    // `--result` promises. Comparing them also catches a fix that corrects one
+    // path and leaves the other behind.
+    let printed: serde_json::Value = serde_json::from_str(&r.stdout).unwrap();
+    assert_eq!(
+        on_disk, printed,
+        "the file and stdout must be the same document"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The retired flag must fail loudly rather than being silently accepted.
 #[test]
 fn the_renamed_evidence_flag_explains_itself() {
@@ -768,4 +868,884 @@ fn inspect_separates_unreadable_from_undecodable() {
 fn help_and_version_succeed() {
     assert_eq!(run(&["--help"]).code, 0);
     assert_eq!(run(&["--version"]).code, 0);
+}
+
+// ---------------------------------------------------------------------------
+// COSE Hash Envelope binding (RFC 9995)
+//
+// The fixture is a real `CoseSignTool indirect-sign` envelope, not a
+// hand-rolled one, so these tests fail if our reading of the RFC diverges from
+// an independent implementation's writing of it.
+//
+// It carries no receipt, so a bound run still stops at exit 3. That is the
+// honest answer — an artifact bound to a merely-signed statement is not
+// transparent — and it is why these tests assert on the binding *detail* as
+// well as the code.
+// ---------------------------------------------------------------------------
+
+fn verify_envelope(extra: &[&str]) -> Run {
+    let statement = corpus(&["fixtures", "hash-envelope.cose"]);
+    let keys = corpus(&["fixtures", "musa-mst-july-scitt-keys.cbor"]);
+    let policy = corpus(&["policies", "fixture-mst.json"]);
+    let mut args = vec![
+        "verify",
+        "--statement",
+        &statement,
+        "--scitt-keys",
+        &keys,
+        "--policy",
+        &policy,
+    ];
+    args.extend_from_slice(extra);
+    run(&args)
+}
+
+#[test]
+fn a_hash_envelope_binds_to_the_artifact_it_hashes() {
+    let artifact = corpus(&["fixtures", "hash-envelope-artifact.spdx.json"]);
+    let r = verify_envelope(&["--artifact", &artifact, "--binding-mode", "payload-digest"]);
+    assert!(
+        r.stdout.contains("SHA-256"),
+        "a bound digest run must name the algorithm it used: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains("do not"),
+        "a matching artifact must not be accused: {}",
+        r.stdout
+    );
+    // No receipt in this fixture, so transparency cannot be claimed even
+    // though the binding held.
+    assert_eq!(r.code, 3, "{}", r.stdout);
+}
+
+#[test]
+fn a_hash_envelope_rejects_a_different_artifact() {
+    // The signature is genuine and the envelope is well-formed. What is wrong
+    // is that this is not the file that was signed.
+    let artifact = corpus(&["fixtures", "hash-envelope-bad-artifact.spdx.json"]);
+    let r = verify_envelope(&["--artifact", &artifact, "--binding-mode", "payload-digest"]);
+    assert_eq!(
+        r.code, 1,
+        "a digest mismatch is a finding about the artifact: {}",
+        r.stdout
+    );
+}
+
+/// Naming the wrong mode must never look like a tampered artifact.
+///
+/// `payload-bytes` against an envelope compares the whole file to a 32-byte
+/// digest. Reported as a mismatch, that tells an operator to distrust a build
+/// that is in fact fine — the most damaging output this tool can produce.
+#[test]
+fn payload_bytes_against_a_hash_envelope_cannot_compare() {
+    let artifact = corpus(&["fixtures", "hash-envelope-artifact.spdx.json"]);
+    let r = verify_envelope(&["--artifact", &artifact, "--binding-mode", "payload-bytes"]);
+    assert_ne!(
+        r.code, 1,
+        "a mode error is not evidence about the artifact: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("payload-digest"),
+        "the refusal must name the mode that would work: {}",
+        r.stdout
+    );
+}
+
+/// The mirror image: `payload-digest` against an ordinary statement.
+#[test]
+fn payload_digest_against_a_plain_statement_cannot_compare() {
+    let artifact = corpus(&["fixtures", "artifact.bin"]);
+    let r = verify(&["--artifact", &artifact, "--binding-mode", "payload-digest"]);
+    assert_ne!(r.code, 1, "not an envelope is not a mismatch: {}", r.stdout);
+    assert!(
+        r.stdout.contains("258"),
+        "the refusal must say what was missing: {}",
+        r.stdout
+    );
+}
+
+/// The regression that would hurt most.
+///
+/// This corpus statement has a genuine receipt and a passing policy, so every
+/// gate except the binding succeeds. An earlier `decide()` enumerated binding
+/// modes by name; `payload-digest` was not in the list, fell through to the
+/// catch-all, and returned `PASS statement-transparent` with exit 0 — plus a
+/// diagnostic claiming binding "was not requested", when the operator had
+/// requested it and the tool had failed to perform it.
+///
+/// A requested-but-unperformed binding must never be reported as any kind of
+/// pass, whichever mode is named.
+#[test]
+fn a_requested_binding_that_cannot_be_performed_is_never_a_pass() {
+    let artifact = corpus(&["fixtures", "artifact.bin"]);
+    let r = verify(&["--artifact", &artifact, "--binding-mode", "payload-digest"]);
+    assert_ne!(
+        r.code, 0,
+        "the operator asked about an artifact and got no answer: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains("PASS"),
+        "an unevaluable binding is not a pass: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains("was not requested"),
+        "it was requested; saying otherwise misreports the operator: {}",
+        r.stdout
+    );
+}
+
+/// `inspect` must not publish a hash-of-a-hash as the payload digest.
+///
+/// For an envelope the payload *is* a digest, so a `sha256` field over it
+/// identifies nothing — and invites a consumer to compare it against their
+/// artifact's digest and conclude, wrongly, that they do not match.
+#[test]
+fn inspect_reports_a_hash_envelope_as_a_digest() {
+    let statement = corpus(&["fixtures", "hash-envelope.cose"]);
+    let r = run(&["inspect", "--statement", &statement, "--format", "json"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let value: serde_json::Value = serde_json::from_str(&r.stdout).expect("stdout must be JSON");
+    let payload = &value["payload"];
+    assert!(
+        payload["sha256"].is_null(),
+        "a digest of a digest must not be published as the payload hash: {payload}"
+    );
+    assert_eq!(payload["hashEnvelope"]["hashAlg"], "SHA-256");
+    assert_eq!(
+        payload["hashEnvelope"]["preimageContentType"],
+        "application/spdx+json"
+    );
+    assert!(
+        payload["hashEnvelope"]["digest"].is_string(),
+        "the artifact digest must be published in full: {payload}"
+    );
+}
+
+/// The fixtures are hashed byte-for-byte, so a checkout that rewrites their
+/// line endings would break the binding tests in a way that looks like a code
+/// bug. Fail loudly and point at the cause instead.
+#[test]
+fn hash_envelope_fixtures_keep_their_exact_bytes() {
+    for (name, expected) in [
+        ("hash-envelope.cose", 702usize),
+        ("hash-envelope-artifact.spdx.json", 57),
+        ("hash-envelope-bad-artifact.spdx.json", 44),
+    ] {
+        let bytes = std::fs::read(corpus(&["fixtures", name])).unwrap();
+        assert_eq!(
+            bytes.len(),
+            expected,
+            "fixture {name} is {} bytes, expected {expected}. The checkout \
+             transformed it — check .gitattributes and core.autocrlf.",
+            bytes.len()
+        );
+    }
+}
+
+/// `statementSubject` reads a claim the issuer signed and the ledger's claim
+/// digest covers, so unlike `signerSubjectContains` it survives re-signing by
+/// a different certificate. These pin the exit codes a gate branches on.
+fn verify_with_subject_policy(name: &str, criteria: &str) -> Run {
+    let dir = std::env::temp_dir().join(format!("scitt-verifier-subject-{name}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let policy = dir.join("policy.json");
+    std::fs::write(
+        &policy,
+        format!(
+            r#"{{"policyId":"subject","policyVersion":"1","assertions":{{"receiptCount":1,"statementSubject":{criteria}}}}}"#
+        ),
+    )
+    .unwrap();
+
+    let statement = corpus(&["fixtures", "transparent-statement.cose"]);
+    let keys = corpus(&["fixtures", "musa-mst-july-scitt-keys.cbor"]);
+    let r = run(&[
+        "verify",
+        "--statement",
+        &statement,
+        "--scitt-keys",
+        &keys,
+        "--policy",
+        &policy.display().to_string(),
+    ]);
+    let _ = std::fs::remove_dir_all(&dir);
+    r
+}
+
+#[test]
+fn a_matching_statement_subject_passes() {
+    let r = verify_with_subject_policy("match", r#"{"equals":"unknown.intent"}"#);
+    assert_eq!(r.code, 0, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("[pass] statementSubject"),
+        "the assertion must be shown as having run: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn a_statement_about_something_else_fails_the_policy() {
+    // The whole point: a genuine, transparent statement from an accepted
+    // issuer must still be refused when it is about a different subject.
+    let r = verify_with_subject_policy("mismatch", r#"{"equals":"some.other.thing"}"#);
+    assert_eq!(
+        r.code, 2,
+        "a subject mismatch is a policy failure, not a crypto failure: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("[FAIL] statementSubject"),
+        "the failing assertion must be named: {}",
+        r.stdout
+    );
+}
+
+/// The real `iss` claim in the corpus statement. A `did:x509` binds the CA
+/// fingerprint and the EKU, and Microsoft Signing Transparency authenticates it
+/// at registration, so a receipt over this claim means the service checked the
+/// signer was entitled to the identity.
+const FIXTURE_ISSUER: &str = "did:x509:0:sha256:1UncIxT3oW5JalFUkbJzvJwJjkCgcNYe8WAocPDEAtg::eku:1.3.6.1.4.1.311.97.1.3.1.29433.35007.34545.16815.37291.11644.53265.56135";
+
+fn verify_with_issuer_policy(name: &str, criteria: &str) -> Run {
+    let dir = std::env::temp_dir().join(format!("scitt-verifier-issuer-{name}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let policy = dir.join("policy.json");
+    std::fs::write(
+        &policy,
+        format!(
+            r#"{{"policyId":"issuer","policyVersion":"1","assertions":{{"receiptCount":1,"statementIssuer":{criteria}}}}}"#
+        ),
+    )
+    .unwrap();
+
+    let statement = corpus(&["fixtures", "transparent-statement.cose"]);
+    let keys = corpus(&["fixtures", "musa-mst-july-scitt-keys.cbor"]);
+    let r = run(&[
+        "verify",
+        "--statement",
+        &statement,
+        "--scitt-keys",
+        &keys,
+        "--policy",
+        &policy.display().to_string(),
+    ]);
+    let _ = std::fs::remove_dir_all(&dir);
+    r
+}
+
+#[test]
+fn a_matching_statement_issuer_passes() {
+    let r = verify_with_issuer_policy("match", &format!(r#"{{"equals":"{FIXTURE_ISSUER}"}}"#));
+    assert_eq!(r.code, 0, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("[pass] statementIssuer"),
+        "the assertion must be shown as having run: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn a_statement_from_another_issuer_fails_the_policy() {
+    // Cryptographically identical run, refused on identity alone: the receipt
+    // verifies, the signature verifies, and the gate still says no.
+    let r = verify_with_issuer_policy("mismatch", r#"{"equals":"did:x509:0:sha256:someoneelse"}"#);
+    assert_eq!(
+        r.code, 2,
+        "an issuer mismatch is a policy failure, not a crypto failure: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("[FAIL] statementIssuer"),
+        "the failing assertion must be named: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn an_issuer_prefix_pins_the_authority_without_pinning_the_eku() {
+    // The reason `startsWith` earns its place: the did:x509 form puts the CA
+    // fingerprint before the EKU, so a prefix survives an EKU change that an
+    // `equals` pin would reject.
+    let r = verify_with_issuer_policy(
+        "prefix",
+        r#"{"startsWith":"did:x509:0:sha256:1UncIxT3oW5JalFUkbJzvJwJjkCgcNYe8WAocPDEAtg"}"#,
+    );
+    assert_eq!(r.code, 0, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("[pass] statementIssuer"), "{}", r.stdout);
+}
+
+#[test]
+fn an_issuer_prefix_that_starts_elsewhere_is_refused() {
+    // There is no `contains` mode precisely so that an attacker-chosen identity
+    // embedding the pinned string does not pass.
+    let r = verify_with_issuer_policy(
+        "impostor",
+        &format!(r#"{{"startsWith":"not-{FIXTURE_ISSUER}"}}"#),
+    );
+    assert_eq!(r.code, 2, "{}", r.stdout);
+}
+
+#[test]
+fn a_vacuous_subject_match_is_refused_before_anything_is_verified() {
+    // `startsWith: ""` accepts every subject. Refusing it at parse time is
+    // what keeps it from appearing in the report as a rule that passed.
+    let r = verify_with_subject_policy("vacuous", r#"{"startsWith":""}"#);
+    assert_eq!(r.code, 4, "a rule that cannot reject is a usage error");
+    assert!(
+        !r.stdout.starts_with("PASS"),
+        "a refused policy must never print a pass: {}",
+        r.stdout
+    );
+}
+
+// --- protectedHeaders --------------------------------------------------
+
+/// Run a policy whose only assertion is a `protectedHeaders` list.
+fn verify_with_header_policy(name: &str, list: &str) -> Run {
+    let dir = std::env::temp_dir().join(format!("scitt-verifier-headers-{name}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let policy = dir.join("policy.json");
+    std::fs::write(
+        &policy,
+        format!(
+            r#"{{"policyId":"headers","policyVersion":"1","assertions":{{"receiptCount":1,"protectedHeaders":{list}}}}}"#
+        ),
+    )
+    .unwrap();
+
+    let statement = corpus(&["fixtures", "transparent-statement.cose"]);
+    let keys = corpus(&["fixtures", "musa-mst-july-scitt-keys.cbor"]);
+    let r = run(&[
+        "verify",
+        "--statement",
+        &statement,
+        "--scitt-keys",
+        &keys,
+        "--policy",
+        &policy.display().to_string(),
+    ]);
+    let _ = std::fs::remove_dir_all(&dir);
+    r
+}
+
+#[test]
+fn a_protected_header_can_be_pinned_by_integer_label() {
+    let r = verify_with_header_policy(
+        "cty",
+        r#"[{"path":[3],"text":{"equals":"application/cose"}}]"#,
+    );
+    assert_eq!(r.code, 0, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("[pass] protectedHeaders"),
+        "the assertion must be shown as having run: {}",
+        r.stdout
+    );
+}
+
+/// The real MST statement nests its CWT claims at label 15, so this walks two
+/// levels into material the receipt covers.
+#[test]
+fn a_path_reaches_a_claim_nested_inside_the_cwt_header() {
+    let r = verify_with_header_policy(
+        "nested",
+        r#"[{"path":[15,2],"text":{"equals":"unknown.intent"}}]"#,
+    );
+    assert_eq!(r.code, 0, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
+}
+
+/// `x5t` is `[hashAlg, hashValue]`, so reaching the algorithm means indexing
+/// an array. The node's type decides that the segment is an index, not a label.
+#[test]
+fn an_integer_segment_indexes_the_x5t_array() {
+    let r = verify_with_header_policy("x5t", r#"[{"path":[34,0],"int":{"equals":-16}}]"#);
+    assert_eq!(r.code, 0, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
+}
+
+#[test]
+fn a_header_the_statement_does_not_carry_cannot_be_evaluated() {
+    let r = verify_with_header_policy("absent", r#"[{"path":[-65537],"text":{"equals":"x"}}]"#);
+    assert_eq!(r.code, 3, "absent is not a pass and not a failure");
+    assert!(
+        !r.stdout.starts_with("PASS"),
+        "an unevaluable rule must never print a pass: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn a_header_of_the_wrong_cbor_type_fails_and_names_both_types() {
+    // Label 33 is the x5chain, an array of four certificates.
+    let r = verify_with_header_policy("mistyped", r#"[{"path":[33],"text":{"equals":"x"}}]"#);
+    assert_eq!(r.code, 2, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("expected a text string") && r.stdout.contains("array of 4"),
+        "the reason should name what was expected and what was found: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn a_header_that_does_not_match_fails_while_the_statement_still_verifies() {
+    let r = verify_with_header_policy(
+        "mismatch",
+        r#"[{"path":[3],"text":{"equals":"application/json"}}]"#,
+    );
+    assert_eq!(r.code, 2, "the statement is genuine; the policy said no");
+    assert!(
+        r.stdout.contains("PolicyAssertionFailed") && r.stdout.contains("protectedHeaders"),
+        "the failure must be attributed to the policy, not to the cryptography: {}",
+        r.stdout
+    );
+}
+
+/// The forward-compatibility guard, end to end. A policy written against a
+/// build that has quantifiers must fail loudly here rather than silently
+/// hunting for a header literally labelled `*`.
+#[test]
+fn an_array_wildcard_path_is_refused_before_anything_is_verified() {
+    let r = verify_with_header_policy(
+        "wildcard",
+        r#"[{"path":["external-signatures","*",1],"int":{"equals":-257}}]"#,
+    );
+    assert_eq!(
+        r.code, 4,
+        "a path this build cannot honour is a usage error"
+    );
+    assert!(
+        !r.stdout.starts_with("PASS"),
+        "a refused policy must never print a pass: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn a_header_assertion_with_no_matcher_is_refused() {
+    let r = verify_with_header_policy("no-matcher", r#"[{"path":[3]}]"#);
+    assert_eq!(r.code, 4, "an untyped match is a usage error");
+}
+
+/// `inspect` is the documented way to discover what a policy can assert on, so
+/// it has to print the label a `protectedHeaders` path needs. The name alone
+/// sends the author to an IANA registry.
+#[test]
+fn inspect_prints_the_policy_path_for_each_protected_header() {
+    let statement = corpus(&["fixtures", "hash-envelope.cose"]);
+    let r = run(&["inspect", "--statement", &statement]);
+    for expected in ["alg [1]", "payload hash alg [258]", "preimage cty [259]"] {
+        assert!(
+            r.stdout.contains(expected),
+            "inspect must print {expected}, so the path can be read off: {}",
+            r.stdout
+        );
+    }
+}
+
+/// A CWT claim is two segments deep. Printing only the inner label would leave
+/// the author to guess the nesting, which is the easiest part to get wrong.
+#[test]
+fn inspect_prints_the_full_path_for_a_nested_cwt_claim() {
+    let statement = corpus(&["fixtures", "transparent-statement.cose"]);
+    let r = run(&["inspect", "--statement", &statement]);
+    assert!(
+        r.stdout.contains("sub [15, 2]") && r.stdout.contains("iss [15, 1]"),
+        "a nested claim must show its whole path: {}",
+        r.stdout
+    );
+}
+
+/// `protectedHeaders` resolves against the protected bucket only. Printing the
+/// same bracketed syntax over unprotected headers would offer a path that
+/// always resolves to nothing.
+#[test]
+fn inspect_offers_no_policy_path_for_unprotected_headers() {
+    let statement = corpus(&["fixtures", "transparent-statement.cose"]);
+    let r = run(&["inspect", "--statement", &statement]);
+    let unprotected = r
+        .stdout
+        .split("Unprotected headers")
+        .nth(1)
+        .expect("the fixture has an unprotected bucket")
+        .split("\n\n")
+        .next()
+        .expect("the bucket ends at a blank line");
+    assert!(
+        unprotected.contains("receipts"),
+        "the fixture keeps its receipt unprotected: {unprotected}"
+    );
+    assert!(
+        !unprotected.contains('['),
+        "no path may be advertised for a header policy cannot reach: {unprotected}"
+    );
+}
+
+/// The end-to-end claim: a path copied out of `inspect` evaluates.
+#[test]
+fn a_path_read_from_inspect_can_be_pasted_into_a_policy() {
+    let statement = corpus(&["fixtures", "transparent-statement.cose"]);
+    let r = run(&["inspect", "--statement", &statement]);
+    let line = r
+        .stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("content type ["))
+        .expect("the MST statement declares a content type");
+    let path = &line[line.find('[').unwrap()..=line.find(']').unwrap()];
+    assert_eq!(path, "[3]", "read straight off the inspect line");
+
+    let r = verify_with_header_policy(
+        "pasted",
+        &format!(r#"[{{"path":{path},"text":{{"equals":"application/cose"}}}}]"#),
+    );
+    assert_eq!(r.code, 0, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("[pass] protectedHeaders"),
+        "the path printed by inspect must resolve when pasted verbatim: {}",
+        r.stdout
+    );
+}
+
+/// A header this build does not interpret still has to be legible. Naming its
+/// shape — "array of 1" — proves it is there and says nothing an author can
+/// write a rule against, which sent them to a separate CBOR decoder. The
+/// members carry the `path` a policy would use, so the next step is a copy.
+#[test]
+fn inspect_descends_into_an_uninterpreted_cbor_header() {
+    let statement = corpus(&["fixtures", "cbor-header.cose"]);
+    let r = run(&["inspect", "--statement", &statement]);
+    for expected in [
+        r#"["external-signature"]"#,
+        r#"["external-signature", 0]"#,
+        r#"["external-signature", 0, 1]"#,
+        r#"["external-signature", 0, -1]"#,
+    ] {
+        assert!(
+            r.stdout.contains(expected),
+            "every addressable member must print its path; missing {expected}: {}",
+            r.stdout
+        );
+    }
+}
+
+/// The same end-to-end claim as the flat case, one level deeper. Nesting is
+/// where an author is most likely to guess the path wrong, so the printed
+/// form has to be the form the engine accepts — not merely similar to it.
+#[test]
+fn a_nested_path_read_from_inspect_can_be_pasted_into_a_policy() {
+    let statement = corpus(&["fixtures", "cbor-header.cose"]);
+    let r = run(&["inspect", "--statement", &statement]);
+    let line = r
+        .stdout
+        .lines()
+        .find(|l| {
+            l.trim_start()
+                .starts_with(r#"["external-signature", 0, 1]"#)
+        })
+        .expect("the fixture carries a nested CBOR header");
+    let path = &line[line.find('[').unwrap()..=line.find(']').unwrap()];
+    assert_eq!(path, r#"["external-signature", 0, 1]"#);
+
+    let dir = std::env::temp_dir().join("scitt-verifier-nested-path");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let policy = dir.join("policy.json");
+    std::fs::write(
+        &policy,
+        format!(
+            r#"{{"policyId":"nested","policyVersion":"1","assertions":{{"receiptCount":1,
+               "protectedHeaders":[{{"path":{path},"int":{{"equals":-257}}}}]}}}}"#
+        ),
+    )
+    .unwrap();
+
+    let keys = corpus(&["fixtures", "musa-mst-aug-scitt-keys.cbor"]);
+    let r = run(&[
+        "verify",
+        "--statement",
+        &statement,
+        "--scitt-keys",
+        &keys,
+        "--policy",
+        &policy.display().to_string(),
+    ]);
+    assert_eq!(r.code, 0, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("[pass] protectedHeaders"),
+        "a nested path printed by inspect must resolve verbatim: {}",
+        r.stdout
+    );
+}
+
+/// The name `inspect` prints is the name a policy accepts. Without this the
+/// two tables could drift apart in a build that still passes its unit tests,
+/// and the advertised route — read the report, write the rule — would fail for
+/// one algorithm, which is the hardest kind of gap to notice.
+#[test]
+fn an_algorithm_name_read_from_inspect_can_be_pasted_into_a_policy() {
+    let statement = corpus(&["fixtures", "transparent-statement.cose"]);
+    let r = run(&["inspect", "--statement", &statement]);
+    let line = r
+        .stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("alg ["))
+        .expect("the MST statement declares an algorithm");
+    let name = line
+        .rsplit_once("] ")
+        .expect("alg renders as 'name (value)'")
+        .1
+        .split_whitespace()
+        .next()
+        .expect("a name precedes the parenthesised value");
+    assert_eq!(name, "PS256", "read straight off the inspect line");
+
+    let r = verify_with_header_policy(
+        "pasted-alg",
+        &format!(r#"[{{"path":[1],"alg":{{"equals":"{name}"}}}}]"#),
+    );
+    assert_eq!(r.code, 0, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("PS256 (-37) must be PS256"),
+        "the report names both sides so a refusal needs no registry: {}",
+        r.stdout
+    );
+}
+
+/// A mistyped identifier is a different, valid policy; a mistyped name is not a
+/// policy at all. This is the whole reason the matcher exists, so it is pinned
+/// end to end rather than only at the parser.
+#[test]
+fn an_unknown_algorithm_name_stops_before_anything_is_verified() {
+    let r = verify_with_header_policy("typo", r#"[{"path":[1],"alg":{"equals":"PS257"}}]"#);
+    assert_eq!(
+        r.code, 4,
+        "a policy that cannot match must be a usage error, not a verdict: {}\n{}",
+        r.stdout, r.stderr
+    );
+    let out = format!("{}{}", r.stdout, r.stderr);
+    assert!(out.contains("PS257"), "name the offending value: {out}");
+    assert!(
+        out.contains("PS256"),
+        "list what is accepted, or the author is left guessing: {out}"
+    );
+}
+
+/// The label tells an author where a header is; the numeric value tells them
+/// what to write. `alg` renders as a name, so without this the author has to
+/// find `ES256 = -7` in a registry to complete the rule.
+#[test]
+fn inspect_prints_the_numeric_value_of_an_algorithm() {
+    let statement = corpus(&["fixtures", "transparent-statement.cose"]);
+    let r = run(&["inspect", "--statement", &statement]);
+    assert!(
+        r.stdout.contains("PS256 (-37)"),
+        "alg must show the value a policy matches on: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("SHA-256 (-16)"),
+        "x5t's algorithm is addressable at [34, 0], so it needs its value too: {}",
+        r.stdout
+    );
+}
+
+/// The RFC 9995 payload hash algorithm decides how an artifact gets hashed, and
+/// is the likeliest hash-envelope header to appear in a policy.
+#[test]
+fn inspect_prints_the_numeric_value_of_the_payload_hash_algorithm() {
+    let statement = corpus(&["fixtures", "hash-envelope.cose"]);
+    let r = run(&["inspect", "--statement", &statement]);
+    assert!(
+        r.stdout.contains("payload hash alg [258]   SHA-256 (-16)"),
+        "both halves of the rule must be readable off one line: {}",
+        r.stdout
+    );
+}
+
+/// Verify the CBOR-header fixture, whose protected header carries a real
+/// detached RS256 signature over its payload, against `assertions`.
+fn verify_cbor_header_fixture(name: &str, assertions: &str) -> Run {
+    let dir = std::env::temp_dir().join(format!("scitt-verifier-external-{name}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let policy = dir.join("policy.json");
+    std::fs::write(
+        &policy,
+        format!(r#"{{"policyId":"external","policyVersion":"1","assertions":{assertions}}}"#),
+    )
+    .unwrap();
+
+    let statement = corpus(&["fixtures", "cbor-header.cose"]);
+    let keys = corpus(&["fixtures", "musa-mst-aug-scitt-keys.cbor"]);
+    let r = run(&[
+        "verify",
+        "--statement",
+        &statement,
+        "--scitt-keys",
+        &keys,
+        "--policy",
+        &policy.display().to_string(),
+    ]);
+    let _ = std::fs::remove_dir_all(&dir);
+    r
+}
+
+#[test]
+fn a_detached_signature_in_a_protected_header_can_be_verified() {
+    let r = verify_cbor_header_fixture(
+        "pass",
+        r#"{"externalSignatures":[{"path":["external-signature",0],"signedOver":"payload",
+            "signerSubjectContains":"Example Component Supplier"}]}"#,
+    );
+    assert_eq!(r.code, 0, "{}", r.stdout);
+    assert!(
+        r.stdout.contains("[pass] externalSignatures"),
+        "{}",
+        r.stdout
+    );
+    // A pass here must not read as an endorsement of the named signer: no
+    // chain was validated, so the subject is a string its own author chose.
+    assert!(
+        r.stdout.contains("ExternalSignerChainNotValidated"),
+        "a verified external signature must declare that its chain was not validated: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn a_detached_signature_by_the_wrong_signer_fails() {
+    let r = verify_cbor_header_fixture(
+        "wrong-signer",
+        r#"{"externalSignatures":[{"path":["external-signature",0],"signedOver":"payload",
+            "signerSubjectContains":"Some Other Supplier"}]}"#,
+    );
+    assert_eq!(r.code, 2, "{}", r.stdout);
+    assert!(
+        r.stdout.contains("does not contain 'Some Other Supplier'"),
+        "{}",
+        r.stdout
+    );
+}
+
+/// An absent descriptor is not a forged one. The distinction has to survive
+/// all the way to the exit code, or a pipeline cannot tell "this supplier did
+/// not sign" from "this supplier's signature is fake".
+#[test]
+fn an_absent_detached_signature_cannot_be_evaluated() {
+    let r = verify_cbor_header_fixture(
+        "absent",
+        r#"{"externalSignatures":[{"path":["no-such-header",0],"signedOver":"payload"}]}"#,
+    );
+    assert_eq!(r.code, 3, "{}", r.stdout);
+    assert!(
+        r.stdout.contains("[CANNOT EVALUATE] externalSignatures"),
+        "{}",
+        r.stdout
+    );
+}
+
+/// What the signature covers is the policy author's declaration, never the
+/// tool's guess. A policy that omits it, or names a convention this build does
+/// not implement, is refused before any crypto runs.
+#[test]
+fn a_detached_signature_needs_an_explicit_signed_over() {
+    let missing = verify_cbor_header_fixture(
+        "no-signed-over",
+        r#"{"externalSignatures":[{"path":["external-signature",0]}]}"#,
+    );
+    assert_eq!(missing.code, 4, "{}", missing.stdout);
+
+    let unknown = verify_cbor_header_fixture(
+        "unknown-signed-over",
+        r#"{"externalSignatures":[{"path":["external-signature",0],"signedOver":"claimDigest"}]}"#,
+    );
+    assert_eq!(unknown.code, 4, "{}", unknown.stdout);
+}
+
+/// Verify the nested-COSE_Sign1 fixture against `assertions`.
+fn verify_nested_fixture(name: &str, assertions: &str) -> Run {
+    let dir = std::env::temp_dir().join(format!("scitt-verifier-nested-{name}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let policy = dir.join("policy.json");
+    std::fs::write(
+        &policy,
+        format!(r#"{{"policyId":"nested","policyVersion":"1","assertions":{assertions}}}"#),
+    )
+    .unwrap();
+
+    let statement = corpus(&["fixtures", "nested-sign1.cose"]);
+    let keys = corpus(&["fixtures", "musa-mst-aug-scitt-keys.cbor"]);
+    let r = run(&[
+        "verify",
+        "--statement",
+        &statement,
+        "--scitt-keys",
+        &keys,
+        "--policy",
+        &policy.display().to_string(),
+    ]);
+    let _ = std::fs::remove_dir_all(&dir);
+    r
+}
+
+#[test]
+fn a_nested_cose_sign1_can_be_verified() {
+    let r = verify_nested_fixture(
+        "pass",
+        r#"{"externalSignatures":[{"path":["external-statement"],"signedOver":"coseSign1",
+            "signerSubjectContains":"Example Component Supplier"}]}"#,
+    );
+    assert_eq!(r.code, 0, "{}", r.stdout);
+    assert!(
+        r.stdout.contains("[pass] externalSignatures"),
+        "{}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("ExternalSignerChainNotValidated"),
+        "{}",
+        r.stdout
+    );
+}
+
+/// RS256 is the algorithm on essentially every supplier signature, and the
+/// upstream COSE helper this crate uses for the envelope cannot map it — it
+/// returns the same error for "unsupported" as for "invalid". Reading a
+/// nested COSE_Sign1 through that helper reported every real RS256 signature
+/// as a forgery. This test is the regression guard: it passes only if the
+/// nested path builds its own Sig_structure.
+#[test]
+fn a_nested_rs256_signature_is_not_reported_as_a_forgery() {
+    let r = verify_nested_fixture(
+        "rs256",
+        r#"{"externalSignatures":[{"path":["external-statement"],"signedOver":"coseSign1"}]}"#,
+    );
+    assert_eq!(r.code, 0, "{}", r.stdout);
+    assert!(
+        !r.stdout.contains("does not verify"),
+        "an RS256 signature this build can compute must not be reported as invalid: {}",
+        r.stdout
+    );
+}
+
+/// Naming the wrong convention must not read as a forgery either. The two
+/// shapes are different structures, and saying "this is not a COSE_Sign1" is
+/// the only honest answer.
+#[test]
+fn naming_the_wrong_convention_cannot_be_evaluated() {
+    let r = verify_nested_fixture(
+        "wrong-convention",
+        r#"{"externalSignatures":[{"path":["external-statement"],"signedOver":"payload"}]}"#,
+    );
+    assert_eq!(r.code, 3, "{}", r.stdout);
+    assert!(
+        r.stdout.contains("[CANNOT EVALUATE] externalSignatures"),
+        "{}",
+        r.stdout
+    );
 }

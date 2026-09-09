@@ -36,6 +36,19 @@ pub fn as_int(v: &CborValue) -> Result<i64> {
     }
 }
 
+/// A CWT NumericDate: a bare integer, or one wrapped in CBOR tag 1.
+///
+/// RFC 8392 §3.1.1 permits either encoding, and MST uses both — receipts carry
+/// a bare integer while statements tag theirs. Accepting only the bare form
+/// makes a present timestamp look absent, which is the most dangerous way for
+/// a parser to be wrong about a date.
+pub fn as_numeric_date(v: &CborValue) -> Result<i64> {
+    match v {
+        CborValue::Tagged { tag: 1, payload } => as_int(payload),
+        other => as_int(other),
+    }
+}
+
 pub fn as_array(v: &CborValue) -> Result<&Vec<CborValue>> {
     match v {
         CborValue::Array(a) => Ok(a),
@@ -114,4 +127,31 @@ pub fn fixed_time_eq(a: &[u8], b: &[u8]) -> bool {
         diff |= x ^ y;
     }
     diff == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: MST statements tag `iat` with CBOR tag 1, and reading only
+    /// bare integers made a present timestamp look absent.
+    #[test]
+    fn a_numeric_date_is_read_whether_or_not_it_is_tagged() {
+        let bare = CborValue::Int(1_786_995_989);
+        let tagged = CborValue::Tagged {
+            tag: 1,
+            payload: Box::new(CborValue::Int(1_786_995_989)),
+        };
+        assert_eq!(as_numeric_date(&bare).unwrap(), 1_786_995_989);
+        assert_eq!(as_numeric_date(&tagged).unwrap(), 1_786_995_989);
+    }
+
+    #[test]
+    fn an_unrelated_tag_is_not_silently_unwrapped_into_a_date() {
+        let wrong_tag = CborValue::Tagged {
+            tag: 61,
+            payload: Box::new(CborValue::Int(7)),
+        };
+        assert!(as_numeric_date(&wrong_tag).is_err());
+    }
 }

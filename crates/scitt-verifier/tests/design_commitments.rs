@@ -112,6 +112,14 @@ fn the_detectors_actually_detect() {
         vec!["std::net", "TcpStream"]
     );
     assert!(socket_apis_in("let digest = sha256_hex(&bytes);").is_empty());
+
+    assert_eq!(
+        codes_named_in("*Reported at runtime:* code `RevocationNotChecked`."),
+        vec!["RevocationNotChecked"]
+    );
+    // Backticked prose that is not a code must not be harvested, or the doc
+    // test starts demanding that `--scitt-keys` appear as a string literal.
+    assert!(codes_named_in("pass `--scitt-keys` and read `trust.limitations`").is_empty());
 }
 
 /// The walker must actually reach files. If it silently visited nothing, the
@@ -126,6 +134,66 @@ fn the_source_walk_reaches_every_crate() {
         );
         assert!(seen > 0, "walked no .rs files in {crate_dir}");
     }
+}
+
+/// Stable codes that `docs/limitations.md` promises the tool reports, written
+/// there as ``code `Xxx` ``.
+fn codes_named_in(doc: &str) -> Vec<String> {
+    const MARKER: &str = "code `";
+    let mut found = Vec::new();
+    let mut rest = doc;
+    while let Some(start) = rest.find(MARKER) {
+        rest = &rest[start + MARKER.len()..];
+        match rest.find('`') {
+            Some(end) => {
+                found.push(rest[..end].to_string());
+                rest = &rest[end + 1..];
+            }
+            None => break,
+        }
+    }
+    found
+}
+
+/// `limitations.md` opens by promising that every limitation it lists is also
+/// reported at runtime. That promise is only worth making if renaming or
+/// deleting a code breaks something, so this pins the codes the document names
+/// against the source that has to emit them.
+///
+/// It deliberately checks one direction. A code in the source that the document
+/// does not mention is not necessarily an omission — several describe how the
+/// run was invoked rather than what this build cannot do — whereas a code the
+/// document promises and the source no longer emits is always a false claim.
+#[test]
+fn docs_report_what_they_claim() {
+    let doc = std::fs::read_to_string(repo_root().join("docs").join("limitations.md"))
+        .expect("read docs/limitations.md");
+
+    let named = codes_named_in(&doc);
+    assert!(
+        !named.is_empty(),
+        "found no codes in docs/limitations.md; either the document stopped naming them or the \
+         `code `<name>`` convention changed, and this test is no longer checking anything"
+    );
+
+    let mut sources = String::new();
+    for crate_dir in ["scitt-verifier", "scitt-receipt", "scitt-policy"] {
+        visit(
+            &repo_root().join("crates").join(crate_dir).join("src"),
+            &mut |_, body| sources.push_str(body),
+        );
+    }
+
+    let missing: Vec<&String> = named
+        .iter()
+        .filter(|code| !sources.contains(&format!("\"{code}\"")))
+        .collect();
+
+    assert!(
+        missing.is_empty(),
+        "docs/limitations.md promises these codes are reported at runtime, but no source file \
+         emits them: {missing:?}"
+    );
 }
 
 fn visit(dir: &Path, f: &mut impl FnMut(&Path, &str)) {

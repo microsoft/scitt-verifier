@@ -36,7 +36,6 @@ steps:
         --binding-mode payload-bytes \
         --scitt-keys .well-known/scitt-keys.cbor \
         --policy .pipelines/policies/release-gate.json \
-        --issuer your-ledger.confidential-ledger.azure.com \
         --result "$(Build.ArtifactStagingDirectory)/scitt-result.json"
       code=$?
 

@@ -15,6 +15,9 @@ implementing SCITT receipt verification independently.
 | `bad-artifact.bin` | A different artifact, for the negative binding case |
 | `musa-mst-july-scitt-keys.cbor` | The transparency service's signing keys, as a COSE_KeySet |
 | `stale-scitt-keys.cbor` | A key set from before a rotation — parses fine, contains the wrong kid |
+| `cbor-header.cose` | A component manifest registered on a second service, carrying a detached supplier signature under a **CBOR-valued text label**, `external-signature`. ES256, a two-certificate chain, one CCF receipt |
+| `musa-mst-aug-scitt-keys.cbor` | The second service's keys, for `cbor-header.cose` and `nested-sign1.cose` |
+| `nested-sign1.cose` | The same claim in COSE's own shape: a tag-18 COSE_Sign1 with a **detached payload** under the text label `external-statement`. RS256 supplier signature, ES256 envelope, one CCF receipt |
 
 `payload-tampered.cose` is the most instructive of these. Its receipt is
 genuine, its inclusion proof is valid, and its root signature verifies. It is
@@ -45,6 +48,44 @@ one"), while `tampered-statement.cose`, whose only receipt fails, is
 Issuer signed, and what is missing is proof of registration. An unproven claim
 is not a disproven one.
 
+`cbor-header.cose` covers the case where a header's value is not a scalar. COSE
+permits any CBOR under any label, and RFC 9052 makes text labels private use, so
+a supplier may put an arbitrary structure in a protected header — here a
+detached signature over the same manifest the payload carries, alongside the
+algorithm, key id, thumbprint and certificate that describe it. It is the wire
+shape CoseSignTool's `--cbph` produces. Two things make it worth committing:
+`inspect` has to stay legible when it meets a structure it has no opinion about,
+and a `protectedHeaders` path has to reach into one. No other fixture exercises
+either, because every container-valued header they carry (`x5t`, `x5chain`) has
+a renderer of its own.
+
+Its limits are equally the point. The detached signature is real — RS256 over
+the same bytes the payload carries — and `externalSignatures` computes it. What
+the fixture cannot establish is *whose* signature it is: the supplier
+certificate is self-signed, so subject and issuer name the same throwaway
+identity, and pinning either proves only that whoever assembled the fixture
+chose that string. That makes it the honest demonstration of the assertion's
+ceiling. The two identities are also deliberately unrelated: the envelope is
+signed by a load-test identity, while the header's `x5chain` carries a separate,
+throwaway supplier certificate generated for this fixture alone. Nothing in this
+file corresponds to a real product, part, or signer.
+
+`nested-sign1.cose` carries the same claim in the shape COSE already defines: a
+tag-18 COSE_Sign1 under the text label `external-statement`, with its payload
+**detached** (`nil`) so the outer statement's bytes are not duplicated. At the
+size of a certificate chain the wrapper costs five bytes over the hand-rolled
+descriptor — 1,522 against 1,517 — while removing the question the descriptor
+cannot answer, since `Sig_structure` names exactly which bytes are covered
+instead of leaving it to convention.
+
+It exists because the two shapes are read by different code paths and must not
+silently read each other. It also guards a specific defect: the upstream COSE
+helper this crate uses for the envelope has no RSA PKCS#1 entry and returns the
+same error for "cannot map this algorithm" as for "this signature is wrong", so
+routing the nested case through it reported every real RS256 supplier signature
+as a forgery. The nested path builds its own `Sig_structure` for that reason,
+and this fixture is what proves it.
+
 ## Pinned values
 
 Independently confirmed against the .NET prototype and `pyscitt`:
@@ -55,7 +96,7 @@ Independently confirmed against the .NET prototype and `pyscitt`:
 | Claim digest (SHA-256) | `5207494c12c986e33324c602e535717f67f0a6b56235f413e4a07d4d66d59565` |
 | Merkle root | `f369f5f4ce1e2bf6aa120e7f86e907130ede4ed75944e663d4c7b0a14da35993` |
 | Statement algorithm | PS256 (COSE −37) |
-| Receipt algorithm | ES256 (COSE −7) |
+| Receipt algorithm | ES384 (COSE −35) |
 
 These are asserted in `crates/scitt-receipt/tests/conformance.rs`. **A failure
 there is not a test to update.** If the claim digest changes, the definition of
@@ -68,8 +109,14 @@ definition is affected.
 |---|---|
 | `minimal.json` | The smallest policy that is not empty. Too weak for production — it accepts any transparency service |
 | `fixture-mst.json` | Matches the committed fixture. Used by the conformance suite |
+| `fixture-mst-unpinned-count.json` | `fixture-mst.json` without `receiptCount`, so the suite can prove the verdict disregards an appended receipt separately from an operator opting in to a count |
 | `wrong-issuer.json` | Scoped to a service the fixture was not registered with. Must fail with exit 2 |
 | `example-release-gate.json` | A starting point for a real deployment gate |
+| `example-dr-pair.json` | A gate for a service running under a primary and a disaster recovery hostname, since `issuer` matching is exact |
+
+The `example-` policies name invented hosts. They are templates to edit, not
+policies to run: the two `fixture-` entries and `wrong-issuer.json` are the only
+ones that describe the committed fixtures.
 
 ## Reusing this corpus
 

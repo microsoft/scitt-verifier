@@ -111,9 +111,104 @@ impl Sign1 {
             sub: cbor::opt_int_key(claims, labels::CWT_SUB)
                 .and_then(|v| cbor::as_text(v).ok())
                 .map(str::to_owned),
-            iat: cbor::opt_int_key(claims, labels::CWT_IAT).and_then(|v| cbor::as_int(v).ok()),
+            iat: cbor::opt_int_key(claims, labels::CWT_IAT)
+                .and_then(|v| cbor::as_numeric_date(v).ok()),
+            nbf: cbor::opt_int_key(claims, labels::CWT_NBF)
+                .and_then(|v| cbor::as_numeric_date(v).ok()),
+            exp: cbor::opt_int_key(claims, labels::CWT_EXP)
+                .and_then(|v| cbor::as_numeric_date(v).ok()),
             svn: cbor::opt_text_key(claims, labels::CWT_SVN).and_then(|v| cbor::as_int(v).ok()),
+            other: other_cwt_claims(claims),
         })
+    }
+
+    /// The declared media type of the payload, from the protected `cty` header.
+    ///
+    /// May be a string (`application/json`) or an integer from the CoAP
+    /// Content-Format registry, which is why this returns text either way.
+    pub fn content_type(&self) -> Option<String> {
+        match cbor::opt_int_key(&self.protected, labels::CONTENT_TYPE)? {
+            CborValue::TextString(s) => Some(s.clone()),
+            CborValue::Int(i) => Some(format!("coap-content-format({i})")),
+            _ => None,
+        }
+    }
+
+    /// The COSE Hash Envelope payload hash algorithm (RFC 9995 label 258), if
+    /// this statement is a hash envelope.
+    ///
+    /// Read from the **protected** bucket only. RFC 9995 §4 requires label 258
+    /// there and forbids it in the unprotected bucket, and the reason is not
+    /// pedantry: an attacker who could add an unprotected 258 would be choosing
+    /// the hash function used to check the artifact.
+    pub fn payload_hash_alg(&self) -> Option<i64> {
+        cbor::opt_int_key(&self.protected, labels::PAYLOAD_HASH_ALG)
+            .and_then(|v| cbor::as_int(v).ok())
+    }
+
+    /// Whether this statement is a COSE Hash Envelope — that is, whether its
+    /// payload is a digest of some other resource rather than the resource.
+    ///
+    /// Label 258's presence is the discriminator, so a caller never has to be
+    /// told which shape it is holding.
+    pub fn is_hash_envelope(&self) -> bool {
+        self.payload_hash_alg().is_some()
+    }
+
+    /// The content type of the bytes that were hashed (RFC 9995 label 259).
+    ///
+    /// This is *not* [`Self::content_type`]. Label 3 describes the payload,
+    /// which in a hash envelope is a digest; label 259 describes the preimage.
+    pub fn payload_preimage_content_type(&self) -> Option<String> {
+        match cbor::opt_int_key(&self.protected, labels::PAYLOAD_PREIMAGE_CONTENT_TYPE)? {
+            CborValue::TextString(s) => Some(s.clone()),
+            CborValue::Int(i) => Some(format!("coap-content-format({i})")),
+            _ => None,
+        }
+    }
+
+    /// Where the preimage can be retrieved from (RFC 9995 label 260).
+    ///
+    /// A hint for a human. This tool is offline and will never fetch it.
+    pub fn payload_location(&self) -> Option<String> {
+        match cbor::opt_int_key(&self.protected, labels::PAYLOAD_LOCATION)? {
+            CborValue::TextString(s) => Some(s.clone()),
+            _ => None,
+        }
+    }
+
+    /// The `x5t` certificate thumbprint: the COSE hash algorithm and the digest.
+    pub fn x5t(&self) -> Option<(i64, String)> {
+        let value = cbor::opt_int_key(&self.protected, labels::X5T)?;
+        let items = cbor::as_array(value).ok()?;
+        if items.len() != 2 {
+            return None;
+        }
+        let alg = cbor::as_int(&items[0]).ok()?;
+        let digest = cbor::as_bytes(&items[1]).ok()?;
+        Some((alg, hex(digest)))
+    }
+
+    /// Every label present in a header bucket, in wire order.
+    ///
+    /// Reported so that a reader can see headers this build does not interpret.
+    /// A field nobody parses is exactly the field an attacker hopes nobody
+    /// looks at.
+    pub fn header_labels(bucket: &CborValue) -> Vec<String> {
+        match bucket {
+            CborValue::Map(entries) => entries
+                .iter()
+                .map(|(k, _)| match k {
+                    CborValue::Int(i) => match labels::header_name(*i) {
+                        Some(name) => format!("{i} ({name})"),
+                        None => format!("{i} (not interpreted)"),
+                    },
+                    CborValue::TextString(s) => s.clone(),
+                    other => cbor::type_name(other).to_string(),
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
     }
 
     /// The DER certificate chain from the protected `x5chain` header, leaf first.
@@ -244,6 +339,112 @@ impl Sign1 {
             <tav_crypto::Crypto as CertificateBackend>::issuer_name(&leaf),
         )))
     }
+
+    /// Describe every certificate in `x5chain`, leaf first.
+    ///
+    /// Reporting only. Nothing here is a trust decision: a chain can be fully
+    /// described and still end in a root nobody should accept.
+    pub fn describe_chain(&self) -> Vec<CertificateSummary> {
+        self.x5chain()
+            .iter()
+            .enumerate()
+            .map(|(index, der)| describe_certificate(index, der))
+            .collect()
+    }
+}
+
+/// What a certificate says about itself.
+#[derive(Debug, Clone, Default)]
+pub struct CertificateSummary {
+    pub index: usize,
+    pub subject: Option<String>,
+    pub issuer: Option<String>,
+    /// SHA-256 over the DER, the value most tools call a thumbprint.
+    pub sha256: String,
+    /// Zero-based X.509 version: 2 means v3.
+    pub version: Option<u8>,
+    pub extended_key_usage: Vec<String>,
+    /// Whether the EKU extension is marked critical.
+    ///
+    /// Worth surfacing because a *critical* EKU is one of the critical
+    /// extensions this build's chain policy does not handle, and a chain
+    /// carrying one will be rejected at verify time.
+    pub eku_critical: Option<bool>,
+    /// `basicConstraints` as `(critical, ca, path_len_constraint)`.
+    pub basic_constraints: Option<(bool, bool, Option<usize>)>,
+    /// Whether `keyUsage` asserts `keyCertSign`.
+    pub key_cert_sign: Option<bool>,
+    /// Critical extensions the chain policy does not implement.
+    ///
+    /// Non-empty means `verify` will reject this chain, and this is the only
+    /// place a reader can find that out before trying.
+    pub unhandled_critical_extensions: Vec<String>,
+    /// Why this certificate could not be described, if it could not be.
+    pub problem: Option<String>,
+}
+
+/// Critical extensions the chain policy in `tav-crypto` implements.
+///
+/// Mirrors that crate's own list. Kept here so `inspect` can warn about a
+/// chain `verify` will refuse; if the upstream list grows, this one is stale
+/// in the safe direction — it over-reports rather than under-reports.
+const HANDLED_CRITICAL_EXTENSIONS: &[&str] = &[
+    "2.5.29.19", // basicConstraints
+    "2.5.29.15", // keyUsage
+];
+
+pub fn describe_certificate(index: usize, der: &[u8]) -> CertificateSummary {
+    let mut summary = CertificateSummary {
+        index,
+        sha256: hex(&Sha256::digest(der)),
+        ..Default::default()
+    };
+
+    let cert = match <tav_crypto::Crypto as CertificateBackend>::from_der(der) {
+        Ok(c) => c,
+        Err(e) => {
+            summary.problem = Some(format!("not valid DER: {e}"));
+            return summary;
+        }
+    };
+
+    summary.subject = Some(<tav_crypto::Crypto as CertificateBackend>::subject_name(
+        &cert,
+    ));
+    summary.issuer = Some(<tav_crypto::Crypto as CertificateBackend>::issuer_name(
+        &cert,
+    ));
+    summary.version = <tav_crypto::Crypto as CertificateBackend>::version(&cert).ok();
+    summary.basic_constraints =
+        <tav_crypto::Crypto as CertificateBackend>::basic_constraints(&cert)
+            .ok()
+            .flatten()
+            .map(|bc| (bc.critical, bc.ca, bc.path_len_constraint));
+    summary.key_cert_sign = <tav_crypto::Crypto as CertificateBackend>::key_usage(&cert)
+        .ok()
+        .flatten()
+        .map(|ku| ku.key_cert_sign);
+    summary.eku_critical = <tav_crypto::Crypto as CertificateBackend>::extension_criticality(
+        &cert,
+        labels::OID_EXTENDED_KEY_USAGE,
+    )
+    .ok()
+    .flatten();
+
+    summary.unhandled_critical_extensions =
+        <tav_crypto::Crypto as CertificateBackend>::critical_extension_oids(&cert)
+            .into_iter()
+            .filter(|oid| !HANDLED_CRITICAL_EXTENSIONS.contains(&oid.as_str()))
+            .collect();
+
+    if let Ok(Some(raw)) = <tav_crypto::Crypto as CertificateBackend>::get_extension_value_by_oid(
+        &cert,
+        labels::OID_EXTENDED_KEY_USAGE,
+    ) {
+        summary.extended_key_usage = crate::der::parse_eku_oids(&raw);
+    }
+
+    summary
 }
 
 /// Facts asserted by the issuer in the CWT claims header.
@@ -256,10 +457,89 @@ pub struct CwtClaims {
     pub iss: Option<String>,
     pub sub: Option<String>,
     pub iat: Option<i64>,
+    pub nbf: Option<i64>,
+    pub exp: Option<i64>,
     pub svn: Option<i64>,
+    /// Claims this build does not interpret, as `(label, rendered value)`.
+    ///
+    /// Kept rather than dropped. An issuer that puts something load-bearing in
+    /// a private claim is telling a reader something, and a tool that silently
+    /// discards it reports a smaller statement than the one it was given.
+    pub other: Vec<(String, String)>,
+}
+
+/// Claims outside the set this crate names, rendered for display.
+fn other_cwt_claims(claims: &CborValue) -> Vec<(String, String)> {
+    let CborValue::Map(entries) = claims else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter_map(|(k, v)| {
+            let label = match k {
+                CborValue::Int(i) => {
+                    if labels::cwt_claim_name(*i).is_some() {
+                        return None;
+                    }
+                    i.to_string()
+                }
+                CborValue::TextString(s) => {
+                    if s == labels::CWT_SVN {
+                        return None;
+                    }
+                    s.clone()
+                }
+                other => cbor::type_name(other).to_string(),
+            };
+            Some((label, render_scalar(v)))
+        })
+        .collect()
+}
+
+/// A compact, non-recursive rendering of a CBOR value for reporting.
+///
+/// Containers are summarised rather than expanded: this is used for claims
+/// whose meaning is unknown, and printing an unbounded nested structure into a
+/// CI log is how a fifteen-line report becomes a thousand.
+pub fn render_scalar(v: &CborValue) -> String {
+    match v {
+        CborValue::Int(i) => i.to_string(),
+        CborValue::TextString(s) => s.clone(),
+        CborValue::ByteString(b) => format!("{} bytes: {}", b.len(), hex_prefix(b)),
+        CborValue::Simple(20) => "false".into(),
+        CborValue::Simple(21) => "true".into(),
+        CborValue::Simple(22) => "null".into(),
+        CborValue::Simple(n) => format!("simple({n})"),
+        CborValue::Array(a) => format!("array of {}", a.len()),
+        CborValue::Map(m) => format!("map of {}", m.len()),
+        CborValue::Tagged { tag, .. } => format!("tag({tag})"),
+    }
+}
+
+/// Hex of at most the first 16 bytes, so an unknown blob cannot flood a log.
+fn hex_prefix(bytes: &[u8]) -> String {
+    if bytes.len() <= 16 {
+        hex(bytes)
+    } else {
+        format!("{}…", hex(&bytes[..16]))
+    }
 }
 
 /// Digest of an artifact, for binding a statement to the thing it describes.
 pub fn sha256_hex(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
+}
+
+/// Digest `bytes` with a COSE hash algorithm identifier.
+///
+/// Returns `None` for algorithms this build cannot compute, so a caller
+/// reports "not evaluated" rather than silently choosing a different function
+/// than the signer named.
+pub fn digest_with(cose_alg: i64, bytes: &[u8]) -> Option<Vec<u8>> {
+    match cose_alg {
+        labels::alg::SHA256 => Some(Sha256::digest(bytes).to_vec()),
+        labels::alg::SHA384 => Some(sha2::Sha384::digest(bytes).to_vec()),
+        labels::alg::SHA512 => Some(sha2::Sha512::digest(bytes).to_vec()),
+        _ => None,
+    }
 }

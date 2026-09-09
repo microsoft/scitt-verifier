@@ -13,6 +13,13 @@ const EXPECTED_CLAIM_DIGEST: &str =
     "5207494c12c986e33324c602e535717f67f0a6b56235f413e4a07d4d66d59565";
 /// Length of the statement re-encoded with an empty unprotected bucket.
 const EXPECTED_SIGNED_LEN: usize = 8462;
+/// COSE algorithm of the Issuer's signature over the statement: PS256.
+const EXPECTED_STATEMENT_ALG: i64 = -37;
+/// COSE algorithm of the transparency service's signature over the Merkle
+/// root: ES384. Pinned because it selects the curve used to verify the root
+/// signature, so a change here is a change to which key material can satisfy
+/// this receipt — not a cosmetic detail.
+const EXPECTED_RECEIPT_ALG: i64 = -35;
 
 fn fixture(name: &str) -> Vec<u8> {
     let path: PathBuf = [
@@ -29,7 +36,7 @@ fn fixture(name: &str) -> Vec<u8> {
 }
 
 fn key_set() -> LedgerKeySet {
-    LedgerKeySet::from_cose_key_set(&fixture("musa-mst-july-scitt-keys.cbor"), None)
+    LedgerKeySet::from_cose_key_set(&fixture("musa-mst-july-scitt-keys.cbor"))
         .expect("fixture key set must parse")
 }
 
@@ -111,6 +118,14 @@ fn genuine_statement_verifies_end_to_end() {
         receipt.claims_digest.as_deref(),
         Some(EXPECTED_CLAIM_DIGEST)
     );
+
+    // Both algorithms are pinned. They are not decoration: the receipt's `alg`
+    // selects the curve the root signature is verified against, so an
+    // unnoticed change here changes which key material can satisfy this
+    // receipt. `corpus/README.md` documented ES256 for four releases while the
+    // fixture was ES384, because nothing asserted it.
+    assert_eq!(facts.alg, Some(EXPECTED_STATEMENT_ALG));
+    assert_eq!(receipt.algorithm, Some(EXPECTED_RECEIPT_ALG));
 }
 
 #[test]
@@ -138,7 +153,7 @@ fn tampered_statement_is_rejected() {
 fn wrong_key_set_reports_an_unknown_kid_rather_than_a_bad_signature() {
     // Distinguishing these is the difference between "rotate your trust
     // material" and "this artifact was tampered with".
-    let stale = LedgerKeySet::from_cose_key_set(&fixture("stale-scitt-keys.cbor"), None)
+    let stale = LedgerKeySet::from_cose_key_set(&fixture("stale-scitt-keys.cbor"))
         .expect("stale key set must still parse");
     let facts = verify_statement(&fixture("transparent-statement.cose"), &stale).unwrap();
 
@@ -151,20 +166,6 @@ fn wrong_key_set_reports_an_unknown_kid_rather_than_a_bad_signature() {
         "binding does not depend on trust material"
     );
     assert!(!receipt.fully_verified());
-}
-
-#[test]
-fn a_key_set_scoped_to_another_issuer_never_matches() {
-    let scoped = LedgerKeySet {
-        issuer: Some("https://not-the-issuer.example".into()),
-        ..key_set()
-    };
-    let facts = verify_statement(&fixture("transparent-statement.cose"), &scoped).unwrap();
-    assert_eq!(
-        facts.receipts[0].key_lookup,
-        Some(KeyLookup::IssuerMismatch)
-    );
-    assert!(!facts.receipts[0].fully_verified());
 }
 
 #[test]

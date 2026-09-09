@@ -48,15 +48,18 @@ pub enum KeyLookup {
     Found,
     UnknownKid,
     Revoked,
-    IssuerMismatch,
 }
 
-/// A set of signing keys scoped to exactly one transparency service.
+/// A set of transparency service signing keys.
+///
+/// The set is deliberately not scoped to an issuer. A receipt from another
+/// service is signed by that service's key, so it fails signature verification
+/// here; an issuer name checked alongside would add no evidence, and reporting
+/// it as a trust failure would misdescribe a receipt that is merely unwanted.
+/// Requiring a particular issuer is a relying-party rule, so it belongs in the
+/// policy document, where it is versioned and reviewable.
 #[derive(Debug, Clone)]
 pub struct LedgerKeySet {
-    /// The issuer these keys are valid for. `None` means unscoped, which the
-    /// caller must treat as weaker evidence.
-    pub issuer: Option<String>,
     pub keys: Vec<LedgerKey>,
     pub revoked_kids: Vec<String>,
     /// Entries that could not be parsed, kept for reporting.
@@ -69,7 +72,7 @@ pub struct LedgerKeySet {
 
 impl LedgerKeySet {
     /// Parse a COSE_KeySet: a CBOR array of COSE_Key maps.
-    pub fn from_cose_key_set(bytes: &[u8], issuer: Option<String>) -> Result<Self> {
+    pub fn from_cose_key_set(bytes: &[u8]) -> Result<Self> {
         let value = CborValue::from_bytes(bytes)
             .map_err(|e| Error::TrustMaterial(format!("key set is not valid CBOR: {e:?}")))?;
 
@@ -96,27 +99,14 @@ impl LedgerKeySet {
         }
 
         Ok(Self {
-            issuer,
             keys,
             revoked_kids: Vec::new(),
             skipped,
         })
     }
 
-    /// Resolve a kid, scoped to the receipt's issuer.
-    ///
-    /// `receipt_issuer` is checked *before* the kid, so a key that is legitimate
-    /// for a different transparency service can never satisfy this receipt. That
-    /// ordering is the point: filtering after a successful match is a check that
-    /// is easy to accidentally remove.
-    pub fn find(&self, kid: &str, receipt_issuer: Option<&str>) -> (KeyLookup, Option<&LedgerKey>) {
-        if let Some(expected) = &self.issuer {
-            match receipt_issuer {
-                Some(actual) if actual == expected => {}
-                _ => return (KeyLookup::IssuerMismatch, None),
-            }
-        }
-
+    /// Resolve a kid to a signing key.
+    pub fn find(&self, kid: &str) -> (KeyLookup, Option<&LedgerKey>) {
         if self.revoked_kids.iter().any(|r| r == kid) {
             return (KeyLookup::Revoked, None);
         }

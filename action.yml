@@ -29,10 +29,6 @@ inputs:
     description: 'How the statement relates to the artifact: none or payload-bytes.'
     required: false
     default: 'none'
-  issuer:
-    description: 'Scope the key set to a single transparency service. Recommended.'
-    required: false
-    default: ''
   result:
     description: 'Where to write the verification record. Attach it to your release.'
     required: false
@@ -102,7 +98,6 @@ runs:
         POLICY: ${{ inputs.policy }}
         ARTIFACT: ${{ inputs.artifact }}
         BINDING_MODE: ${{ inputs.binding-mode }}
-        ISSUER: ${{ inputs.issuer }}
         RESULT: ${{ inputs.result }}
         ON_UNEVALUABLE: ${{ inputs.on-unevaluable }}
       run: |
@@ -120,7 +115,6 @@ runs:
               --result "${RESULT}"
               --format text)
 
-        [ -n "${ISSUER}" ] && args+=(--issuer "${ISSUER}")
         if [ -n "${ARTIFACT}" ]; then
           args+=(--artifact "${ARTIFACT}" --binding-mode "${BINDING_MODE}")
         fi

@@ -1,5 +1,168 @@
 # Changelog
 
+## Unreleased
+
+### An example policy no longer names a real service
+
+`corpus/policies/esrp-mst-prod.json` is now `corpus/policies/example-dr-pair.json`,
+and the two hostnames it accepts are `contoso-cp` and `contoso-db` rather than
+the production service it was originally written against. If you referenced the
+old path, update it.
+
+The policy was always a template rather than a description of a committed
+fixture, so nothing about the corpus changes — but an example that names a real
+deployment invites someone to copy the hostname along with the shape. The
+fixture policies still name the service the fixtures actually came from, because
+that is provenance and generalising it would make the record false.
+
+### Artifact binding moves into the core, and reaches the browser
+
+Binding answers a different question from verification — not "is this statement
+genuine" but "is it about the file I am holding" — and the two fail
+independently. Until now the comparison lived in the CLI's `main.rs`, which
+meant it was reachable only from a terminal. Any other consumer had to
+reimplement it, and the WASM demo did exactly that, in JavaScript.
+
+That is the arrangement worth avoiding. A browser and a pipeline comparing the
+same two files by different code would eventually disagree about a hash
+envelope or a detached payload, and the disagreement would surface as a release
+that should have been stopped. `scitt_receipt::bind` is now the only
+implementation; the CLI and the new `bindArtifact` WASM export both call it.
+
+```js
+const result = JSON.parse(bindArtifact(statement, artifact, 'payload-bytes', 'app.tar.gz'));
+// { outcome: 'bound' | 'mismatch' | 'cannotCompare', reason, detail, ... }
+```
+
+Two things changed in the move rather than being copied across:
+
+**There is no `None` mode in the core.** "No binding was requested" is the
+absence of a call, not a mode. Modelling it as one invites a caller to ask for a
+comparison and receive a pass for a comparison nobody performed. The CLI still
+accepts `--binding-mode none` and simply does not call.
+
+**Reasons are structured, not prose.** Each outcome carries a
+`BindingReason` with a machine-stable `code`, and the prose is rendered against
+whatever name the caller has for the artifact — a path in a pipeline, an
+uploaded file name in a browser. The core also stops at the finding and offers
+no remedy: `--binding-mode payload-digest` is meaningless advice in a browser,
+so the CLI appends it and the WASM export does not.
+
+`cannotCompare` remains distinct from `mismatch` throughout, on both sides of
+the boundary. A detached payload, a mode that does not fit the statement, or a
+hash this build cannot compute are facts about the comparison. Reporting any of
+them as a mismatch tells an operator to halt a release over a limitation of the
+tool.
+
+One message changed wording. Under `payload-digest`, a detached payload
+previously read "there is no digest to compare the artifact against" and now
+names the mode: "the statement payload is detached, so binding mode
+payload-digest has nothing to compare *artifact* against". The outcome is
+unchanged.
+
+### `externalSignatures`: verify a detached signature carried in a header
+
+Some producers put a *second party's* signature inside the statement's protected
+header — a component supplier signing a manifest that a build service later
+registers. Until now a policy could only describe such a header: assert that it
+declares RS256, that its certificate names the expected supplier. None of that
+is evidence. Every byte read was chosen by whoever assembled the statement, so a
+descriptor containing 512 random bytes matched exactly as well as a real one.
+
+The new assertion computes the signature:
+
+```json
+"externalSignatures": [
+  {
+    "path": ["external-signature", 0],
+    "signedOver": "payload",
+    "signerSubjectContains": "Example Component Supplier"
+  }
+]
+```
+
+`path` addresses the descriptor map; the verifier reads algorithm (`1`),
+certificate (`33`) and signature (`-1`) from inside it. ES256/384/512,
+PS256/384/512 and RS256/384/512 are supported — RS256 in particular, since it is
+the algorithm on essentially every detached supplier signature and the upstream
+COSE mapping omits it.
+
+`signedOver` is required and has no default. A detached signature carries no
+record of what it signed, so a verifier that guessed would report a forgery
+whenever it guessed wrong — the worst error a gate can make, because it teaches
+operators to disregard the result. Two conventions are supported:
+
+* `"payload"` — a hand-rolled descriptor map, whose signature covers the payload
+  bytes directly.
+* `"coseSign1"` — a nested COSE_Sign1, whose `Sig_structure` binds the protected
+  header and the payload together.
+
+Anything else is refused at parse time with exit 4. Naming the *wrong*
+convention for the value present gives `cannotEvaluate`, never `fail`.
+
+**Prefer `coseSign1` if you control the producer.** With the nested payload
+detached (`nil`) it costs five bytes more than the descriptor — 1,522 against
+1,517, since the certificate chain dominates both — and in exchange the question
+`signedOver` exists to answer stops being a convention: the encoding says which
+bytes are covered, and any COSE library can check it. An *embedded* nested
+payload that differs from the statement's now **fails**: two disagreeing copies
+inside one signed statement would let a producer have a supplier endorse one
+thing while registering another, with both signatures verifying.
+
+**What a pass does not mean.** The external certificate chain is not validated
+to a trusted root, so a signer who mints their own certificate passes. A run
+that uses this assertion now declares that under **Not checked** as
+`ExternalSignerChainNotValidated`. `signerSubjectContains` and
+`signerIssuerContains` narrow the result to a named certificate, which catches
+mistakes rather than forgery.
+
+What it does establish is that a private key was used over these exact payload
+bytes, and — because the descriptor is in the protected bucket — that the
+registering party committed to it on the record at a time the receipt fixes.
+Moving a genuine supplier signature onto a different statement fails.
+
+An absent descriptor is `cannotEvaluate`, never `fail`. A pipeline has to be
+able to tell "this supplier did not sign" from "this supplier's signature is
+fake".
+
+The nested path builds its own `Sig_structure` rather than calling the upstream
+helper the envelope check uses. That helper returns one error for two different
+questions — "this signature is wrong" and "I cannot map this algorithm" — so
+routing RS256 through it reported every real supplier signature as a forgery.
+Both fixtures are registered on a real ledger:
+`corpus/fixtures/cbor-header.cose` and `corpus/fixtures/nested-sign1.cose`.
+
+### `alg`: match a COSE algorithm by name
+
+`protectedHeaders` entries take a third matcher beside `text` and `int`:
+
+```json
+{ "path": [1],                          "alg": { "oneOf": ["ES256", "ES384"] } }
+{ "path": ["external-signature", 0, 1], "alg": { "equals": "RS256" } }
+```
+
+It accepts exactly what `int` accepts. What changes is the cost of a mistake.
+COSE algorithm identifiers are adjacent negative integers — `-35`, `-36`, `-37`
+are ES384, ES512, PS256 — so a mistyped digit yields a *different, valid* policy
+that passes for the rest of its life, invisibly, and a reviewer cannot spot it
+without a registry. A mistyped name resolves to nothing and is refused at parse
+time with exit 4, before any signature is checked.
+
+Reports name both sides, so a refusal needs no lookup:
+
+```text
+[FAIL] protectedHeaders — [1]: ES512 (-36) does not match: it must be ES384
+```
+
+Names are matched exactly; `es256` is refused rather than repaired. There is no
+`min`/`max`, since these are registry codes rather than a scale. Use `int` for
+an algorithm this build has no name for.
+
+`int` continues to work at every path, so existing policies are unaffected.
+Because policies are parsed with `deny_unknown_fields`, a policy using `alg`
+is rejected by 0.2.0 and earlier — intended, and the reason it is called out
+here.
+
 ## 0.2.0
 
 Breaking changes to the output contract. All of them landed together and before

@@ -49,14 +49,50 @@ jobs:
       - name: Reject I/O, clocks, and policy coupling in the core
         run: |
           set -euo pipefail
+
+          core=crates/scitt-receipt/src
+          io_pattern='std::fs|File::open|read_to_string'
+
+          # `if grep` cannot tell "found nothing" from "looked at nothing": both
+          # exit non-zero, and being inside an `if` condition exempts them from
+          # `set -e`. Rename or move the crate and every check below reports
+          # clean forever — in the one job whose entire purpose is to notice.
+          # So establish there is something to scan before trusting silence.
+          test -d "$core" || {
+            echo "::error::$core does not exist; these checks would pass without scanning anything"
+            exit 1
+          }
+          scanned=$(find "$core" -name '*.rs' -type f | wc -l)
+          test "$scanned" -gt 0 || {
+            echo "::error::no .rs files under $core; these checks would pass without scanning anything"
+            exit 1
+          }
+          echo "scanning $scanned .rs file(s) under $core"
+
+          # And that the detector fires at all, mirroring
+          # `the_detectors_actually_detect` in design_commitments.rs: a check
+          # that cannot fail proves nothing.
+          probe=$(mktemp -d)
+          printf 'let f = std::fs::read("x");\n' > "$probe/probe.rs"
+          grep -rq --include='*.rs' -E "$io_pattern" "$probe" || {
+            echo "::error::the detector did not fire on known-bad input; these checks prove nothing"
+            exit 1
+          }
+          rm -rf "$probe"
+
           violations=0
           check() {
-            if grep -rn --include='*.rs' -E "$1" crates/scitt-receipt/src; then
-              echo "::error::$2"
-              violations=1
-            fi
+            local out status
+            # grep: 0 found, 1 clean, 2+ broken. Only 1 is good news, and
+            # collapsing 2 into it is how a broken check looks like a passing one.
+            out=$(grep -rn --include='*.rs' -E "$1" "$core") && status=0 || status=$?
+            case $status in
+              0) printf '%s\n' "$out"; echo "::error::$2"; violations=1 ;;
+              1) ;;
+              *) echo "::error::grep exited $status while checking: $2"; violations=1 ;;
+            esac
           }
-          check 'std::fs|File::open|read_to_string' \
+          check "$io_pattern" \
                 'scitt-receipt must not perform file I/O; callers supply bytes.'
           # \b matters: an unanchored 'chrono' matches tav_cose::synchronous.
           check 'SystemTime|Instant::now|\bchrono\b' \
@@ -72,7 +108,14 @@ jobs:
       - name: Reject dependency drift in the core manifest
         run: |
           set -euo pipefail
-          if grep -qE '^(scitt-policy|scitt-verifier)' crates/scitt-receipt/Cargo.toml; then
+          manifest=crates/scitt-receipt/Cargo.toml
+          # Same trap as above: a grep that cannot open its target is not a
+          # grep that found nothing.
+          test -f "$manifest" || {
+            echo "::error::$manifest does not exist; this check would pass without reading anything"
+            exit 1
+          }
+          if grep -qE '^(scitt-policy|scitt-verifier)' "$manifest"; then
             echo "::error::scitt-receipt must not depend on scitt-policy or scitt-verifier."
             exit 1
           fi
@@ -100,6 +143,60 @@ jobs:
             exit 1
           fi
 
+  wasm:
+    name: WASM boundary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Pinned rather than floating: wasm-pack chooses the wasm-bindgen and
+      # wasm-opt it runs, so an unpinned version can change the emitted bundle
+      # without a single line of this repository changing.
+      - name: Install wasm-pack
+        run: |
+          set -euo pipefail
+          version=v0.13.1
+          dir="wasm-pack-${version}-x86_64-unknown-linux-musl"
+          curl -sSfL "https://github.com/rustwasm/wasm-pack/releases/download/${version}/${dir}.tar.gz" \
+            | tar -xz -C /tmp
+          sudo install "/tmp/${dir}/wasm-pack" /usr/local/bin/wasm-pack
+          wasm-pack --version
+
+      - name: Build the browser bundle
+        working-directory: crates/scitt-wasm
+        run: wasm-pack build --target nodejs --out-dir pkg-node --release
+
+      # `cargo test` cannot see this. The pinned digests in the harness only
+      # come out right if the Rust side, the wasm-bindgen shim, and the JSON
+      # mapping all agree — and that agreement is what a browser consumer
+      # actually depends on. A UI reading these field names is why it matters
+      # that they cannot change silently.
+      - name: Cross-implementation conformance through the JS boundary
+        working-directory: crates/scitt-wasm
+        run: node tests/corpus.node.mjs
+
+      # Same reasoning as the binary budget, with a shorter fuse: this is
+      # downloaded by a browser. The ceiling is loose on purpose — it is there
+      # to catch accidentally linking something enormous, not to argue about
+      # kilobytes.
+      - name: Enforce the bundle size budget
+        run: |
+          set -euo pipefail
+          budget=$((1024 * 1024))
+          actual=$(stat -c%s crates/scitt-wasm/pkg-node/scitt_wasm_bg.wasm)
+          printf 'scitt_wasm_bg.wasm: %s bytes (budget %s)\n' "$actual" "$budget"
+          if [ "$actual" -gt "$budget" ]; then
+            echo "::error::wasm bundle exceeded the size budget"
+            exit 1
+          fi
+
   action:
     name: Action smoke test
     runs-on: ubuntu-latest
@@ -114,14 +211,28 @@ jobs:
       - run: cargo build --release
       - name: Verify the corpus fixture through the CLI contract
         run: |
-          set -uo pipefail
+          # `-e` is explicit rather than inherited: GitHub's default shell is
+          # `bash -e {0}`, so the assertions below already gate the step, but
+          # relying on that makes correctness a property of the runner instead
+          # of the script. The other jobs in this file set it explicitly too.
+          # Under `-e` the verify call is itself the exit-code assertion, so the
+          # `test $? -eq 0` line that used to follow it could only ever see 0.
+          set -euo pipefail
           ./target/release/scitt-verifier verify \
             --statement corpus/fixtures/transparent-statement.cose \
             --scitt-keys corpus/fixtures/musa-mst-july-scitt-keys.cbor \
             --policy corpus/policies/fixture-mst.json \
             --result /tmp/result.json \
             --format text
-          test $? -eq 0
+          jq -e '.appraisal.verdict == "statement-transparent"' /tmp/result.json
+          jq -e '.appraisal.notChecked | length > 0' /tmp/result.json
+          jq -e '.signedStatement.provenance.coveredBy == "statement-signer"' /tmp/result.json
+          ./target/release/scitt-verifier verify \
+            --statement corpus/fixtures/transparent-statement.cose \
+            --scitt-keys corpus/fixtures/musa-mst-july-scitt-keys.cbor \
+            --policy corpus/policies/fixture-mst.json \
+            --result /tmp/result.json \
+            --format text
           jq -e '.appraisal.verdict == "statement-transparent"' /tmp/result.json
           jq -e '.appraisal.notChecked | length > 0' /tmp/result.json
           jq -e '.signedStatement.provenance.coveredBy == "statement-signer"' /tmp/result.json

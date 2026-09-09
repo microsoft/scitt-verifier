@@ -274,23 +274,18 @@ impl Gap {
 #[derive(Debug, Clone)]
 pub struct Trust {
     pub mode: &'static str,
-    pub issuer_scope: Option<String>,
     pub limitations: Vec<&'static str>,
 }
 
 impl Trust {
-    pub fn unsigned_key_set(issuer_scope: Option<String>) -> Self {
-        let mut limitations = vec![
+    pub fn unsigned_key_set() -> Self {
+        let limitations = vec![
             "the key set carries no publisher signature",
             "no revocation status is available offline",
             "no anti-rollback protection: an older key set will verify happily",
         ];
-        if issuer_scope.is_none() {
-            limitations.push("the key set is not scoped to an issuer (--issuer)");
-        }
         Self {
             mode: "unsigned-scitt-keys",
-            issuer_scope,
             limitations,
         }
     }
@@ -436,7 +431,7 @@ mod tests {
     fn an_incomplete_assessment_claims_nothing() {
         let a = Assessment::incomplete(
             Verdict::CannotEvaluate,
-            Trust::unsigned_key_set(None),
+            Trust::unsigned_key_set(),
             Diagnostic::error("X", Category::Trust, "m", "a"),
             vec![Gap::new(
                 "PolicyNotEvaluated",
@@ -452,13 +447,6 @@ mod tests {
         // A run that stopped early has more gaps than one that finished, so
         // an empty `notChecked` here would be a lie of omission.
         assert!(!a.not_checked.is_empty());
-    }
-
-    #[test]
-    fn an_unscoped_key_set_names_that_as_a_limitation() {
-        let scoped = Trust::unsigned_key_set(Some("x".into()));
-        let open = Trust::unsigned_key_set(None);
-        assert!(open.limitations.len() > scoped.limitations.len());
     }
 
     #[test]

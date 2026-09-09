@@ -124,8 +124,21 @@ Step 4's final comparison is the one that is easy to omit and fatal to omit.
 
 A statement may carry more than one receipt, registered with more than one
 transparency service. All of them are evaluated. Reading only the first would
-let a single weak service satisfy a policy that deliberately asked for two, and
-would do so silently.
+let a single weak service satisfy a policy that deliberately asked for a
+specific issuer, and would do so silently.
+
+The verdict never treats an extra receipt as fatal: transparency is a positive
+proof, and RFC 9943 §7.1 lets a Relying Party verify one acceptable receipt and
+disregard the rest. Were it otherwise, anyone who handled the file could append
+a blob to the unprotected header bucket and veto a gate on an artifact that is
+fine.
+
+That leaves a gap only the operator can close, because only they know what shape
+to expect. The `receiptCount` policy assertion counts receipts *present* rather
+than receipts that verified, so it sees an insertion the verdict deliberately
+ignores. It fails as a policy decision, which is the honest category: the file
+was handled after the service returned it, while the artifact is still exactly
+what its Issuer signed.
 
 Where a single receipt carries multiple inclusion proofs, only the first is
 evaluated and the evidence says so.

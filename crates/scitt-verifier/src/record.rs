@@ -177,7 +177,6 @@ fn inputs_json(args: &VerifyArgs) -> Value {
         "scittKeys": args.scitt_keys.display().to_string(),
         "policy": args.policy.display().to_string(),
         "artifact": args.artifact.as_ref().map(|p| p.display().to_string()),
-        "issuerScope": args.issuer,
     })
 }
 
@@ -189,7 +188,6 @@ fn inputs_json(args: &VerifyArgs) -> Value {
 fn trust_json(t: &Trust) -> Value {
     json!({
         "mode": t.mode,
-        "issuerScope": t.issuer_scope,
         "limitations": t.limitations,
     })
 }
@@ -301,6 +299,7 @@ fn binding_json(args: &VerifyArgs, assessment: &Assessment) -> Value {
     let mode = match args.binding_mode {
         BindingMode::None => "none",
         BindingMode::PayloadBytes => "payload-bytes",
+        BindingMode::PayloadDigest => "payload-digest",
     };
 
     // Derived from the outcome, not from whether `--artifact` was passed.
@@ -406,7 +405,6 @@ fn key_lookup_name(lookup: &KeyLookup) -> &'static str {
         KeyLookup::Found => "found",
         KeyLookup::UnknownKid => "unknownKid",
         KeyLookup::Revoked => "revoked",
-        KeyLookup::IssuerMismatch => "issuerMismatch",
     }
 }
 
@@ -422,7 +420,6 @@ mod tests {
             statement: PathBuf::from("s.cose"),
             scitt_keys: PathBuf::from("k.cbor"),
             policy: PathBuf::from("p.json"),
-            issuer: None,
             artifact: None,
             binding_mode: BindingMode::None,
             format: Format::Text,
@@ -435,7 +432,7 @@ mod tests {
     fn incomplete() -> Assessment {
         Assessment::incomplete(
             Verdict::CannotEvaluate,
-            Trust::unsigned_key_set(None),
+            Trust::unsigned_key_set(),
             Diagnostic::error("ReceiptKeyUnknown", Category::Trust, "m", "a"),
             vec![Gap::new(
                 "RevocationNotChecked",

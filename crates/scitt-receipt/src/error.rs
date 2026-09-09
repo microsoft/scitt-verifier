@@ -22,11 +22,6 @@ pub enum Error {
     TrustMaterial(String),
     /// The requested key is not in the key set.
     UnknownKid(String),
-    /// Key set is scoped to one issuer and the receipt came from another.
-    IssuerMismatch {
-        expected: String,
-        actual: Option<String>,
-    },
     /// A cryptographic operation failed to run (not: returned invalid).
     Crypto(String),
 }
@@ -48,11 +43,6 @@ impl fmt::Display for Error {
             Self::UnknownKid(k) => write!(
                 f,
                 "no key with kid '{k}' in the key set; transparency services rotate signing keys"
-            ),
-            Self::IssuerMismatch { expected, actual } => write!(
-                f,
-                "key set is scoped to '{expected}' but the receipt issuer is '{}'",
-                actual.as_deref().unwrap_or("(none)")
             ),
             Self::Crypto(m) => write!(f, "cryptographic operation failed: {m}"),
         }

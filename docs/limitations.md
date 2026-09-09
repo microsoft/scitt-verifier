@@ -1,16 +1,55 @@
 # Limitations
 
-Every limitation here is also reported at runtime, in the `appraisal.notChecked` array of
-the verification record, as a structured entry with a stable `code`, a `category`,
-and an `impact`. Nothing in this list requires reading the documentation to
-discover.
+Nothing in this list requires reading the documentation to discover: every
+limitation below is also reported at runtime. They do not all surface on the
+same channel, and the difference is the point.
+
+* **`appraisal.notChecked`** — a check this run did not perform, as a structured
+  entry with a stable `code`, a `category`, and an `impact`. Reported
+  unconditionally, including on success.
+* **`trust.limitations`** — what the trust material itself cannot establish,
+  regardless of how the run went.
+* **`receipts.entries[].problems`** — something about a specific receipt that
+  stopped a check from running or made it fail.
+* **Refusal** — an input this build declines to interpret at all, reported as a
+  diagnostic with exit 3. A refusal is not a silent gap; it ends the run.
+
+Each section below names its channel, and its stable code where it has one.
+Those codes are pinned by `docs_report_what_they_claim` in
+`crates/scitt-verifier/tests/design_commitments.rs`, so a code named here that
+no longer exists in the source fails the build.
 
 That is deliberate. A verification tool that overstates its coverage is worse
 than no tool, because it converts an open question into false confidence.
 
+## Supported, with limits
+
+### COSE Hash Envelope binding (`payload-digest`)
+
+When a statement is produced by indirect signing (RFC 9995), the payload **is
+already a digest** of the artifact rather than the artifact itself, and
+protected header 258 names the hash algorithm used. `--binding-mode
+payload-digest` hashes your artifact with that algorithm and compares.
+
+*What is not automatic:* you must name the mode. The tool will not pick between
+`payload-bytes` and `payload-digest` for you, because the two answer different
+questions and silently switching would let a mode that was never checked look
+like one that passed. Naming the wrong mode is reported as *cannot compare*
+(exit 3), never as a mismatch — a mode error is not evidence about your artifact.
+
+*What is never fetched:* header 260 (`payload_location`) is displayed by
+`inspect` and otherwise ignored. This tool is offline; retrieving the preimage
+from a URL the statement itself chose would not establish anything anyway.
+
+Hash algorithms: SHA-256, SHA-384, and SHA-512. Any other value in header 258
+is reported as *cannot compare*, never approximated with a different hash.
+
 ## Not implemented in this release
 
 ### Certificate chain validation to a trusted root
+
+*Reported at runtime:* `appraisal.notChecked` code `CertificateChainNotValidated`,
+or code `NoCertificateChain` when the statement carries no chain at all.
 
 The statement signature is verified against the public key in the leaf
 certificate embedded in the statement itself. That proves the statement is
@@ -26,8 +65,7 @@ claim.
 *What actually protects you today:* registration. An attacker who self-signs
 still has to get that statement admitted to a transparency service whose keys
 are in your `--scitt-keys` file, and the receipt is what this tool verifies
-cryptographically. Pair it with `--issuer` so that a receipt from some *other*
-service in your key set cannot stand in.
+cryptographically.
 
 *What does not:* `signerSubjectContains` and `signerIssuerContains` substring-match
 the leaf certificate embedded in the statement — the same certificate an attacker
@@ -40,24 +78,18 @@ substitute for chain validation.
 *Planned:* `--trusted-roots`, using the chain validation already available in
 the underlying crypto crate.
 
-### COSE Hash Envelope binding (`payload-digest`)
-
-When a statement is produced by indirect signing, the payload **is already a
-digest** of the artifact rather than the artifact itself. Comparing it to the
-artifact's bytes will always report a mismatch — and it is exactly the mode an
-SBOM signed with `CoseSignTool indirect-sign` uses.
-
-Passing `--binding-mode payload-digest` is refused with exit 4 rather than
-approximated. A binding that appears to have been checked but was not is the
-failure this whole tool exists to prevent.
-
 ### Certificate revocation
+
+*Reported at runtime:* `appraisal.notChecked` code `RevocationNotChecked`.
 
 Not checked. Revocation checking requires network access, and this tool is
 offline by design. There is no plan to change that; a gate that stops working
 when OCSP is unreachable is not a gate anyone keeps enabled.
 
 ### Verifiable data structures other than `CCF_LEDGER_SHA256`
+
+*Reported at runtime:* refusal, exit 3. This one is not in `notChecked`,
+because the run does not reach a verdict to caveat.
 
 Any other value in header 395 is refused (exit 3), never interpreted as a
 format we do understand.
@@ -69,6 +101,10 @@ supporting it is a second verifier, not a parameter. Until then, receipts from
 Sigstore-style logs cannot be verified here.
 
 ### Signed trust material
+
+*Reported at runtime:* `trust.limitations`, which names the missing publisher
+signature, the absent revocation status, and the lack of anti-rollback
+protection.
 
 `--scitt-keys` takes a raw COSE_KeySet. There is no cryptographic binding
 between that file and the transparency service it claims to represent — its
@@ -87,9 +123,11 @@ set can edit the sidecar. The verifier cannot re-check any of it offline.
 it is a reviewed pull request with an audit trail, rather than a file that
 appears on a build agent.
 
-Always pass `--issuer` as well. Without it, a receipt from a *different*
-transparency service that happens to use a kid present in your key set will not
-be rejected on issuer grounds.
+To require a particular transparency service, use the `issuer` assertion in your
+policy document. That is a relying-party rule, so it belongs in the artifact you
+version and review rather than in a command line, where dropping it leaves no
+trace. A receipt from a different service is signed by that service's key and so
+fails receipt verification here regardless.
 
 ## Deliberate non-goals
 
@@ -109,8 +147,8 @@ scope.
 
 ## Known rough edges
 
-* Only the first inclusion proof in a receipt is evaluated. The verification record
-  says so when there is more than one.
+* Only the first inclusion proof in a receipt is evaluated.
+  `receipts.entries[].problems` says so when there is more than one.
 * `iat` is read from the receipt's CWT claims and reported as a raw Unix
   timestamp. Time-based policy assertions use the *receipt's* registration time,
   never the statement's own `iat`, because the issuer controls the latter.

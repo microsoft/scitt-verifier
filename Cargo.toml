@@ -4,6 +4,7 @@ members = [
     "crates/scitt-receipt",
     "crates/scitt-policy",
     "crates/scitt-verifier",
+    "crates/scitt-wasm",
 ]
 
 [workspace.package]

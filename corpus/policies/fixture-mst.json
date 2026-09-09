@@ -5,7 +5,7 @@
   "assertions": {
     "issuer": ["musa-mst-july.confidential-ledger.azure.com"],
     "signerIssuerContains": "Microsoft Corporation",
-    "minReceipts": 1,
+    "receiptCount": 1,
     "requireKidBoundToKey": true
   }
 }

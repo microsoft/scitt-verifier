@@ -10,9 +10,12 @@
 //! screen — and in a long pipeline log, often the part scrolled past.
 
 use scitt_policy::{Outcome, PolicyDecision};
-use scitt_receipt::{KeyLookup, Sign1, StatementFacts};
+use scitt_receipt::{CborValue, KeyLookup, Sign1, StatementFacts};
 
 use crate::outcome::{Assessment, CheckState, Verdict};
+
+/// Text longer than this is summarised unless `--verbose` is given.
+const TEXT_LIMIT: usize = 64;
 
 pub fn verify(a: &Assessment) {
     headline(a);
@@ -37,15 +40,7 @@ fn headline(a: &Assessment) {
             decision.policy_id, decision.policy_version
         );
     }
-    println!(
-        "Trust material:      {}{}",
-        a.trust.describe(),
-        a.trust
-            .issuer_scope
-            .as_ref()
-            .map(|s| format!(", scoped to {s}"))
-            .unwrap_or_else(|| ", not scoped to an issuer".into())
-    );
+    println!("Trust material:      {}", a.trust.describe());
 
     // Named "decision" rather than "policy" so it cannot be misread as a
     // second mention of the policy document above it.
@@ -225,69 +220,554 @@ fn policy_detail(decision: &PolicyDecision) {
     }
 }
 
-pub fn inspect(statement: &Sign1) -> scitt_receipt::Result<()> {
+/// Describe a statement without verifying any part of it.
+///
+/// Everything printed here is read straight off the file. None of it has been
+/// checked against a key, a trust anchor, or a policy — a forged statement will
+/// inspect exactly as cleanly as a genuine one. The purpose is to let someone
+/// see what a statement contains *before* they have the trust material to
+/// judge it, which is where most people start.
+pub fn inspect(statement: &Sign1, verbose: bool) -> scitt_receipt::Result<()> {
     println!("COSE_Sign1");
-    println!("  tagged              {}", statement.was_tagged);
+    println!("  {:<19} {}", "tagged", statement.was_tagged);
     println!(
-        "  algorithm           {}",
-        statement
-            .alg()
-            .map(scitt_receipt::labels::alg::name)
-            .unwrap_or_else(|_| "(none)".into())
-    );
-    println!(
-        "  kid                 {}",
-        statement.kid().unwrap_or_else(|| "(none)".into())
-    );
-    println!(
-        "  payload             {}",
-        statement
-            .payload
-            .as_ref()
-            .map(|p| format!("{} bytes", p.len()))
-            .unwrap_or_else(|| "detached".into())
-    );
-    println!(
-        "  x5chain             {} certificate(s)",
-        statement.x5chain().len()
-    );
-    println!("  receipts            {}", statement.receipts().len());
-    println!(
-        "  claim digest        {}",
+        "  {:<19} {}",
+        "claim digest",
         scitt_receipt::cbor::hex(&statement.claim_digest()?)
     );
     println!(
-        "  signed bytes        {}",
+        "  {:<19} {}",
+        "signed bytes",
         statement.signed_statement_bytes()?.len()
     );
 
-    if let Some(cwt) = statement.cwt() {
-        println!("CWT claims");
-        println!(
-            "  iss                 {}",
-            cwt.iss.unwrap_or_else(|| "(none)".into())
-        );
-        println!(
-            "  sub                 {}",
-            cwt.sub.unwrap_or_else(|| "(none)".into())
-        );
-        println!(
-            "  iat                 {}",
-            cwt.iat
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "(none)".into())
-        );
+    print_bucket("Protected headers", &statement.protected, verbose, true);
+    print_bucket(
+        "Unprotected headers",
+        &statement.unprotected,
+        verbose,
+        false,
+    );
+
+    println!();
+    println!("Payload");
+    match &statement.payload {
+        Some(bytes) => {
+            println!("  {:<19} {}", "bytes", bytes.len());
+            if let Some(cty) = statement.content_type() {
+                println!("  {:<19} {}", "content type", cty);
+            }
+            // In a hash envelope the payload *is* a digest of something else
+            // (RFC 9995). Printing sha-256 of it would be the hash of a hash —
+            // a number that looks like the artifact digest a reader is hunting
+            // for, and is not. Show the digest itself instead.
+            if let Some(alg) = statement.payload_hash_alg() {
+                println!(
+                    "  {:<19} {} digest of the preimage, not the preimage itself",
+                    "hash envelope",
+                    scitt_receipt::labels::alg::name(alg)
+                );
+                println!("  {:<19} {}", "digest", scitt_receipt::cbor::hex(bytes));
+                if let Some(cty) = statement.payload_preimage_content_type() {
+                    println!("  {:<19} {}", "preimage cty", cty);
+                }
+                if let Some(loc) = statement.payload_location() {
+                    println!("  {:<19} {}", "preimage at", loc);
+                }
+            } else {
+                println!("  {:<19} {}", "sha-256", scitt_receipt::sha256_hex(bytes));
+            }
+        }
+        None => println!("  detached — the payload is not carried in this file"),
     }
 
-    if let Ok(Some((subject, issuer))) = statement.leaf_names() {
+    println!();
+    println!("Signature");
+    println!("  {:<19} {}", "bytes", statement.signature.len());
+
+    if verbose {
+        inspect_chain(statement);
+    } else if let Ok(Some((subject, issuer))) = statement.leaf_names() {
+        println!();
         println!("Signing certificate");
-        println!("  subject             {subject}");
-        println!("  issuer              {issuer}");
+        println!("  {:<19} {subject}", "subject");
+        println!("  {:<19} {issuer}", "issuer");
     }
+
+    inspect_receipts(statement, verbose);
 
     println!();
     println!("inspect does not verify anything. Use `verify` to make a decision.");
     Ok(())
+}
+
+/// Print one COSE header bucket.
+///
+/// Grouping by bucket is not cosmetic. Everything under `Unprotected headers`
+/// sits *outside* the signature and can be changed by anyone who handled the
+/// file. A reader who cannot tell the two apart cannot tell what the signer
+/// actually committed to.
+/// Print a header bucket.
+///
+/// `addressable` says whether a `protectedHeaders` policy assertion can reach
+/// these headers. Only the protected bucket qualifies, so only there is the
+/// label printed in `path` form — advertising that syntax over the unprotected
+/// bucket would offer an author a path that resolves to nothing.
+fn print_bucket(title: &str, bucket: &CborValue, verbose: bool, addressable: bool) {
+    println!();
+    println!("{title}");
+    let CborValue::Map(entries) = bucket else {
+        println!("  (not a header map)");
+        return;
+    };
+    if entries.is_empty() {
+        println!("  (none)");
+        return;
+    }
+    for (key, value) in entries {
+        print_header(key, value, verbose, addressable);
+    }
+}
+
+/// The `path` segment a policy would use to address this header, or `None` for
+/// a key no policy can name.
+///
+/// Integer labels print bare and text labels quoted, because that is precisely
+/// the distinction a policy `path` draws: a JSON number and a JSON string
+/// address different headers. Serialising through `serde_json` rather than
+/// `Debug` keeps the quoting honest for labels outside ASCII.
+fn path_segment(key: &CborValue) -> Option<String> {
+    match key {
+        CborValue::Int(i) => Some(i.to_string()),
+        CborValue::TextString(s) => serde_json::to_string(s).ok(),
+        _ => None,
+    }
+}
+
+/// Print one header, naming the label when this build understands it.
+///
+/// Headers we do not interpret are still printed, and marked. A header nobody
+/// renders is a header nobody audits.
+///
+/// The bracketed label is the other half of that: a name alone tells an author
+/// what a header means but not how to write a rule about it, and the numbers
+/// live in an IANA registry rather than in this output.
+fn print_header(key: &CborValue, value: &CborValue, verbose: bool, addressable: bool) {
+    let (name, known) = match key {
+        CborValue::Int(i) => match scitt_receipt::labels::header_display_name(*i) {
+            Some(name) => (name.to_string(), true),
+            None => (i.to_string(), false),
+        },
+        CborValue::TextString(s) => (s.clone(), false),
+        other => (scitt_receipt::cbor::type_name(other).to_string(), false),
+    };
+
+    let heading = match path_segment(key).filter(|_| addressable) {
+        Some(segment) if known => format!("{name} [{segment}]"),
+        Some(segment) => format!("[{segment}]"),
+        None => name,
+    };
+
+    if matches!(key, CborValue::Int(i) if *i == scitt_receipt::labels::CWT_CLAIMS) {
+        println!("  {heading}");
+        let parent = addressable.then_some(scitt_receipt::labels::CWT_CLAIMS);
+        print_cwt_claims(value, verbose, parent);
+        return;
+    }
+
+    let rendered = header_value_text(key, value, verbose, known);
+    if known {
+        println!("  {heading:<24} {rendered}");
+    } else {
+        println!("  {heading:<24} {rendered}  (not interpreted)");
+        // "array of 1" names the shape and stops. That is enough to prove a
+        // header is there and nowhere near enough to write a rule about it,
+        // so the author's next move is to decode the file by hand in another
+        // tool. Descending here removes that step: every member is printed
+        // with the `path` a policy would use to reach it.
+        //
+        // Only for headers this build does not interpret. A known label has a
+        // renderer that already says something better than its raw structure.
+        if let Some(root) = path_segment(key).filter(|_| addressable) {
+            print_members(value, &root, verbose, 1);
+        }
+    }
+}
+
+/// Print the members of an uninterpreted container, each with its full policy
+/// `path`.
+///
+/// `depth` counts segments already spent, so the walk stops where
+/// `MAX_HEADER_PATH_DEPTH` stops: past it a policy cannot address the value,
+/// and printing one would advertise a rule the engine refuses to parse.
+fn print_members(value: &CborValue, path: &str, verbose: bool, depth: usize) {
+    let members: Vec<(String, &CborValue)> = match value {
+        // An integer indexes an array, which is what the policy engine does
+        // with a numeric segment at this position.
+        CborValue::Array(items) => items
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (i.to_string(), v))
+            .collect(),
+        CborValue::Map(entries) => entries
+            .iter()
+            .map(|(k, v)| {
+                // A label that is neither an integer nor text has no `path`
+                // spelling. Render it so it is still visible, but do not
+                // print a path an author cannot type.
+                let segment = path_segment(k).unwrap_or_else(|| scitt_receipt::render_scalar(k));
+                (segment, v)
+            })
+            .collect(),
+        _ => return,
+    };
+
+    let indent = "  ".repeat(depth + 1);
+    if depth >= scitt_policy::MAX_HEADER_PATH_DEPTH {
+        println!("{indent}… deeper than a policy path can address");
+        return;
+    }
+
+    for (segment, member) in members {
+        let child = format!("{path}, {segment}");
+        let heading = format!("[{child}]");
+        println!("{indent}{heading:<28} {}", scalar(member, verbose, false));
+        print_members(member, &child, verbose, depth + 1);
+    }
+}
+
+/// An algorithm as `NAME (value)`.
+///
+/// The name is what a person reads; the number is what a policy has to write,
+/// since `protectedHeaders` matches the integer on the wire and not this
+/// rendering. Printing only the name left the author to find `ES256 = -7` in
+/// an IANA registry — the same dead end the bracketed labels removed.
+fn alg_display(alg: i64) -> String {
+    format!("{} ({alg})", scitt_receipt::labels::alg::name(alg))
+}
+
+fn header_value_text(key: &CborValue, value: &CborValue, verbose: bool, known: bool) -> String {
+    use scitt_receipt::cbor;
+    use scitt_receipt::labels;
+
+    let CborValue::Int(label) = key else {
+        return scalar(value, verbose, known);
+    };
+    match *label {
+        labels::ALG => cbor::as_int(value)
+            .map(alg_display)
+            .unwrap_or_else(|_| scalar(value, verbose, known)),
+        // Same registry as `alg`, so the same naming applies. Left as a bare
+        // integer this reads as an opaque constant, when it is the single fact
+        // that decides how an artifact gets hashed.
+        labels::PAYLOAD_HASH_ALG => cbor::as_int(value)
+            .map(alg_display)
+            .unwrap_or_else(|_| scalar(value, verbose, known)),
+        // A CCF `kid` is a byte string holding ASCII hex, not raw digest bytes.
+        labels::KID => cbor::as_kid(value).unwrap_or_else(|_| scalar(value, verbose, known)),
+        labels::X5T => x5t_text(value).unwrap_or_else(|| scalar(value, verbose, known)),
+        labels::X5CHAIN => format!("{} certificate(s)", count_items(value)),
+        labels::RECEIPTS => count_items(value).to_string(),
+        labels::VERIFIABLE_DATA_STRUCTURE => match cbor::as_int(value) {
+            Ok(labels::CCF_LEDGER_SHA256) => "2 (CCF_LEDGER_SHA256)".into(),
+            Ok(other) => format!("{other} (not supported by this build)"),
+            Err(_) => scalar(value, verbose, known),
+        },
+        labels::VDP => "present — see the inclusion proof below".into(),
+        _ => scalar(value, verbose, known),
+    }
+}
+
+/// Print the CWT claims bucket.
+///
+/// `parent` carries the enclosing header's label so each claim can show its
+/// **full** path. A claim is two segments deep, and that is exactly where an
+/// author is most likely to guess wrong.
+fn print_cwt_claims(value: &CborValue, verbose: bool, parent: Option<i64>) {
+    use scitt_receipt::cbor;
+    use scitt_receipt::labels;
+
+    let CborValue::Map(entries) = value else {
+        println!("    {}", scalar(value, verbose, false));
+        return;
+    };
+    for (key, claim) in entries {
+        let (name, known) = match key {
+            CborValue::Int(i) => match labels::cwt_claim_name(*i) {
+                Some(name) => (name.to_string(), true),
+                None => (i.to_string(), false),
+            },
+            CborValue::TextString(s) => (s.clone(), false),
+            other => (cbor::type_name(other).to_string(), false),
+        };
+        let heading = match (parent, path_segment(key)) {
+            (Some(outer), Some(segment)) if known => format!("{name} [{outer}, {segment}]"),
+            (Some(outer), Some(segment)) => format!("[{outer}, {segment}]"),
+            _ => name,
+        };
+        let rendered = match key {
+            CborValue::Int(i)
+                if matches!(*i, labels::CWT_IAT | labels::CWT_NBF | labels::CWT_EXP) =>
+            {
+                timestamp(cbor::as_numeric_date(claim).ok())
+            }
+            _ => scalar(claim, verbose, known),
+        };
+        println!("    {heading:<22} {rendered}");
+    }
+}
+
+/// `x5t` is `[hashAlg, hashValue]`, and the algorithm is addressable on its own
+/// at `[34, 0]`, so it carries its numeric form like any other.
+fn x5t_text(value: &CborValue) -> Option<String> {
+    use scitt_receipt::cbor;
+    let items = cbor::as_array(value).ok()?;
+    if items.len() != 2 {
+        return None;
+    }
+    Some(format!(
+        "{} {}",
+        alg_display(cbor::as_int(&items[0]).ok()?),
+        cbor::hex(cbor::as_bytes(&items[1]).ok()?)
+    ))
+}
+
+/// A single certificate or receipt may be encoded bare rather than in an array.
+fn count_items(value: &CborValue) -> usize {
+    match value {
+        CborValue::Array(items) => items.len(),
+        CborValue::ByteString(_) => 1,
+        _ => 0,
+    }
+}
+
+/// A rendering that cannot flood a terminal.
+///
+/// Only values under labels this build does *not* interpret are summarised. A
+/// field we chose to name is a field somebody came to read: truncating `iss`
+/// would hide the exact string a policy has to match. Unknown fields are the
+/// flood risk — one statement we tested against carries a 684-character
+/// detached signature in a header nothing here interprets.
+fn scalar(value: &CborValue, verbose: bool, known: bool) -> String {
+    match value {
+        CborValue::TextString(s) if !known && !verbose && s.chars().count() > TEXT_LIMIT => {
+            let head: String = s.chars().take(32).collect();
+            format!("{} chars: {head}…", s.chars().count())
+        }
+        other => scitt_receipt::render_scalar(other),
+    }
+}
+
+fn inspect_chain(statement: &Sign1) {
+    let chain = statement.describe_chain();
+    if chain.is_empty() {
+        println!();
+        println!("Certificate chain");
+        println!("  none — this statement carries no x5chain");
+        return;
+    }
+    for cert in chain {
+        println!();
+        println!(
+            "Certificate {} {}",
+            cert.index + 1,
+            if cert.index == 0 { "(leaf)" } else { "" }
+        );
+        if let Some(problem) = &cert.problem {
+            println!("  problem             {problem}");
+            println!("  sha-256             {}", cert.sha256);
+            continue;
+        }
+        println!(
+            "  subject             {}",
+            cert.subject.as_deref().unwrap_or("(none)")
+        );
+        println!(
+            "  issuer              {}",
+            cert.issuer.as_deref().unwrap_or("(none)")
+        );
+        println!(
+            "  version             {}",
+            cert.version
+                .map(|v| format!("v{}", v + 1))
+                .unwrap_or_else(|| "(unknown)".into())
+        );
+        println!("  sha-256             {}", cert.sha256);
+        println!(
+            "  basic constraints   {}",
+            match cert.basic_constraints {
+                Some((critical, ca, path_len)) => format!(
+                    "ca={ca}{}{}",
+                    path_len
+                        .map(|n| format!(", path len {n}"))
+                        .unwrap_or_default(),
+                    if critical { ", critical" } else { "" }
+                ),
+                None => "(not present)".into(),
+            }
+        );
+        println!(
+            "  key cert sign       {}",
+            match cert.key_cert_sign {
+                Some(true) => "yes",
+                Some(false) => "no",
+                None => "(no key usage extension)",
+            }
+        );
+        if cert.extended_key_usage.is_empty() {
+            println!("  extended key usage  (none present)");
+        } else {
+            for (i, oid) in cert.extended_key_usage.iter().enumerate() {
+                let label = if i == 0 { "extended key usage" } else { "" };
+                println!("  {label:<19} {oid}");
+            }
+            if cert.eku_critical == Some(true) {
+                println!("  {:<19} marked critical", "");
+            }
+        }
+        // Loud, because this predicts a verify-time rejection rather than
+        // describing a property. Someone inspecting a chain that cannot pass
+        // should learn it here, not from an opaque failure later.
+        for oid in &cert.unhandled_critical_extensions {
+            println!("  unhandled critical  {oid} — `verify` will reject this chain");
+        }
+    }
+}
+
+fn inspect_receipts(statement: &Sign1, verbose: bool) {
+    let receipts = statement.receipts();
+    if receipts.is_empty() {
+        println!();
+        println!("Receipts");
+        println!("  none — this statement is signed, but not transparent");
+        return;
+    }
+    for (index, bytes) in receipts.iter().enumerate() {
+        println!();
+        println!("Receipt {}", index + 1);
+        let summary = match scitt_receipt::describe_receipt(bytes) {
+            Ok(s) => s,
+            Err(e) => {
+                println!("  could not be read    {e}");
+                continue;
+            }
+        };
+        println!(
+            "  algorithm           {}",
+            summary
+                .algorithm
+                .map(scitt_receipt::labels::alg::name)
+                .unwrap_or_else(|| "(none)".into())
+        );
+        println!(
+            "  kid                 {}",
+            summary.kid.as_deref().unwrap_or("(none)")
+        );
+        println!(
+            "  iss                 {}",
+            summary.issuer.as_deref().unwrap_or("(none)")
+        );
+        println!(
+            "  sub                 {}",
+            summary.subject.as_deref().unwrap_or("(none)")
+        );
+        println!("  registered at       {}", timestamp(summary.registered_at));
+        println!(
+            "  data structure      {}",
+            match summary.vds {
+                Some(scitt_receipt::labels::CCF_LEDGER_SHA256) => "2 (CCF_LEDGER_SHA256)".into(),
+                Some(other) => format!("{other} (not supported by this build)"),
+                None => "(none)".into(),
+            }
+        );
+        println!(
+            "  ccf txid            {}",
+            summary.ccf_txid.as_deref().unwrap_or("(none)")
+        );
+
+        if verbose {
+            print_inclusion_proof(&summary);
+            print_labels("  protected headers  ", &summary.protected_labels);
+            print_labels("  unprotected headers", &summary.unprotected_labels);
+        }
+
+        for problem in &summary.problems {
+            println!("  problem             {problem}");
+        }
+    }
+}
+
+/// The receipt's inclusion proof, decoded but not evaluated.
+///
+/// These are the components the receipt stores. No hash is computed and no root
+/// is reached: `verify` does that. A Merkle root printed beside an unchecked
+/// proof is exactly the sort of thing a reader mistakes for evidence.
+fn print_inclusion_proof(summary: &scitt_receipt::ReceiptSummary) {
+    let Some(proof) = &summary.inclusion_proof else {
+        return;
+    };
+    println!("  inclusion proof");
+    println!("    {:<17} {}", "write set digest", proof.write_set_digest);
+    println!("    {:<17} {}", "commit evidence", proof.commit_evidence);
+    println!("    {:<17} {}", "claims digest", proof.claims_digest);
+    println!("    {:<17} {} step(s)", "merkle path", proof.path.len());
+    for (index, step) in proof.path.iter().enumerate() {
+        println!(
+            "      {index:<2} sibling {:<5} {}",
+            if step.sibling_left { "left" } else { "right" },
+            step.digest
+        );
+    }
+}
+
+fn print_labels(prefix: &str, labels: &[String]) {
+    if labels.is_empty() {
+        println!("{prefix} (none)");
+        return;
+    }
+    println!("{prefix} {}", labels.join(", "));
+}
+
+/// Render a Unix timestamp as both the raw value and a UTC instant.
+///
+/// The raw seconds are kept because they are what a policy compares against;
+/// the formatted form is there so a human notices a statement dated 1970.
+fn timestamp(seconds: Option<i64>) -> String {
+    let Some(s) = seconds else {
+        return "(none)".into();
+    };
+    match utc_rfc3339(s) {
+        Some(text) => format!("{s} ({text})"),
+        None => format!("{s} (not a representable date)"),
+    }
+}
+
+/// Format a Unix timestamp as RFC 3339 UTC, without pulling in a date crate.
+///
+/// Uses Howard Hinnant's civil-from-days algorithm, which is exact for the
+/// proleptic Gregorian calendar. Returns `None` rather than a wrong date for
+/// values that cannot be represented.
+fn utc_rfc3339(seconds: i64) -> Option<String> {
+    let days = seconds.div_euclid(86_400);
+    let secs_of_day = seconds.rem_euclid(86_400);
+
+    let z = days.checked_add(719_468)?;
+    let era = if z >= 0 { z } else { z - 146_096 }.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+
+    Some(format!(
+        "{year:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        secs_of_day / 3_600,
+        (secs_of_day % 3_600) / 60,
+        secs_of_day % 60
+    ))
 }
 
 /// Render a tri-state honestly.
@@ -307,6 +787,47 @@ fn describe_lookup(lookup: &KeyLookup) -> &'static str {
         KeyLookup::Found => "found",
         KeyLookup::UnknownKid => "unknown kid — trust material may be stale",
         KeyLookup::Revoked => "REVOKED",
-        KeyLookup::IssuerMismatch => "issuer mismatch — these keys are for another service",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::path_segment;
+    use scitt_receipt::CborValue;
+
+    /// The bracketed label is meant to be pasted into a policy `path`, so an
+    /// integer label must print bare rather than quoted.
+    #[test]
+    fn an_integer_label_is_a_bare_number() {
+        assert_eq!(path_segment(&CborValue::Int(258)).unwrap(), "258");
+        assert_eq!(path_segment(&CborValue::Int(-1)).unwrap(), "-1");
+    }
+
+    /// A text label must print quoted, because a policy `path` distinguishes
+    /// the two: `[15]` and `["15"]` address different headers.
+    #[test]
+    fn a_text_label_is_quoted() {
+        let key = CborValue::TextString("external-signatures".into());
+        assert_eq!(path_segment(&key).unwrap(), "\"external-signatures\"");
+    }
+
+    /// Quoting goes through a JSON serialiser, so a label needing an escape
+    /// still yields something a policy author can paste. `Debug` would emit
+    /// `\u{e9}` here, which is Rust syntax and not JSON.
+    #[test]
+    fn a_label_needing_an_escape_is_still_valid_json() {
+        let key = CborValue::TextString("a\"b\\c".into());
+        let rendered = path_segment(&key).unwrap();
+        assert_eq!(rendered, r#""a\"b\\c""#);
+        let parsed: String = serde_json::from_str(&rendered).expect("must parse as JSON");
+        assert_eq!(parsed, "a\"b\\c");
+    }
+
+    /// CBOR permits any type as a map key, but a policy `path` can only name
+    /// integers and text. Offering a path for anything else would be a lie.
+    #[test]
+    fn a_key_no_policy_can_name_has_no_path() {
+        assert!(path_segment(&CborValue::ByteString(vec![1, 2, 3])).is_none());
+        assert!(path_segment(&CborValue::Array(vec![])).is_none());
     }
 }

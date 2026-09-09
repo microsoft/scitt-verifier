@@ -66,6 +66,188 @@ impl ReceiptFacts {
     }
 }
 
+/// What a receipt says about itself, without any verification.
+///
+/// Every field here is *asserted by the receipt*. Nothing in this struct has
+/// been checked against a key, a proof, or the statement it is attached to —
+/// that is [`verify_receipt`]'s job. This exists so a reader can see the
+/// contents of a receipt before any trust material is available, which is
+/// exactly the situation someone is in when writing their first policy.
+#[derive(Debug, Clone, Default)]
+pub struct ReceiptSummary {
+    pub algorithm: Option<i64>,
+    pub kid: Option<String>,
+    pub issuer: Option<String>,
+    pub subject: Option<String>,
+    pub registered_at: Option<i64>,
+    pub vds: Option<i64>,
+    /// CCF's `<view>.<seqno>` for the *receipt* transaction.
+    pub ccf_txid: Option<String>,
+    /// Labels present in the protected bucket, including ones we do not read.
+    pub protected_labels: Vec<String>,
+    pub unprotected_labels: Vec<String>,
+    /// The claims digest the receipt commits to.
+    pub claims_digest: Option<String>,
+    /// CCF commit evidence, `ce:<view>.<seqno>:<nonce>`.
+    ///
+    /// The only place the *entry's* own sequence number appears. `ccf_txid` is
+    /// the receipt transaction that covers it, which is a different number and
+    /// may cover more than one entry.
+    pub commit_evidence: Option<String>,
+    pub write_set_digest: Option<String>,
+    pub path_length: Option<usize>,
+    /// The inclusion proof, decoded but not evaluated.
+    pub inclusion_proof: Option<InclusionProof>,
+    pub problems: Vec<String>,
+}
+
+/// One step of a Merkle inclusion path, exactly as the receipt stores it.
+#[derive(Debug, Clone)]
+pub struct ProofStep {
+    /// Whether the sibling digest is the left operand of the hash.
+    pub sibling_left: bool,
+    /// The sibling digest, hex-encoded.
+    pub digest: String,
+}
+
+/// A CCF inclusion proof, decoded but not evaluated.
+///
+/// Nothing here is computed. These are the components the receipt carries, in
+/// the order it carries them. Hashing the leaf, walking the path to a root and
+/// checking that root against a ledger signature is [`verify_receipt`]'s job —
+/// a decoded proof on its own establishes nothing at all.
+#[derive(Debug, Clone)]
+pub struct InclusionProof {
+    pub write_set_digest: String,
+    pub commit_evidence: String,
+    pub claims_digest: String,
+    pub path: Vec<ProofStep>,
+}
+
+/// Decode a CCF inclusion proof from the CBOR byte string that holds it.
+pub fn describe_inclusion_proof(proof_bytes: &[u8]) -> Result<InclusionProof> {
+    let proof = CborValue::from_bytes(proof_bytes)
+        .map_err(|e| Error::Structure(format!("inclusion proof is not valid CBOR: {e:?}")))?;
+
+    let leaf = cbor::req_int_key(&proof, labels::PROOF_LEAF)?;
+    let components = cbor::as_array(leaf)?;
+    if components.len() != 3 {
+        return Err(Error::Structure(format!(
+            "leaf must have 3 components, found {}",
+            components.len()
+        )));
+    }
+
+    let steps = cbor::req_int_key(&proof, labels::PROOF_PATH).and_then(cbor::as_array)?;
+    let path = steps
+        .iter()
+        .enumerate()
+        .map(|(index, step)| {
+            let pair = cbor::as_array(step)?;
+            if pair.len() != 2 {
+                return Err(Error::Structure(format!(
+                    "path step {index} must be [is_left, digest], found {} elements",
+                    pair.len()
+                )));
+            }
+            Ok(ProofStep {
+                sibling_left: step_is_left(&pair[0], index)?,
+                digest: hex(cbor::as_bytes(&pair[1])?),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(InclusionProof {
+        write_set_digest: hex(cbor::as_bytes(&components[0])?),
+        commit_evidence: cbor::as_text(&components[1])?.to_owned(),
+        claims_digest: hex(cbor::as_bytes(&components[2])?),
+        path,
+    })
+}
+
+/// Read a path step's direction flag.
+///
+/// CCF has emitted this as both a CBOR bool and an integer, so both are
+/// accepted. Shared with [`verify_receipt`] so the decoder that *shows* a proof
+/// and the decoder that *checks* one cannot drift apart.
+fn step_is_left(value: &CborValue, index: usize) -> Result<bool> {
+    match value {
+        CborValue::Simple(21) => Ok(true),
+        CborValue::Simple(20) => Ok(false),
+        CborValue::Int(i) => Ok(*i != 0),
+        other => Err(Error::Structure(format!(
+            "path step {index} direction must be bool or int, got {}",
+            cbor::type_name(other)
+        ))),
+    }
+}
+
+/// Read a receipt's contents without verifying anything.
+///
+/// Returns what the receipt claims. Structural faults are collected into
+/// `problems` rather than raised, because a receipt that cannot be parsed is
+/// itself a finding a reader wants to see alongside the fields that did parse.
+pub fn describe_receipt(receipt_bytes: &[u8]) -> Result<ReceiptSummary> {
+    let receipt = Sign1::parse(receipt_bytes)?;
+    let mut summary = ReceiptSummary {
+        algorithm: receipt.alg().ok(),
+        kid: receipt.kid(),
+        protected_labels: Sign1::header_labels(&receipt.protected),
+        unprotected_labels: Sign1::header_labels(&receipt.unprotected),
+        vds: cbor::opt_int_key(&receipt.protected, labels::VERIFIABLE_DATA_STRUCTURE)
+            .and_then(|v| cbor::as_int(v).ok()),
+        ..Default::default()
+    };
+
+    if let Some(cwt) = receipt.cwt() {
+        summary.issuer = cwt.iss;
+        summary.subject = cwt.sub;
+        summary.registered_at = cwt.iat;
+    }
+
+    if let Some(ccf) = cbor::opt_text_key(&receipt.protected, labels::CCF_V1) {
+        summary.ccf_txid = cbor::opt_text_key(ccf, labels::CCF_TXID)
+            .and_then(|v| cbor::as_text(v).ok())
+            .map(str::to_owned);
+    }
+
+    match read_inclusion_proof(&receipt) {
+        Ok(Some(proof)) => {
+            summary.write_set_digest = Some(proof.write_set_digest.clone());
+            summary.commit_evidence = Some(proof.commit_evidence.clone());
+            summary.claims_digest = Some(proof.claims_digest.clone());
+            summary.path_length = Some(proof.path.len());
+            summary.inclusion_proof = Some(proof);
+        }
+        Ok(None) => summary
+            .problems
+            .push("receipt carries no inclusion proof, so it proves no registration".into()),
+        Err(e) => summary
+            .problems
+            .push(format!("inclusion proof could not be read: {e}")),
+    }
+
+    Ok(summary)
+}
+
+/// Pull the inclusion proof out of a receipt's unprotected proofs bucket.
+///
+/// `Ok(None)` means there was no proof to read, which is different from a proof
+/// that was there and malformed.
+fn read_inclusion_proof(receipt: &Sign1) -> Result<Option<InclusionProof>> {
+    let Some(proofs) = cbor::opt_int_key(&receipt.unprotected, labels::VDP) else {
+        return Ok(None);
+    };
+    let Some(inclusion) = cbor::opt_int_key(proofs, labels::PROOF_INCLUSION) else {
+        return Ok(None);
+    };
+    let inclusion_proofs = cbor::as_array(inclusion)?;
+    let Some(first) = inclusion_proofs.first() else {
+        return Ok(None);
+    };
+    describe_inclusion_proof(cbor::as_bytes(first)?).map(Some)
+}
+
 /// Verify one receipt against the statement it is attached to.
 ///
 /// Returns facts rather than a verdict. Every failure that still leaves other
@@ -163,7 +345,7 @@ pub fn verify_receipt(
         }
     };
 
-    let (lookup, key) = key_set.find(&kid, facts.issuer.as_deref());
+    let (lookup, key) = key_set.find(&kid);
     facts.key_lookup = Some(lookup.clone());
     let Some(key) = key else {
         facts.problems.push(match lookup {
@@ -171,11 +353,6 @@ pub fn verify_receipt(
                 "kid '{kid}' is not in the key set; the service may have rotated its signing key"
             ),
             KeyLookup::Revoked => format!("kid '{kid}' is revoked"),
-            KeyLookup::IssuerMismatch => format!(
-                "the key set is scoped to '{}' but this receipt was issued by '{}'",
-                key_set.issuer.as_deref().unwrap_or("(unscoped)"),
-                facts.issuer.as_deref().unwrap_or("(none)")
-            ),
             KeyLookup::Found => unreachable!("Found always carries a key"),
         });
         return Ok(facts);
@@ -275,17 +452,7 @@ fn walk_merkle_path(proof: &CborValue, leaf_hash: [u8; 32]) -> Result<([u8; 32],
         }
 
         // CCF has emitted this flag as both a CBOR bool and an integer.
-        let is_left = match &pair[0] {
-            CborValue::Simple(21) => true,
-            CborValue::Simple(20) => false,
-            CborValue::Int(i) => *i != 0,
-            other => {
-                return Err(Error::Structure(format!(
-                    "path step {index} direction must be bool or int, got {}",
-                    cbor::type_name(other)
-                )))
-            }
-        };
+        let is_left = step_is_left(&pair[0], index)?;
 
         let sibling = cbor::as_bytes(&pair[1])?;
         if sibling.len() != 32 {
@@ -307,4 +474,73 @@ fn walk_merkle_path(proof: &CborValue, leaf_hash: [u8; 32]) -> Result<([u8; 32],
     }
 
     Ok((current, steps.len()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn proof_bytes(path: Vec<CborValue>) -> Vec<u8> {
+        CborValue::Map(vec![
+            (
+                CborValue::Int(labels::PROOF_LEAF),
+                CborValue::Array(vec![
+                    CborValue::ByteString(vec![0xaa; 32]),
+                    CborValue::TextString("ce:2.1:beef".into()),
+                    CborValue::ByteString(vec![0xbb; 32]),
+                ]),
+            ),
+            (CborValue::Int(labels::PROOF_PATH), CborValue::Array(path)),
+        ])
+        .to_bytes()
+        .expect("test proof encodes")
+    }
+
+    fn step(direction: CborValue, fill: u8) -> CborValue {
+        CborValue::Array(vec![direction, CborValue::ByteString(vec![fill; 32])])
+    }
+
+    /// CCF has emitted the direction flag as a bool and as an integer. Reading
+    /// one encoding and not the other would mean showing a reader a path with
+    /// the sibling on the wrong side — which is also the side `verify` hashes
+    /// on, so the two decoders must agree about both forms.
+    #[test]
+    fn direction_flags_decode_as_both_bool_and_int() {
+        let decoded = describe_inclusion_proof(&proof_bytes(vec![
+            step(CborValue::Simple(21), 0x11),
+            step(CborValue::Simple(20), 0x22),
+            step(CborValue::Int(1), 0x33),
+            step(CborValue::Int(0), 0x44),
+        ]))
+        .expect("proof decodes");
+
+        let sides: Vec<bool> = decoded.path.iter().map(|s| s.sibling_left).collect();
+        assert_eq!(sides, vec![true, false, true, false]);
+        assert_eq!(decoded.commit_evidence, "ce:2.1:beef");
+        assert_eq!(decoded.write_set_digest, "aa".repeat(32));
+        assert_eq!(decoded.claims_digest, "bb".repeat(32));
+    }
+
+    /// A malformed leaf must fail rather than be shown as if it were fine.
+    #[test]
+    fn a_leaf_without_three_components_is_rejected() {
+        let bytes = CborValue::Map(vec![
+            (
+                CborValue::Int(labels::PROOF_LEAF),
+                CborValue::Array(vec![CborValue::ByteString(vec![0xaa; 32])]),
+            ),
+            (CborValue::Int(labels::PROOF_PATH), CborValue::Array(vec![])),
+        ])
+        .to_bytes()
+        .expect("test proof encodes");
+
+        assert!(describe_inclusion_proof(&bytes).is_err());
+    }
+
+    /// An unreadable direction flag is an error, not a silent `false`.
+    #[test]
+    fn an_unreadable_direction_flag_is_rejected() {
+        let bytes = proof_bytes(vec![step(CborValue::TextString("left".into()), 0x11)]);
+        assert!(describe_inclusion_proof(&bytes).is_err());
+    }
 }

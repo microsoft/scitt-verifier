@@ -75,8 +75,8 @@ Questions it answers:
   it did?** The receipt has to verify against trust material you supplied.
 - **Has anything been altered since registration?** Statement, payload, or
   receipt.
-- **Which service vouched for it** — and with `--issuer`, whether that is the
-  one you meant, rather than any ledger that happens to be in your key file.
+- **Which service vouched for it** — reported per receipt, and assertable with
+  the `issuer` rule in your policy document.
 - **Who signed it, and does that satisfy my rules?** Kept deliberately separate
   from the cryptography: "valid, but I don't accept this signer" (exit 2) is a
   different situation from "this does not verify" (exit 1).
@@ -118,8 +118,11 @@ agent, and nothing that changes behaviour when the agent image is updated.
 published artifacts are `musl` and MSVC static builds, so a dynamic dependency
 shows up as a broken release, not a red suite.
 - **Binding is declared, never inferred.** The tool will not guess which artifact a
-statement describes from a filename or a content type. You say `--binding-mode`,
-or the record says that no binding was established.
+statement describes from a filename or a content type. You say `--binding-mode`
+— `payload-bytes` when the statement carries the artifact, `payload-digest` when
+it carries a COSE Hash Envelope digest of it (RFC 9995) — or the record says that
+no binding was established. Naming the mode that does not apply is reported as
+*cannot compare*, never as a mismatch.
 - **A policy is always required.** There is no default policy, because a default
 would be this tool making a trust decision on your behalf. Whether
 `did:x509:0:sha256:…` is an identity you accept is not knowable here.
@@ -206,7 +209,6 @@ GitHub Actions:
     binding-mode: payload-bytes
     scitt-keys: .well-known/scitt-keys.cbor
     policy: .github/policies/release-gate.json
-    issuer: your-ledger.confidential-ledger.azure.com
 ```
 
 Azure Pipelines: see
@@ -248,7 +250,7 @@ rotation-as-a-pull-request pattern and support for self-hosted ledgers.
   "assertions": {
     "issuer": ["contoso.confidential-ledger.azure.com"],
     "signerIssuerContains": "Contoso Corporation",
-    "minReceipts": 1,
+    "receiptCount": 1,
     "maxAgeDays": 90,
     "requireKidBoundToKey": true
   }
@@ -285,14 +287,14 @@ Early. The verification core is exercised against real Microsoft Signing
 Transparency statements and its digests are cross-checked against two
 independent implementations, but the CLI surface should be considered unstable
 until v1.0. Known gaps are listed in [docs/limitations.md](docs/limitations.md)
-and reported at runtime in the `appraisal.notChecked` field of every
-verification record.
+and reported at runtime in every verification record — most in
+`appraisal.notChecked`, the rest in `trust.limitations` or as a refusal that
+ends the run. That document names the channel for each.
 
-The output contract changed after v0.1.0: `verified` was replaced by the two
-artifact-aware verdicts, the record was restructured around the RFC 9943
-vocabulary, and `--evidence` became `--result`. The schema is now
-`scitt-verifier/result/v0`. If you pinned against v0.1.0 output, read
-[docs/output.md](docs/output.md) before upgrading.
+The verification record's schema is `scitt-verifier/result/v0`. The `v0` is
+deliberate — the shape is still moving, and it says so. It freezes at `v1` when
+this repository goes public. See [docs/output.md](docs/output.md) for the
+contract.
 
 ## Contributing
 
