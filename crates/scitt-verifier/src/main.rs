@@ -7,21 +7,22 @@
 
 mod cli;
 mod inspect_json;
+mod online;
 mod outcome;
 mod record;
 mod report;
 
-use cli::{BindingMode, Command, Format, VerifyArgs};
+use cli::{BindingMode, Command, Format, TrustSource, VerifyArgs};
 use outcome::{
-    Assessment, Binding, BindingResult, Category, CheckState, Checks, Diagnostic, Gap, Severity,
-    Trust, Verdict,
+    Acquisition, Assessment, Binding, BindingResult, Category, CheckState, Checks, Diagnostic, Gap,
+    Severity, Trust, Verdict,
 };
 use scitt_policy::{Outcome as AssertionOutcome, Policy, PolicyDecision};
 use scitt_receipt::binding::{
     Binding as CoreBinding, BindingMode as CoreBindingMode, BindingReason as CoreBindingReason,
 };
 use scitt_receipt::{verify_statement, LedgerKeySet, Sign1, StatementFacts};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -104,15 +105,25 @@ fn run_inspect(args: &cli::InspectArgs) -> u8 {
     }
 }
 fn run_verify(args: &VerifyArgs) -> Verdict {
-    let now = args.now.unwrap_or_else(|| {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0)
-    });
+    let now = args.now.unwrap_or_else(wall_clock);
 
     let assessment = evaluate(args, now);
     emit(args, assessment, now)
+}
+
+/// The real clock, in Unix seconds.
+///
+/// Kept separate from the `now` threaded through evaluation because the two
+/// answer different questions. `now` is "at what moment should this statement
+/// be judged", which `--now` may legitimately move in order to reproduce a
+/// past decision. Anything recording when this process actually did something
+/// must use this instead: writing `--now` into a provenance field would state
+/// that a fetch happened at a time it did not.
+fn wall_clock() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Run the checks. Never prints, never writes, never exits.
@@ -139,21 +150,6 @@ fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
             )
         }
     };
-    let key_bytes =
-        match read(&args.scitt_keys) {
-            Ok(b) => b,
-            Err(e) => return Assessment::incomplete(
-                Verdict::UsageError,
-                trust,
-                Diagnostic::error(
-                    "TrustMaterialUnreadable",
-                    Category::Input,
-                    e,
-                    "Check the --scitt-keys path. See docs/trust-material.md to obtain a key set.",
-                ),
-                gaps(args, None, None),
-            ),
-        };
     let policy_bytes = match read(&args.policy) {
         Ok(b) => b,
         Err(e) => {
@@ -188,32 +184,17 @@ fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
         }
     };
 
-    let key_set = match LedgerKeySet::from_cose_key_set(&key_bytes) {
-        Ok(k) => k,
-        // Unusable trust material is not evidence that the artifact is bad.
-        // Exit 3, not 1.
-        Err(e) => {
-            return Assessment::incomplete(
-                Verdict::CannotEvaluate,
-                trust,
-                Diagnostic::error(
-                    "TrustMaterialUnusable",
-                    Category::Trust,
-                    e.to_string(),
-                    "Re-fetch the key set with tools/scitt-keys.py fetch.",
-                ),
-                gaps(args, None, None),
-            )
-        }
+    // Trust material is resolved after the policy because the policy is what
+    // decides where it may come from. Reading it earlier would mean the online
+    // path had to either re-order itself or fetch before knowing what is
+    // allowed, and only one of those is safe.
+    let resolved = match resolve_trust(args, &policy, &statement_bytes) {
+        Ok(r) => r,
+        Err(a) => return *a,
     };
-
-    let facts = match verify_statement(&statement_bytes, &key_set) {
-        Ok(f) => f,
-        Err(e) => {
-            let (verdict, diagnostic) = classify_core_error(&e);
-            return Assessment::incomplete(verdict, trust, diagnostic, gaps(args, None, None));
-        }
-    };
+    let trust = resolved.trust;
+    let facts = resolved.facts;
+    let acquisition_diagnostics = resolved.diagnostics;
 
     let binding = match check_binding(args, &statement_bytes) {
         Ok(b) => b,
@@ -242,6 +223,8 @@ fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
                 detail: format!("artifact binding was requested but could not be checked: {e}"),
             };
             a.facts = Some(facts);
+            a.diagnostics.extend(acquisition_diagnostics);
+            a.acquisition = resolved.acquisition;
             return a;
         }
     };
@@ -256,7 +239,12 @@ fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
     };
 
     let verdict = decide(&facts, &binding, &decision, args.binding_mode);
-    let mut diagnostics = diagnose(&facts, &binding, &decision);
+    // Acquisition diagnostics come first because they explain absences the
+    // later ones only describe. "The key could not be fetched" is the cause;
+    // "no receipt verified" is the consequence, and a reader handed the
+    // consequence alone will go looking in the wrong place.
+    let mut diagnostics = acquisition_diagnostics;
+    diagnostics.extend(diagnose(&facts, &binding, &decision));
     if verdict == Verdict::StatementTransparent {
         // A pass, but a narrower one than most readers assume. Recorded as a
         // diagnostic so a pipeline can gate on it without parsing prose.
@@ -280,6 +268,410 @@ fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
         facts: Some(facts),
         decision: Some(decision),
         binding,
+        acquisition: resolved.acquisition,
+    }
+}
+
+/// Trust material, however it was obtained, plus what obtaining it revealed.
+struct Resolved {
+    facts: StatementFacts,
+    trust: Trust,
+    /// Anything the operator needs to know about how the material was got.
+    /// Acquisition failures land here rather than being folded into the
+    /// verdict, so a fetch that did not happen stays visible as a fetch that
+    /// did not happen.
+    diagnostics: Vec<Diagnostic>,
+    /// Present only in online mode, for the record's provenance block.
+    acquisition: Option<Acquisition>,
+}
+
+/// Obtain the signing keys and verify the statement against them.
+///
+/// Both paths end in the same place — a `StatementFacts` produced by the core
+/// verifier — so the verdict logic downstream cannot tell how the keys arrived
+/// and cannot grow a second opinion about it.
+fn resolve_trust(
+    args: &VerifyArgs,
+    policy: &Policy,
+    statement_bytes: &[u8],
+) -> Result<Resolved, Box<Assessment>> {
+    match &args.trust {
+        TrustSource::Local(path) => resolve_local(args, path, statement_bytes),
+        TrustSource::Online { ledger } => {
+            resolve_online(args, policy, statement_bytes, ledger.as_deref())
+        }
+    }
+}
+
+fn resolve_local(
+    args: &VerifyArgs,
+    path: &Path,
+    statement_bytes: &[u8],
+) -> Result<Resolved, Box<Assessment>> {
+    let trust = Trust::unsigned_key_set();
+
+    let key_bytes =
+        match read(path) {
+            Ok(b) => b,
+            Err(e) => return Err(Box::new(Assessment::incomplete(
+                Verdict::UsageError,
+                trust,
+                Diagnostic::error(
+                    "TrustMaterialUnreadable",
+                    Category::Input,
+                    e,
+                    "Check the --scitt-keys path. See docs/trust-material.md to obtain a key set.",
+                ),
+                gaps(args, None, None),
+            ))),
+        };
+
+    let key_set = match LedgerKeySet::from_cose_key_set(&key_bytes) {
+        Ok(k) => k,
+        // Unusable trust material is not evidence that the artifact is bad.
+        // Exit 3, not 1.
+        Err(e) => {
+            return Err(Box::new(Assessment::incomplete(
+                Verdict::CannotEvaluate,
+                trust,
+                Diagnostic::error(
+                    "TrustMaterialUnusable",
+                    Category::Trust,
+                    e.to_string(),
+                    "Re-fetch the key set with tools/scitt-keys.py fetch.",
+                ),
+                gaps(args, None, None),
+            )))
+        }
+    };
+
+    match verify_statement(statement_bytes, &key_set) {
+        Ok(facts) => Ok(Resolved {
+            facts,
+            trust,
+            diagnostics: Vec::new(),
+            acquisition: None,
+        }),
+        Err(e) => {
+            let (verdict, diagnostic) = classify_core_error(&e);
+            Err(Box::new(Assessment::incomplete(
+                verdict,
+                trust,
+                diagnostic,
+                gaps(args, None, None),
+            )))
+        }
+    }
+}
+
+fn resolve_online(
+    args: &VerifyArgs,
+    policy: &Policy,
+    statement_bytes: &[u8],
+    ledger: Option<&str>,
+) -> Result<Resolved, Box<Assessment>> {
+    // Parsed before anything is selected, so a statement this tool cannot read
+    // never causes a request. Without this the failure is silent: discovery
+    // turns an unparseable statement into "no candidate issuers", which a
+    // single-entry allowlist then ignores, and the run fetches keys it has no
+    // use for before failing on the same bytes a moment later.
+    if let Err(e) = Sign1::parse(statement_bytes) {
+        let (verdict, diagnostic) = classify_core_error(&e);
+        return Err(Box::new(Assessment::incomplete(
+            verdict,
+            Trust::no_key_set(),
+            diagnostic,
+            gaps(args, None, None),
+        )));
+    }
+
+    // Selection runs first and completely. Nothing below this point can widen
+    // what it chose, and nothing above it has touched the network.
+    let candidates = online::candidate_issuers(statement_bytes);
+    let selected =
+        match online::select(policy, &candidates, ledger) {
+            online::Selection::Ready(list) => list,
+            // A misconfigured run is the operator's to fix, and saying anything
+            // about the artifact on the strength of it would be inventing a result.
+            online::Selection::Refused(why) => return Err(Box::new(Assessment::incomplete(
+                Verdict::UsageError,
+                Trust::no_key_set(),
+                Diagnostic::error(
+                    "AcquisitionNotConfigured",
+                    Category::Input,
+                    why,
+                    "Set assertions.issuer in the policy to the transparency services you accept.",
+                ),
+                gaps(args, None, None),
+            ))),
+            // Nothing to ask. This is not an error: it is a statement whose
+            // receipts point somewhere this policy does not accept. The normal
+            // verdict path turns that into cannot-evaluate, which is what it is.
+            online::Selection::Nothing(why) => {
+                let trust = Trust::no_key_set();
+                let facts = verify_or_fail(args, statement_bytes, &[], trust.clone())?;
+                return Ok(Resolved {
+                    facts,
+                    trust,
+                    diagnostics: vec![Diagnostic::warning(
+                        "NoLedgerSelected",
+                        Category::Trust,
+                        why.clone(),
+                        "Add the service the receipt names to assertions.issuer if you accept it.",
+                    )],
+                    acquisition: Some(Acquisition {
+                        selected: Vec::new(),
+                        acquired: Vec::new(),
+                        failed: Vec::new(),
+                        not_attempted: Some(why),
+                    }),
+                });
+            }
+        };
+
+    // The real clock, never `--now`: this records when the fetch happened, and
+    // `--now` answers a different question entirely.
+    let (acquired, failed) = online::partition(scitt_acquire::acquire_all(&selected, wall_clock()));
+
+    // The mode describes what this run actually holds, not what it set out to
+    // do. Every fetch failing leaves it with nothing, and that is what it says.
+    let trust = if acquired.is_empty() {
+        Trust::no_key_set()
+    } else {
+        Trust::acquired_key_set()
+    };
+
+    // A failure to fetch is reported as exactly that. It never becomes a
+    // silent fallback to some other key, and it never becomes a finding about
+    // the artifact, because not knowing is not the same as knowing something
+    // bad.
+    let diagnostics = failed
+        .iter()
+        .map(|f| {
+            Diagnostic::error(
+                acquisition_code(f.error.diagnostic),
+                if f.error.diagnostic.is_configuration() {
+                    Category::Input
+                } else {
+                    Category::Trust
+                },
+                format!("{}: {}", f.provenance.issuer, f.error.detail),
+                f.error.diagnostic.action(),
+            )
+        })
+        // A key set with two entries under one identifier still verifies, so
+        // this is a warning and not a refusal: the material is usable and the
+        // service is reachable. It is said out loud because for those
+        // identifiers the key a receipt is checked against is decided by the
+        // order of entries in the served set, which is not something the
+        // relying party chose.
+        .chain(acquired.iter().flat_map(|a| {
+            let kids = &a.provenance.ambiguous_kids;
+            (!kids.is_empty()).then(|| {
+                Diagnostic::warning(
+                    "AcquisitionAmbiguousKid",
+                    Category::Trust,
+                    format!(
+                        "{} served more than one key under {}. \
+                         Receipts naming those identifiers are checked against whichever \
+                         matching key appears first in the served set.",
+                        a.issuer,
+                        kids.join(", ")
+                    ),
+                    "Ask the transparency service operator to publish distinct key identifiers, \
+                     or pin the key set with --scitt-keys after inspecting it.",
+                )
+            })
+        }))
+        .collect();
+
+    let acquisition = Acquisition {
+        selected,
+        acquired,
+        failed,
+        not_attempted: None,
+    };
+
+    // Carried onto the failure too. Requests were made and their outcomes are
+    // evidence in their own right; dropping them because a later step failed
+    // would leave a record that does not mention the network activity this run
+    // performed, and would leave --save-trust with nothing to write after a
+    // successful fetch.
+    let facts = verify_or_fail(args, statement_bytes, &acquisition.acquired, trust.clone())
+        .map_err(|mut a| {
+            a.acquisition = Some(acquisition.clone());
+            a
+        })?;
+
+    Ok(Resolved {
+        facts,
+        trust,
+        diagnostics,
+        acquisition: Some(acquisition),
+    })
+}
+
+/// Map an acquisition fault onto a diagnostic code in this tool's namespace.
+///
+/// The crate's own codes are carried verbatim in the record's acquisition
+/// block, where they sit alongside the rest of the provenance. This mapping
+/// exists so the `diagnostics` list keeps one naming convention throughout: a
+/// pipeline matching on `code` should not have to know that some codes came
+/// from a different crate.
+fn acquisition_code(d: scitt_acquire::Diagnostic) -> &'static str {
+    use scitt_acquire::Diagnostic as D;
+    match d {
+        D::InvalidIssuer => "AcquisitionInvalidIssuer",
+        D::UnsupportedProvider => "AcquisitionUnsupportedProvider",
+        D::Transport => "AcquisitionTransport",
+        D::TlsAuthentication => "AcquisitionTlsAuthentication",
+        D::ResponseTooLarge => "AcquisitionResponseTooLarge",
+        D::MalformedIdentity => "AcquisitionMalformedIdentity",
+        D::MalformedKeySet => "AcquisitionMalformedKeySet",
+        D::ServiceKeyMismatch => "AcquisitionServiceKeyMismatch",
+        D::DeadlineExceeded => "AcquisitionDeadlineExceeded",
+        D::UnsupportedPlatform => "AcquisitionUnsupportedPlatform",
+    }
+}
+
+fn verify_or_fail(
+    args: &VerifyArgs,
+    statement_bytes: &[u8],
+    acquired: &[scitt_acquire::Acquired],
+    trust: Trust,
+) -> Result<StatementFacts, Box<Assessment>> {
+    online::verify_scoped(statement_bytes, acquired).map_err(|e| {
+        let (verdict, diagnostic) = classify_core_error(&e);
+        Box::new(Assessment::incomplete(
+            verdict,
+            trust,
+            diagnostic,
+            gaps(args, None, None),
+        ))
+    })
+}
+
+/// Write the acquired trust material so a later run can replay it offline.
+///
+/// The files written are the bytes exactly as served, not a re-encoding. A
+/// re-encoded key set would verify the same statements today and could stop
+/// doing so after any change to this tool's serialiser, which would make the
+/// snapshot useless for the one job it has.
+///
+/// Refuses to overwrite. A directory that already holds a snapshot is one
+/// somebody may already be replaying, and silently replacing its contents is
+/// how a pipeline ends up verifying against keys nobody chose. Naming the
+/// collision is always recoverable; overwriting it is not.
+fn save_trust(dir: &Path, assessment: &Assessment) -> Result<Vec<PathBuf>, Diagnostic> {
+    let fail = |msg: String| {
+        Diagnostic::error(
+            "TrustMaterialNotSaved",
+            Category::Input,
+            msg,
+            "Choose a directory that does not already hold a snapshot, or remove the existing one.",
+        )
+    };
+
+    let Some(acquisition) = &assessment.acquisition else {
+        return Err(fail(
+            "--save-trust has nothing to write: this run did not acquire any trust material. \
+             It is only meaningful with --online."
+                .into(),
+        ));
+    };
+
+    std::fs::create_dir_all(dir)
+        .map_err(|e| fail(format!("could not create {}: {e}", dir.display())))?;
+
+    let mut manifest = Vec::new();
+    let mut written = Vec::new();
+    for a in &acquisition.acquired {
+        // The issuer is a validated hostname by the time it reaches here, so
+        // it cannot contain a separator or traverse upwards. Checked rather
+        // than assumed, because this is the one place an issuer becomes a path.
+        debug_assert!(scitt_acquire::validate_host(&a.issuer).is_ok());
+        let keys = dir.join(format!("{}.keys.cbor", a.issuer));
+        let cert = dir.join(format!("{}.service-cert.der", a.issuer));
+
+        for path in [&keys, &cert] {
+            if path.exists() {
+                return Err(fail(format!(
+                    "{} already exists; refusing to overwrite trust material",
+                    path.display()
+                )));
+            }
+        }
+
+        std::fs::write(&keys, &a.keyset_bytes)
+            .map_err(|e| fail(format!("could not write {}: {e}", keys.display())))?;
+        std::fs::write(&cert, &a.service_cert_der)
+            .map_err(|e| fail(format!("could not write {}: {e}", cert.display())))?;
+        written.push(keys.clone());
+        written.push(cert.clone());
+
+        manifest.push(serde_json::json!({
+            "issuer": a.issuer,
+            "keys": keys.file_name().and_then(|n| n.to_str()),
+            "serviceCert": cert.file_name().and_then(|n| n.to_str()),
+            "keysetSha256": a.provenance.keyset_sha256,
+            "serviceCertSha256": a.provenance.service_cert_sha256,
+            "serviceKeyKid": a.provenance.service_key_kid,
+            "identityUrl": a.provenance.identity_url,
+            "keysetUrl": a.provenance.keyset_url,
+            "acquiredAt": a.provenance.acquired_at,
+        }));
+    }
+
+    let manifest_path = dir.join("manifest.json");
+    if manifest_path.exists() {
+        return Err(fail(format!(
+            "{} already exists; refusing to overwrite trust material",
+            manifest_path.display()
+        )));
+    }
+    let doc = serde_json::json!({
+        "format": "scitt-verifier/trust-snapshot/v0",
+        // Says plainly what replaying this does and does not get you. A
+        // snapshot is a record of what a service served at a moment, so
+        // replaying it reproduces that moment and nothing fresher.
+        "note": "Bytes as served, for offline replay with --scitt-keys. Replaying reproduces \
+                 the keys held at acquisition time; it does not re-check the service.",
+        "ledgers": manifest,
+    });
+    std::fs::write(&manifest_path, format!("{doc:#}\n"))
+        .map_err(|e| fail(format!("could not write {}: {e}", manifest_path.display())))?;
+    written.push(manifest_path);
+
+    Ok(written)
+}
+
+/// Whether two paths name the same file, including when one does not exist yet.
+///
+/// `canonicalize` cannot be used directly: the record path is typically about
+/// to be created, and canonicalising a missing file fails. Resolving the parent
+/// directory and comparing file names gets the cases that matter here — a
+/// relative path, a trailing `.`, a `..` through a real directory, a symlinked
+/// directory — without claiming to be a general-purpose answer.
+///
+/// When the parent itself cannot be resolved the path is compared as written,
+/// which can miss a match. That is safe for the reason it happens: a parent the
+/// filesystem cannot resolve is a parent that cannot be written to either, so
+/// the write this guard would have refused fails on its own and reports a real
+/// I/O error. Note that `..` through a directory that does not exist resolves
+/// on Windows, which collapses it lexically, and does not on Unix, where the
+/// kernel walks it.
+fn same_file(a: &Path, b: &Path) -> bool {
+    fn key(p: &Path) -> Option<(PathBuf, std::ffi::OsString)> {
+        let parent = p.parent().filter(|d| !d.as_os_str().is_empty());
+        let parent = parent.unwrap_or_else(|| Path::new("."));
+        let parent = parent
+            .canonicalize()
+            .unwrap_or_else(|_| parent.to_path_buf());
+        Some((parent, p.file_name()?.to_os_string()))
+    }
+    match (key(a), key(b)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
     }
 }
 
@@ -302,8 +694,41 @@ fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
 /// exits 4. Stdout would be correct and the file would be wrong, which is the
 /// worse way round — the terminal scrolls away, the audit record is kept.
 fn emit(args: &VerifyArgs, mut assessment: Assessment, now: i64) -> Verdict {
+    // First, because it is the only output that is evidence in its own right
+    // rather than a description of a conclusion. The key sets and certificates
+    // written here are what a later run replays, and they are true whatever
+    // this run decides. Writing them before the record also means a failure to
+    // write them can still demote the record, which would be impossible the
+    // other way around.
+    let mut trust_files: Vec<PathBuf> = Vec::new();
+    if let Some(dir) = &args.save_trust {
+        match save_trust(dir, &assessment) {
+            Ok(written) => trust_files = written,
+            Err(d) => demote(&mut assessment, d),
+        }
+    }
+    // A record is a description of a conclusion; trust material is evidence.
+    // Letting the former land on the latter would destroy the bytes a later
+    // offline run replays, and — because the record write itself succeeds —
+    // would do it on a run that still exits 0. Refusing is the only outcome
+    // that leaves the snapshot intact.
+    let collides = |path: &Path| -> Option<Diagnostic> {
+        let hit = trust_files.iter().find(|w| same_file(w, path))?;
+        Some(Diagnostic::error(
+            "OutputPathCollision",
+            Category::Input,
+            format!(
+                "{} is trust material written by --save-trust this run; refusing to overwrite it",
+                hit.display()
+            ),
+            "Write the record or facts document somewhere outside the --save-trust directory, \
+             or under a different file name.",
+        ))
+    };
     if let Some(path) = &args.facts {
-        if let Err(d) = write_json(
+        if let Some(d) = collides(path) {
+            demote(&mut assessment, d);
+        } else if let Err(d) = write_json(
             path,
             "facts document",
             &record::facts(args, &assessment, now),
@@ -312,7 +737,9 @@ fn emit(args: &VerifyArgs, mut assessment: Assessment, now: i64) -> Verdict {
         }
     }
     if let Some(path) = &args.result {
-        if let Err(d) = write_json(
+        if let Some(d) = collides(path) {
+            demote(&mut assessment, d);
+        } else if let Err(d) = write_json(
             path,
             "verification record",
             &record::build(args, &assessment, now),
@@ -849,4 +1276,45 @@ fn check_binding(args: &VerifyArgs, statement_bytes: &[u8]) -> Result<BindingRes
 
 fn read(path: &Path) -> Result<Vec<u8>, String> {
     std::fs::read(path).map_err(|e| format!("could not read {}: {e}", path.display()))
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::same_file;
+    use std::path::Path;
+
+    /// The collision that motivated this: a record written into the snapshot
+    /// directory under a name the snapshot itself uses. Spelling the directory
+    /// differently must not be a way past the guard.
+    #[test]
+    fn the_same_file_spelled_differently_is_still_the_same_file() {
+        let dir = std::env::temp_dir().join("scitt-verifier-same-file");
+        let sub = dir.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let written = dir.join("manifest.json");
+
+        assert!(same_file(&written, &dir.join(".").join("manifest.json")));
+        // `..` is resolved by the filesystem, so this holds only for a
+        // directory that exists. A path traversing one that does not is left
+        // as written rather than guessed at.
+        assert!(same_file(&written, &sub.join("..").join("manifest.json")));
+    }
+
+    #[test]
+    fn different_names_in_one_directory_do_not_collide() {
+        let dir = std::env::temp_dir().join("scitt-verifier-same-file");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!same_file(
+            &dir.join("manifest.json"),
+            &dir.join("result.json")
+        ));
+    }
+
+    /// A path with no file name cannot name a file, so it cannot be one of the
+    /// files this run wrote. Answering "false" is the fail-closed direction
+    /// here: the caller then attempts the write and reports a real I/O error.
+    #[test]
+    fn a_directory_is_not_a_written_file() {
+        assert!(!same_file(Path::new("/tmp"), Path::new("/")));
+    }
 }

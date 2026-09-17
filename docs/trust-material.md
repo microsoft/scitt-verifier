@@ -1,30 +1,96 @@
 # Obtaining trust material
 
-`scitt-verifier verify` needs the transparency service's signing keys, and it
-will not fetch them for you. This document explains how to get them, why the
-acquisition is deliberately a separate step, and what the resulting files do and
-do not prove.
+`scitt-verifier verify` needs the transparency service's signing keys. By
+default it will not fetch them for you: a run is offline unless you pass
+`--online`. This document explains how to get the keys, why acquisition is kept
+apart from verification, and what the resulting files do and do not prove.
 
-`tools/scitt-keys.py` automates the procedure. It is a prototype of a planned
-`scitt-keys` binary; the command surface below is expected to be stable.
+There are two ways, and the difference is not convenience but blast radius:
+
+| | Command | Network at gate time | Use it when |
+|---|---|---|---|
+| Pinned | `--scitt-keys keys.cbor` | never | the gate must not be able to fail open |
+| Acquired | `--online` | yes, to allowlisted services only | distributing a key set is the larger risk |
+
+Start pinned. Reach for `--online` when the cost of stale key material is
+higher than the cost of a network dependency — most often during rotation,
+where a pinned gate fails closed on every build until someone lands a pull
+request.
+
+`tools/scitt-keys.py` automates the pinned procedure. It is a prototype of a
+planned `scitt-keys` binary; the command surface below is expected to be stable.
 
 ```console
 pip install cryptography cbor2
 ```
 
-## Why this is a separate tool
+## Acquiring keys at verification time
 
-The verifier is offline because a deployment gate that depends on a live service
-is a gate that fails open the first time the service has a bad afternoon. It is
-also a gate whose answer is decided by whoever controls the network at the moment
-it runs.
+```console
+scitt-verifier verify \
+  --statement build.cose \
+  --policy    policy.json \
+  --online
+```
 
-So acquisition and verification are separated in time and in blast radius:
+The policy decides which services may be contacted, through the same
+`assertions.issuer` allowlist that decides which issuers are acceptable:
+
+```json
+{ "assertions": { "issuer": ["contoso.confidential-ledger.azure.com"] } }
+```
+
+Without that allowlist, `--online` refuses and makes no request. This is the
+whole design, not a safety check bolted on:
+
+- **The statement cannot choose a destination.** Receipts live in the COSE
+  *unprotected* header bucket, which no signature covers, so anyone holding the
+  file can append one naming any service they like. A receipt naming a service
+  the policy does not accept produces no request at all — it is reported as not
+  selected.
+- **`--ledger` narrows, never widens.** `--ledger contoso...` restricts a run to
+  one allowlisted service. Naming one the policy does not accept is refused, so
+  the flag cannot be used to work around the policy from the command line.
+- **Failures stay failures.** An unreachable service is reported with a
+  diagnostic code and the exact URL attempted. It never falls back to another
+  key, and never becomes a pass.
+
+`--save-trust <DIR>` writes what was fetched — the key sets and service
+certificates as served, plus a manifest of digests — so a later run can replay
+the same material offline with `--scitt-keys`. It refuses to overwrite an
+existing snapshot, and it refuses to let `--result` or `--facts` write over a
+file it produced in the same run: a record is a description of a conclusion,
+the snapshot is evidence, and the write that would destroy the evidence is the
+one that otherwise succeeds quietly.
+
+Online acquisition needs an x86-64 host with AES, PCLMULQDQ, BMI1, ADX, AVX and
+AVX2 — Intel Broadwell or AMD Excavator, 2014 or later — because the bundled
+pure-Rust TLS stack requires them. Verification itself does not. A host without
+them is refused with `AcquisitionUnsupportedPlatform` rather than allowed to
+abort the process, so the run still leaves a record.
+
+### What `--online` does not give you
+
+A successful fetch establishes who served the keys, over a connection
+authenticated to that service's own certificate, and that the key set contains
+the key that certificate binds to. It does **not** establish that a key is
+unrevoked, that the set is current rather than replayed, or anything about the
+statement's signer. The limitations recorded under `trust.limitations` say so
+on every run.
+
+## Why the pinned path is a separate tool
+
+The verifier is offline by default because a deployment gate that depends on a
+live service is a gate that fails open the first time the service has a bad
+afternoon. It is also a gate whose answer is decided by whoever controls the
+network at the moment it runs.
+
+So acquisition and verification can be separated in time and in blast radius:
 
 | | Who runs it | How often | Network |
 |---|---|---|---|
 | `scitt-keys fetch` | a person, or a scheduled job that opens a pull request | when keys rotate | yes |
-| `scitt-verifier verify` | every deployment | every build | **no** |
+| `scitt-verifier verify` | every deployment | every build | **no**, unless `--online` |
 
 `fetch` refuses to run when `CI` is set unless you pass `--refresh`, because the
 one legitimate reason to fetch inside a pipeline is a scheduled rotation job.

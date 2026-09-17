@@ -1,0 +1,9 @@
+{
+  "policyId": "corpus/online-unsupported-provider",
+  "policyVersion": "1",
+  "description": "Allowlists a transparency service this build has no bootstrap provider for. Used to check that --online refuses before it sends anything, rather than guessing an endpoint or reporting an outage. Not a template for production.",
+  "assertions": {
+    "issuer": ["ledger.example.test"],
+    "receiptCount": 1
+  }
+}

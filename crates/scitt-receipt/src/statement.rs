@@ -530,6 +530,24 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
 }
 
+/// SPKI of a DER-encoded X.509 certificate.
+///
+/// Exposed because a caller that acquires trust material over the network must
+/// prove the key set it was handed belongs to the certificate the connection
+/// was authenticated with, and that comparison is only meaningful against the
+/// same encoding [`crate::keys::LedgerKey`] derives its `kid` from. Re-deriving
+/// it in the caller would mean two implementations of the one byte string the
+/// whole binding rests on.
+///
+/// Parsing only: this says nothing about whether the certificate is trusted,
+/// current, or chains anywhere.
+pub fn spki_from_certificate_der(cert_der: &[u8]) -> Result<Vec<u8>> {
+    let cert = <tav_crypto::Crypto as CertificateBackend>::from_der(cert_der)
+        .map_err(|e| Error::Crypto(format!("certificate is not valid DER: {e}")))?;
+    <tav_crypto::Crypto as CertificateBackend>::get_public_key(&cert)
+        .map_err(|e| Error::Crypto(format!("could not read certificate public key: {e}")))
+}
+
 /// Digest `bytes` with a COSE hash algorithm identifier.
 ///
 /// Returns `None` for algorithms this build cannot compute, so a caller

@@ -105,10 +105,108 @@ answers reliably.
 ```
 
 "The receipt signature is valid" means nothing without "valid under whose key,
-and who vouched for it". Today there is one mode, because `--scitt-keys` takes a
-raw COSE key set with no publisher signature. See
-[trust-material.md](trust-material.md) for how to obtain one and what the
-sidecar does and does not prove.
+and who vouched for it". There are two modes:
+
+| `mode` | Set by | Means |
+|---|---|---|
+| `unsigned-scitt-keys` | `--scitt-keys` | a raw COSE key set, with no publisher signature |
+| `acquired-key-set` | `--online` | fetched from the service, over a connection authenticated to its certificate |
+| `no-key-set` | `--online` | nothing was obtained: selection refused, or every fetch failed |
+
+`no-key-set` exists so an empty-handed run cannot read as a successful one.
+A run that fetched nothing has verified no receipt signature, and the mode says
+so rather than describing work that did not happen.
+
+Neither of the first two is a chain of custody. `acquired-key-set` carries the
+stronger statement of the two — somebody specific served these bytes — and its
+`limitations` still say plainly that nothing here establishes revocation,
+freshness, or anything about the statement's signer. See
+[trust-material.md](trust-material.md).
+
+## `acquisition`
+
+Present only when `--online` was used. A record from an offline run has **no
+`acquisition` key at all**, rather than an empty one: a consumer keying on the
+field's presence gets the right answer without reading its contents.
+
+```json
+"acquisition": {
+  "selected": ["contoso.confidential-ledger.azure.com"],
+  "notAttempted": null,
+  "ledgers": [
+    {
+      "issuer": "contoso.confidential-ledger.azure.com",
+      "acquired": true,
+      "provider": "azure-confidential-ledger",
+      "identityUrl": "https://identity.confidential-ledger.core.azure.com/ledgerIdentity/contoso",
+      "keysetUrl": "https://contoso.confidential-ledger.azure.com/.well-known/scitt-keys",
+      "serviceCertSha256": "d988fadd…",
+      "keysetSha256": "aae8e4d3…",
+      "serviceKeyKid": "7bbd7fa5…",
+      "acquiredAt": 1789675618,
+      "ambiguousKids": [],
+      "failure": null
+    }
+  ]
+}
+```
+
+- `selected` is what the policy authorised, after `--ledger` narrowing. Empty
+  when nothing was selected, with `notAttempted` explaining why — which
+  distinguishes "no service was allowlisted" from "no receipt named one that
+  was".
+- `ledgers` lists **every** selected service, in issuer order, whether or not
+  it answered. A block listing only successes would let a partial outage read
+  as a complete picture.
+- `failure` carries a stable `code`, the detail, and whether the fault was one
+  of configuration. Configuration faults are knowable before any packet is
+  sent, so they are usage errors rather than evidence about the service.
+- `acquiredAt` is the real clock, never the `--now` override, because `--now`
+  answers "when should this statement be judged" and writing it here would
+  record a fetch as having happened at a time it did not. A run with `--now`
+  set therefore has a `timestamp` and an `acquiredAt` that legitimately
+  disagree.
+- `ambiguousKids` names identifiers that more than one key in the served set
+  claims. It is a warning (`AcquisitionAmbiguousKid`) and not a refusal: the
+  material is usable and the service is reachable, so refusing would turn a
+  labelling mistake into an outage. It is said out loud because a `kid`
+  resolves to the first matching key, so for those identifiers the order of
+  entries in the served set — not any policy — decides which key a receipt is
+  checked against. Empty in the normal case.
+
+The digests are the auditable part: `serviceCertSha256` says which certificate
+the connection was authenticated to, and `keysetSha256` says exactly which
+bytes were used. Two runs can be compared on those without trusting either
+run's conclusion.
+
+Two code vocabularies meet here, and they are not the same list. Inside the
+`acquisition` block, `failure.code` is the acquire layer's own camelCase code
+(`transport`, `tlsAuthentication`, `serviceKeyMismatch`, …). The top-level
+`diagnostics` list restates each of those in the verifier's PascalCase
+convention with an `Acquisition` prefix — `AcquisitionTransport`,
+`AcquisitionServiceKeyMismatch` — so that one list does not carry two naming
+styles.
+
+`AcquisitionNotConfigured` has no counterpart in the block, because it is
+raised by selection rather than by a fetch: nothing was contacted, so there is
+no per-service outcome to record. It appears with `selected` empty and
+`notAttempted` giving the reason.
+
+`AcquisitionUnsupportedPlatform` is the one fetch-layer code raised before any
+connection: the TLS implementation in this build needs an x86-64 CPU with AES,
+PCLMULQDQ, BMI1, ADX, AVX and AVX2 (Intel Broadwell / AMD Excavator, 2014 or
+later), and aborts the process rather than returning an error if they are
+missing. The host is probed first so that a run on an older or
+feature-masked agent still writes a record and still exits with a code a gate
+can read. Verification itself has no such requirement — only `--online` does.
+
+## The facts document carries `acquisition` too
+
+`--facts` is the record with `relyingPartyPolicy` and `appraisal` removed, so
+it keeps `acquisition` verbatim. Provenance is an observation — which endpoint
+was asked, what it served, when — rather than a conclusion, and a reader asking
+"whose key was this checked against" would otherwise see `trust` reporting an
+acquired key set with nothing at all saying where it came from.
 
 ## A record is written on every path
 

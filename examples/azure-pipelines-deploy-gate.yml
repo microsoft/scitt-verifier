@@ -6,7 +6,8 @@
 # must use PowerShell, check `$LASTEXITCODE` explicitly.
 #
 # v0.2.0 is the first release emitting the verdicts and `.appraisal.*` record
-# shape used here; v0.1.0 emitted `verified` and a flat record. See CHANGELOG.md.
+# shape used here; v0.1.0 emitted `verified` and a flat record. `--online`,
+# mentioned in the note below, arrived in v0.4.0. See CHANGELOG.md.
 
 trigger: none
 
@@ -16,7 +17,7 @@ pool:
 variables:
   # Pin to an exact release. A deploy gate that follows a moving ref can change
   # what it enforces without a reviewed change to this file.
-  SCITT_VERIFIER_VERSION: v0.2.0
+  SCITT_VERIFIER_VERSION: v0.4.0
 
 steps:
   - checkout: self
@@ -38,6 +39,21 @@ steps:
         --policy .pipelines/policies/release-gate.json \
         --result "$(Build.ArtifactStagingDirectory)/scitt-result.json"
       code=$?
+
+      # To fetch the service keys during the run instead of committing them,
+      # replace `--scitt-keys ...` above with `--online`. The policy's `issuer`
+      # allowlist then also decides which services may be contacted; a receipt
+      # inside the statement cannot add one. The exit handling below does not
+      # change — an acquisition failure arrives as exit 3, which this gate
+      # already refuses to treat as a pass.
+
+      # Acquisition faults explain an otherwise opaque exit 3, so surface the
+      # service and reason rather than only the verdict. Silent when offline:
+      # the block is absent, and `[]?` yields nothing.
+      jq -r '.acquisition.ledgers[]? | select(.failure != null)
+             | "##vso[task.logissue type=error]key acquisition failed for " + .issuer
+               + " (" + .failure.code + "): " + .failure.detail' \
+         "$(Build.ArtifactStagingDirectory)/scitt-result.json" 2>/dev/null || true
 
       case "$code" in
         0)

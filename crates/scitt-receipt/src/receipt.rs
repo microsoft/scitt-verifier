@@ -16,6 +16,18 @@ use tav_crypto::KeyBackend;
 /// What a single receipt turned out to be.
 #[derive(Debug, Clone, Default)]
 pub struct ReceiptFacts {
+    /// Position of this receipt in the statement's receipt array.
+    ///
+    /// Carried explicitly because a receipt that cannot be evaluated is
+    /// recorded as a problem rather than as facts, so this value is *not* the
+    /// index of these facts within [`StatementFacts::receipts`]. Any caller
+    /// correlating two verification passes over the same statement must match
+    /// on this rather than on position: the two passes drop different receipts
+    /// whenever their key sets differ, and a positional match then attributes
+    /// one receipt's result to another.
+    ///
+    /// [`StatementFacts::receipts`]: crate::StatementFacts::receipts
+    pub index: usize,
     /// Issuer from the receipt's CWT claims.
     pub issuer: Option<String>,
     /// Key identifier the receipt says signed it.

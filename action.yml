@@ -1,7 +1,7 @@
 name: 'Verify SCITT transparent statement'
 description: >-
   Verify that an artifact was registered on a SCITT transparency service before
-  allowing a deployment to proceed. Runs entirely offline.
+  allowing a deployment to proceed. Runs offline unless `online` is set.
 author: 'Microsoft'
 
 branding:
@@ -16,8 +16,17 @@ inputs:
     description: >-
       Path to the transparency service signing keys (COSE_KeySet). Commit these
       to your repository so that rotating them is a reviewed change rather than
-      a silent one.
-    required: true
+      a silent one. Required unless `online` is true.
+    required: false
+    default: ''
+  online:
+    description: >-
+      Fetch the signing keys from the transparency service during the run
+      instead of reading a committed key set. The services that may be
+      contacted come from the policy's issuer allowlist, never from the
+      statement. Mutually exclusive with `scitt-keys`.
+    required: false
+    default: 'false'
   policy:
     description: 'Path to the relying-party policy document (JSON).'
     required: true
@@ -95,6 +104,7 @@ runs:
       env:
         STATEMENT: ${{ inputs.statement }}
         SCITT_KEYS: ${{ inputs.scitt-keys }}
+        ONLINE: ${{ inputs.online }}
         POLICY: ${{ inputs.policy }}
         ARTIFACT: ${{ inputs.artifact }}
         BINDING_MODE: ${{ inputs.binding-mode }}
@@ -108,12 +118,29 @@ runs:
         set +e
         set -uo pipefail
 
+        # Caught here rather than by the verifier because the operator sees
+        # action *inputs*, and a message naming CLI flags would send them
+        # looking in a file that does not mention them.
+        if [ -n "${SCITT_KEYS}" ] && [ "${ONLINE}" = "true" ]; then
+          echo "::error title=SCITT::Set either scitt-keys or online, not both."
+          exit 1
+        fi
+        if [ -z "${SCITT_KEYS}" ] && [ "${ONLINE}" != "true" ]; then
+          echo "::error title=SCITT::Set scitt-keys to a committed key set, or online: true to fetch from the services your policy allowlists."
+          exit 1
+        fi
+
         args=(verify
               --statement "${STATEMENT}"
-              --scitt-keys "${SCITT_KEYS}"
               --policy "${POLICY}"
               --result "${RESULT}"
               --format text)
+
+        if [ "${ONLINE}" = "true" ]; then
+          args+=(--online)
+        else
+          args+=(--scitt-keys "${SCITT_KEYS}")
+        fi
 
         if [ -n "${ARTIFACT}" ]; then
           args+=(--artifact "${ARTIFACT}" --binding-mode "${BINDING_MODE}")
@@ -135,6 +162,12 @@ runs:
         # render the code and message rather than concatenating a bare string.
         if [ -f "${RESULT}" ]; then
           jq -r '.appraisal.notChecked[]? | "::notice title=Not checked (" + .code + ")::" + .message' "${RESULT}" || true
+          # An acquisition fault is the *cause*; the verdict is the consequence.
+          # Surfaced separately so the operator sees which service failed and
+          # why, rather than only "could not be completed".
+          jq -r '.acquisition.ledgers[]? | select(.failure != null)
+                 | "::error title=SCITT key acquisition (" + .failure.code + ")::"
+                   + .issuer + ": " + .failure.detail' "${RESULT}" || true
           jq -r 'select(.appraisal.primaryDiagnostic != null)
                  | "::error title=SCITT " + .appraisal.primaryDiagnostic.code + "::"
                    + .appraisal.primaryDiagnostic.message + " — " + .appraisal.primaryDiagnostic.action' \

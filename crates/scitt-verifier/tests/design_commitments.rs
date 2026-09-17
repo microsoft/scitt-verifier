@@ -7,6 +7,7 @@
 //! a whole-program property instead, and so cannot be established by any
 //! number of example runs.
 
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 fn repo_root() -> PathBuf {
@@ -45,13 +46,85 @@ const NETWORK_CRATES: &[&str] = &[
     "tungstenite",
 ];
 
+/// The one crate allowed to reach the network, and the only door into it.
+const ACQUIRE: &str = "scitt-acquire";
+
+/// The crates that decide whether a statement is trustworthy.
+///
+/// Nothing here may reach the network on any path, under any feature. A
+/// verdict that depends on a socket is a verdict that can be changed by
+/// whoever controls the socket.
+const CORE: &[&str] = &["scitt-receipt", "scitt-policy"];
+
 const SOCKET_APIS: &[&str] = &["std::net", "TcpStream", "TcpListener", "UdpSocket"];
 
-fn network_crates_in(lock: &str) -> Vec<&'static str> {
+/// Every package in `Cargo.lock`, mapped to the packages it depends on.
+///
+/// The lockfile over-approximates: it records dependencies that some feature
+/// combination could enable, including ones no build of this workspace ever
+/// compiles. That is the right bias here. A commitment tested against an
+/// over-approximation fails early and loudly; one tested against the exact
+/// current build would pass until someone flipped a feature.
+fn dependency_graph(lock: &str) -> HashMap<String, Vec<String>> {
+    let mut graph = HashMap::new();
+    for block in lock.split("[[package]]") {
+        let Some(name) = field(block, "name") else {
+            continue;
+        };
+        let deps = match block.split_once("dependencies = [") {
+            Some((_, rest)) => rest
+                .split_once(']')
+                .map(|(list, _)| list)
+                .unwrap_or("")
+                .lines()
+                .filter_map(|l| {
+                    let t = l.trim().trim_matches(|c| c == '"' || c == ',');
+                    // Entries are `"name"` or `"name version"`; the version is
+                    // a disambiguator, and the edge is to the name either way.
+                    t.split_whitespace().next().map(str::to_string)
+                })
+                .filter(|s| !s.is_empty())
+                .collect(),
+            None => Vec::new(),
+        };
+        graph.insert(name, deps);
+    }
+    graph
+}
+
+fn field(block: &str, key: &str) -> Option<String> {
+    block.lines().find_map(|l| {
+        l.trim()
+            .strip_prefix(&format!("{key} = \""))?
+            .strip_suffix('"')
+            .map(str::to_string)
+    })
+}
+
+/// Everything reachable from `roots`, never entering any package in `stop`.
+fn reachable(
+    graph: &HashMap<String, Vec<String>>,
+    roots: &[&str],
+    stop: &[&str],
+) -> BTreeSet<String> {
+    let mut seen = BTreeSet::new();
+    let mut queue: Vec<String> = roots.iter().map(|r| r.to_string()).collect();
+    while let Some(pkg) = queue.pop() {
+        if stop.contains(&pkg.as_str()) || !seen.insert(pkg.clone()) {
+            continue;
+        }
+        if let Some(deps) = graph.get(&pkg) {
+            queue.extend(deps.iter().cloned());
+        }
+    }
+    seen
+}
+
+fn network_crates_among(pkgs: &BTreeSet<String>) -> Vec<&'static str> {
     NETWORK_CRATES
         .iter()
         .copied()
-        .filter(|c| lock.contains(&format!("name = \"{c}\"")))
+        .filter(|c| pkgs.contains(*c))
         .collect()
 }
 
@@ -63,16 +136,86 @@ fn socket_apis_in(body: &str) -> Vec<&'static str> {
         .collect()
 }
 
-#[test]
-fn offline_by_default_is_enforced_by_the_dependency_graph() {
+fn graph() -> HashMap<String, Vec<String>> {
     let lock = std::fs::read_to_string(repo_root().join("Cargo.lock")).expect("read Cargo.lock");
-    let found = network_crates_in(&lock);
+    let g = dependency_graph(&lock);
+    // A parser that silently matched nothing would make every assertion below
+    // vacuously true, which is the one way this file could fail at its job
+    // without anyone noticing.
+    for pkg in CORE.iter().chain([ACQUIRE, "scitt-verifier"].iter()) {
+        assert!(
+            g.contains_key(*pkg),
+            "did not find {pkg} in Cargo.lock; the parser is not reading the file it thinks it is"
+        );
+    }
+    g
+}
 
+/// The crates that produce a verdict cannot reach the network at all.
+///
+/// This is narrower than the commitment this file used to test, which was that
+/// no network crate appeared anywhere in the lockfile. That test could not
+/// survive `--online` existing, and relaxing it was a reviewed decision rather
+/// than a convenience: see docs/architecture.md.
+///
+/// What replaces it is more precise, not merely more permissive. Presence in a
+/// lockfile was always a proxy — it flagged optional dependencies that are
+/// never compiled, and it would have flagged a crate added under a dev-only
+/// dependency of an unrelated package. Reachability is the property actually
+/// claimed, and it is now checked directly, from named roots.
+#[test]
+fn the_deciding_crates_cannot_reach_the_network() {
+    let found = network_crates_among(&reachable(&graph(), CORE, &[]));
     assert!(
         found.is_empty(),
-        "the tool claims to be offline by default, but the dependency graph now contains {found:?}. \
-         Either the claim is false or the dependency is unnecessary; the README says the former is \
-         not an option."
+        "{CORE:?} decide whether a statement is trusted, and must not depend on anything \
+         that opens a socket, but they now reach {found:?}. A verdict that depends on the \
+         network is a verdict someone else can change."
+    );
+}
+
+/// Networking enters this tool through exactly one named door.
+///
+/// Without this, `--online` would be indistinguishable from the whole tool
+/// having quietly become a network client: any future dependency could add a
+/// socket anywhere and the tree would look the same.
+#[test]
+fn networking_reaches_the_cli_only_through_the_acquisition_crate() {
+    let found = network_crates_among(&reachable(&graph(), &["scitt-verifier"], &[ACQUIRE]));
+    assert!(
+        found.is_empty(),
+        "networking must reach the CLI only through {ACQUIRE}, but {found:?} is reachable \
+         without going through it. Route the dependency through {ACQUIRE}, or drop it."
+    );
+}
+
+/// The acquisition crate does not get to decide anything.
+///
+/// It fetches bytes; the core decides what they mean. If it ever depended on
+/// the policy engine it would be in a position to form its own opinion, and
+/// the guarantee that verdicts come from one place would stop being structural.
+#[test]
+fn the_acquisition_crate_cannot_form_a_verdict() {
+    let reach = reachable(&graph(), &[ACQUIRE], &[]);
+    assert!(
+        !reach.contains("scitt-policy"),
+        "{ACQUIRE} must not depend on the policy engine: fetching trust material and \
+         judging it are separate jobs, and only the second may produce a verdict."
+    );
+}
+
+#[test]
+fn offline_remains_the_default_shape_of_a_run() {
+    // The lockfile cannot show this: it is a property of the argument parser.
+    // Named here so the commitment has a home next to the others it belongs
+    // with, and tested where the behaviour is, in acceptance.rs.
+    let usage =
+        std::fs::read_to_string(repo_root().join("crates/scitt-verifier/src").join("cli.rs"))
+            .expect("read cli.rs");
+    assert!(
+        usage.contains("Verification is offline unless --online is passed"),
+        "the help text must say plainly that a run makes no network request unless asked, \
+         because a user who does not know that cannot audit it."
     );
 }
 
@@ -103,9 +246,49 @@ fn no_source_file_reaches_for_a_socket() {
 /// detection works. These pin the detectors themselves against known-bad input.
 #[test]
 fn the_detectors_actually_detect() {
-    let poisoned = "[[package]]\nname = \"scitt-receipt\"\n\n[[package]]\nname = \"reqwest\"\n";
-    assert_eq!(network_crates_in(poisoned), vec!["reqwest"]);
-    assert!(network_crates_in("[[package]]\nname = \"sha2\"\n").is_empty());
+    // A lockfile where the core reaches a network crate, and one where the
+    // same crate is present but only behind the acquisition door. The second
+    // is the case the old presence check could not tell from the first, and
+    // the whole reason this detector had to change shape.
+    let poisoned = "[[package]]\nname = \"scitt-receipt\"\ndependencies = [\n \"reqwest\",\n]\n\
+                    \n[[package]]\nname = \"reqwest\"\n";
+    let g = dependency_graph(poisoned);
+    assert_eq!(
+        network_crates_among(&reachable(&g, &["scitt-receipt"], &[])),
+        vec!["reqwest"]
+    );
+
+    let walled =
+        "[[package]]\nname = \"scitt-verifier\"\ndependencies = [\n \"scitt-acquire\",\n]\n\
+                  \n[[package]]\nname = \"scitt-acquire\"\ndependencies = [\n \"ureq\",\n]\n\
+                  \n[[package]]\nname = \"ureq\"\n";
+    let g = dependency_graph(walled);
+    assert!(
+        network_crates_among(&reachable(&g, &["scitt-verifier"], &[ACQUIRE])).is_empty(),
+        "a network crate reachable only through the acquisition crate must pass"
+    );
+    assert_eq!(
+        network_crates_among(&reachable(&g, &["scitt-verifier"], &[])),
+        vec!["ureq"],
+        "without the stop set the same graph must still show the crate, or the \
+         walled-off case above is passing because the walk found nothing at all"
+    );
+
+    // A version-qualified edge is the same edge. Missing this would let any
+    // duplicated dependency slip the walk.
+    let versioned = "[[package]]\nname = \"a\"\ndependencies = [\n \"ureq 3.0.0\",\n]\n\
+                     \n[[package]]\nname = \"ureq\"\n";
+    assert_eq!(
+        network_crates_among(&reachable(&dependency_graph(versioned), &["a"], &[])),
+        vec!["ureq"]
+    );
+
+    assert!(network_crates_among(&reachable(
+        &dependency_graph("[[package]]\nname = \"sha2\"\n"),
+        &["sha2"],
+        &[]
+    ))
+    .is_empty());
 
     assert_eq!(
         socket_apis_in("let s = std::net::TcpStream::connect(addr)?;"),

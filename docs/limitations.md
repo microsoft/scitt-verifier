@@ -119,21 +119,44 @@ records the result in a provenance sidecar. See
 That sidecar is a record for reviewers, not a proof: anyone who can edit the key
 set can edit the sidecar. The verifier cannot re-check any of it offline.
 
+`--online` moves that binding to verification time: the key set is fetched over
+a connection authenticated to the service certificate, and the service's own key
+must be present in what it serves. That is a stronger statement about *who
+served the bytes* and no statement at all about revocation, freshness, or the
+signer. A key withdrawn an hour ago still verifies, and a service replaying an
+old key set is indistinguishable from one serving its current one.
+
 *Recommended practice:* commit the key set to your repository so that rotating
 it is a reviewed pull request with an audit trail, rather than a file that
-appears on a build agent.
+appears on a build agent. Where that cadence cannot keep up with rotation, use
+`--online` with `--save-trust` so the material a run actually used is still
+captured as evidence.
 
 To require a particular transparency service, use the `issuer` assertion in your
 policy document. That is a relying-party rule, so it belongs in the artifact you
 version and review rather than in a command line, where dropping it leaves no
 trace. A receipt from a different service is signed by that service's key and so
-fails receipt verification here regardless.
+fails receipt verification here regardless. Under `--online` the same assertion
+does double duty: it is also the allowlist of services the tool may contact.
+
+### Revocation, under `--online` too
+
+*Reported at runtime:* code `AcquisitionServiceKeyMismatch` covers a service
+that fails to serve its own key; nothing covers a key that was withdrawn.
+
+Fetching a key set live looks like it should solve revocation and does not.
+The key sets these services publish carry no revocation status, so a key removed
+from the set simply stops appearing — which a verifier sees as an unknown `kid`,
+indistinguishable from a rotation it has not caught up with. There is no
+mechanism here for "this key existed and must no longer be honoured".
 
 ## Deliberate non-goals
 
 **Fetching statements from a service.** This tool verifies bytes you already
-have. Retrieval belongs in whatever already knows your service topology, and
-keeping it out is what makes the verifier auditable and offline.
+have. `--online` fetches *keys*, never statements or receipts: the evidence
+being judged is always input you supplied, so what is being checked cannot be
+chosen by the network. Retrieval of statements belongs in whatever already knows
+your service topology.
 
 **Deciding what is trustworthy.** The tool reports facts and evaluates *your*
 policy. It ships no default policy, because a default would be a trust decision

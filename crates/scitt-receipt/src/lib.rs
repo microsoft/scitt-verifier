@@ -58,8 +58,8 @@ pub use receipt::{
     ReceiptFacts, ReceiptSummary,
 };
 pub use statement::{
-    describe_certificate, digest_with, render_scalar, sha256_hex, CertificateSummary, CwtClaims,
-    Sign1,
+    describe_certificate, digest_with, render_scalar, sha256_hex, spki_from_certificate_der,
+    CertificateSummary, CwtClaims, Sign1,
 };
 
 /// Re-exported so consumers can walk headers without depending on `tav-cose`
@@ -188,7 +188,12 @@ pub fn verify_statement(statement_bytes: &[u8], key_set: &LedgerKeySet) -> Resul
     let mut receipts = Vec::new();
     for (index, blob) in receipt_blobs.iter().enumerate() {
         match verify_receipt(blob, &statement, key_set) {
-            Ok(facts) => receipts.push(facts),
+            Ok(mut facts) => {
+                // Stamped here because this is the only place that knows where
+                // the blob sat in the envelope.
+                facts.index = index;
+                receipts.push(facts)
+            }
             // One unverifiable receipt must not hide a verifiable one, so the
             // failure is recorded and the loop continues.
             Err(e) => problems.push(format!("receipt[{index}] could not be evaluated: {e}")),

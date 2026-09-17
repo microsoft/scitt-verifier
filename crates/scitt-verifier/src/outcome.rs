@@ -290,9 +290,64 @@ impl Trust {
         }
     }
 
-    pub fn describe(&self) -> &'static str {
-        "unsigned SCITT key set"
+    /// Trust material fetched live from the service that issued the receipts.
+    ///
+    /// A fetch establishes who served the keys, over a connection authenticated
+    /// to the service's own certificate. It is deliberately not described as
+    /// stronger than that. The keys still carry no publisher signature; the
+    /// service is still the sole authority on its own key history; and a live
+    /// answer is not a fresh one, because nothing in the response says when it
+    /// was produced or that it is the latest.
+    pub fn acquired_key_set() -> Self {
+        let limitations = vec![
+            "the key set carries no publisher signature",
+            "no revocation status is published, so a withdrawn key cannot be recognised",
+            "no anti-rollback protection: the service is trusted to serve its current keys",
+            "a successful fetch proves who served the keys, not that the statement's signer is trustworthy",
+        ];
+        Self {
+            mode: "acquired-key-set",
+            limitations,
+        }
     }
+
+    /// An online run that obtained nothing: selection refused, or every fetch
+    /// failed. Reported separately from `acquired_key_set` because describing
+    /// an empty-handed run as having acquired a key set is a claim about work
+    /// that did not happen — and a reader who believes it looks for the cause
+    /// in the wrong place, or does not look at all.
+    pub fn no_key_set() -> Self {
+        Self {
+            mode: "no-key-set",
+            limitations: vec!["no key set was obtained, so no receipt signature could be checked"],
+        }
+    }
+
+    pub fn describe(&self) -> &'static str {
+        match self.mode {
+            "acquired-key-set" => "key set acquired from the transparency service",
+            "no-key-set" => "none — no key set was obtained",
+            _ => "unsigned SCITT key set",
+        }
+    }
+}
+
+/// What online mode did, recorded whether or not it worked.
+///
+/// Kept whole rather than reduced to a pass/fail flag because the value of an
+/// acquisition to an auditor is the provenance, not the outcome: which service
+/// was asked, over a connection authenticated to what certificate, and what
+/// exactly it served. A run that failed to fetch has to be able to say which
+/// ledger it could not reach and why, or the record cannot distinguish an
+/// outage from a ledger nobody was willing to talk to.
+#[derive(Clone)]
+pub struct Acquisition {
+    /// The issuers selection authorised, in request order.
+    pub selected: Vec<String>,
+    pub acquired: Vec<scitt_acquire::Acquired>,
+    pub failed: Vec<scitt_acquire::Failed>,
+    /// Set when selection stopped before any request was made, with the reason.
+    pub not_attempted: Option<String>,
 }
 
 /// Everything one run of `verify` established, and everything it did not.
@@ -306,6 +361,8 @@ pub struct Assessment {
     pub facts: Option<StatementFacts>,
     pub decision: Option<PolicyDecision>,
     pub binding: BindingResult,
+    /// How the trust material was fetched, when it was fetched at all.
+    pub acquisition: Option<Acquisition>,
 }
 
 impl Assessment {
@@ -331,6 +388,7 @@ impl Assessment {
             facts: None,
             decision: None,
             binding: BindingResult::not_requested(),
+            acquisition: None,
         }
     }
 }

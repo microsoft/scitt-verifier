@@ -1,6 +1,6 @@
 # scitt-verifier
 
-A small, offline command-line tool that answers one question:
+A small, offline-by-default command-line tool that answers one question:
 
 > **Was this artifact registered on a transparency service, and does the receipt
 > actually describe the thing I am about to deploy?**
@@ -92,11 +92,15 @@ Questions it does **not** answer, and will not pretend to:
   a scanner. A malicious build that was properly registered passes.
 - **Is the signer trustworthy?** It proves *which* key signed, not that the key
   belongs to who you think. The certificate chain is not validated.
-- **Has this been revoked, or is it too old to trust?** The tool is offline and
-  will not guess. Age is only checked if your policy asks.
-- **Are my trust keys legitimate?** It uses the key file you hand it. Where that
-  file came from is your responsibility — which is why the output labels it an
-  *unsigned* SCITT key set.
+- **Has this been revoked, or is it too old to trust?** No — and `--online` does
+  not change that. The key sets these services publish carry no revocation
+  status, so a withdrawn key is indistinguishable from a rotation you have not
+  caught up with. Age is only checked if your policy asks.
+- **Are my trust keys legitimate?** Offline, it uses the key file you hand it,
+  and where that file came from is your responsibility — which is why the output
+  labels it an *unsigned* SCITT key set. With `--online` it fetches them from the
+  services your policy allowlists, which establishes who served the bytes and
+  nothing more.
 
 In one line: it answers **"is this the thing that was recorded, and does it meet
 my rules?"** — never "is this thing safe?"
@@ -108,10 +112,12 @@ fails if they erode — mostly in
 [`crates/scitt-verifier/tests/`](crates/scitt-verifier/tests/). The exception is
 noted where it appears.
 
-- **Offline by default.** Verification never opens a socket. The trust material is
-an input you commit to your repository. A gate that phones home is a gate that
-fails during an outage, and one that can be steered by whoever controls the
-network.
+- **Offline by default.** A run opens no socket unless you pass `--online`, and
+the verification core cannot open one at all — the networking code is in a
+separate crate that the core does not depend on, which a test proves by walking
+the dependency graph. The default trust material is an input you commit to your
+repository. A gate that phones home by default is a gate that fails during an
+outage, and one that can be steered by whoever controls the network.
 - **No prerequisites.** A single static binary. No runtime to install on the build
 agent, and nothing that changes behaviour when the agent image is updated.
 *This one is enforced by the release pipeline rather than by a test:* the
@@ -202,7 +208,7 @@ crates.io does not permit git dependencies. See [docs/distribution.md](docs/dist
 GitHub Actions:
 
 ```yaml
-- uses: microsoft/scitt-verifier@v0.3.0
+- uses: microsoft/scitt-verifier@v0.4.0
   with:
     statement: sbom.spdx.json.cose
     artifact: sbom.spdx.json
@@ -221,9 +227,9 @@ Full examples live in [`examples/`](examples/).
 
 ## Obtaining the transparency service keys
 
-`--scitt-keys` takes the service's signing keys as a COSE_Key_Set. The verifier
-never fetches them: acquisition is a separate, occasional step whose output you
-commit and review.
+`--scitt-keys` takes the service's signing keys as a COSE_Key_Set. On this path
+the verifier never fetches anything: acquisition is a separate, occasional step
+whose output you commit and review.
 
 ```console
 pip install cryptography cbor2
@@ -237,6 +243,20 @@ service, requires the service's own key to appear in the key set it serves, and
 writes a provenance sidecar so the key set is reviewable in a pull request. It
 needs no credentials. It refuses to run in CI unless you declare it a scheduled
 rotation job.
+
+### Or fetch them at verification time
+
+When committing a key set cannot keep up with rotation, `--online` fetches it
+during the run instead:
+
+```console
+scitt-verifier verify --statement sbom.spdx.json.cose --policy release-gate.json --online
+```
+
+The policy's `issuer` allowlist decides which services may be contacted. A
+statement cannot introduce one: receipts sit in an unsigned header, so a receipt
+naming a service your policy does not accept produces no request at all. Add
+`--save-trust <DIR>` to keep what was fetched as evidence, replayable offline.
 
 See [docs/trust-material.md](docs/trust-material.md), including the
 rotation-as-a-pull-request pattern and support for self-hosted ledgers.
@@ -269,6 +289,7 @@ See [docs/policy.md](docs/policy.md) for the full assertion reference.
 ```
 crates/scitt-receipt    Verification core. No I/O, no clock, no verdicts.
 crates/scitt-policy     Relying-party policy evaluation.
+crates/scitt-acquire    Key acquisition over the network. The only crate that has a socket.
 crates/scitt-verifier   The CLI.
 corpus/                 Conformance fixtures and example policies.
 action.yml              Composite GitHub Action.

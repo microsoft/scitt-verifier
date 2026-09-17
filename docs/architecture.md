@@ -16,13 +16,61 @@
         │  assertions over facts │   no I/O · no clock (now is a parameter)
         └───────────┬────────────┘
                     │ PolicyDecision
-        ┌───────────▼────────────┐
-        │    scitt-verifier      │   files, terminals, exit codes
-        │  CLI · evidence · exit │
-        └────────────────────────┘
+        ┌───────────▼────────────┐        ┌──────────────────────┐
+        │    scitt-verifier      │◀───────│    scitt-acquire     │
+        │  CLI · evidence · exit │  keys  │  the only socket     │
+        └────────────────────────┘        │  --online only       │
+                                          └──────────────────────┘
 ```
 
-Everything above the bottom box could run in a browser.
+Everything above the bottom row could run in a browser.
+
+## Where the network is, and is not
+
+`--online` fetches signing keys from the transparency service that issued a
+receipt. That is one crate, `scitt-acquire`, and it is the only place in the
+tree that can open a socket.
+
+The arrow points one way on purpose. `scitt-acquire` produces key material and
+nothing else: it does not see the policy, does not evaluate assertions, and
+cannot produce a verdict. Verification runs afterwards, in the same core crates
+that run offline, over the same `StatementFacts`. A run with `--online` and a
+run with `--scitt-keys` reach the decision by identical code; they differ only
+in where the bytes came from.
+
+Three properties hold structurally rather than by convention, and
+`tests/design_commitments.rs` walks the dependency graph to prove each one:
+
+- `scitt-receipt` and `scitt-policy` cannot reach a network crate on any path.
+  A verdict that depended on a socket could be changed by whoever controls the
+  socket.
+- Networking reaches the CLI only through `scitt-acquire`. Without this,
+  `--online` would be indistinguishable from the whole tool having quietly
+  become a network client.
+- `scitt-acquire` does not depend on `scitt-policy`. Fetching trust material
+  and judging it are separate jobs, and only the second may reach a conclusion.
+
+That test used to assert something blunter: that no network crate appeared
+anywhere in `Cargo.lock`. It could not survive `--online` existing, and
+replacing it was a reviewed decision rather than a convenience. What replaced
+it is more precise, not merely more permissive. Lockfile presence was always a
+proxy — it flagged optional dependencies that are never compiled, and would
+have flagged a crate pulled in by a dev-dependency of an unrelated package.
+Reachability from named roots is the property actually claimed, and is now
+checked directly.
+
+### What a fetch establishes
+
+Only that the service serving the keys is the one that authenticated the
+connection, and that the key set it served contains the key that certificate
+binds to. The check is on key material, not on `kid` text: a service that
+returned a key set omitting its own signing key is rejected rather than
+believed.
+
+It does not establish that a key is unrevoked, that the set is current, that
+the receipt was honestly issued, or anything at all about whoever signed the
+statement. `--online` removes the chore of distributing a key set. It does not
+convert a transparency service into a trusted authority.
 
 ## Why the core is separate
 
@@ -142,6 +190,31 @@ what its Issuer signed.
 
 Where a single receipt carries multiple inclusion proofs, only the first is
 evaluated and the evidence says so.
+
+### Keys from one service never verify another's receipt
+
+Online mode makes this concrete. A statement may carry receipts from several
+services, and a policy may allowlist several. The keys are never merged into
+one pool.
+
+Instead, each acquired key set is handed to its own verification pass, and a
+receipt's result is taken only from the pass belonging to the service that
+receipt names. Two services publishing the same `kid` cannot stand in for one
+another, because the receipt naming service A is never shown service B's keys
+at all — there is no lookup to confuse, rather than a lookup that has to be
+careful.
+
+The matching is done on the issuer recorded in each receipt's own facts, not on
+its position in the envelope. Receipts that fail to parse are absent from the
+facts while still present in the file, so the two sequences drift apart exactly
+when a malformed blob has been appended — which is precisely when attributing
+one receipt's keys to another would matter most.
+
+A receipt whose service was not selected, or could not be reached, is reported
+as never consulted: `key lookup (not attempted)`, with the reason. It is not
+reported as an unknown key. Saying otherwise would describe a deliberate
+scoping decision as a gap in the trust material, and send an operator looking
+for a key rotation that never happened.
 
 ## Tri-state, not boolean
 
