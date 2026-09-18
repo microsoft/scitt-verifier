@@ -43,6 +43,7 @@
 pub mod binding;
 pub mod cbor;
 pub mod der;
+pub mod didx509;
 pub mod error;
 pub mod external;
 pub mod keys;

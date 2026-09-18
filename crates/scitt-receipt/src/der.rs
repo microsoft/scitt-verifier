@@ -163,6 +163,201 @@ pub fn parse_eku_oids(value: &[u8]) -> Vec<String> {
     oids
 }
 
+/// The `notBefore` and `notAfter` of a certificate, as Unix seconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Validity {
+    pub not_before: i64,
+    pub not_after: i64,
+}
+
+/// Read the validity window out of a DER certificate.
+///
+/// The crypto backend offers `is_valid_at`, a predicate, but not the window
+/// itself. A predicate alone cannot answer "is there *any* instant at which
+/// this whole path was simultaneously valid", and that question is what lets
+/// path structure be judged separately from expiry — the separation MST makes
+/// by disabling time entirely, and that this crate makes explicit instead.
+///
+/// Unlike [`parse_eku_oids`], a malformed input is an error rather than an
+/// empty answer. This value gates a check, and a certificate whose validity
+/// cannot be read must not silently become one that is valid forever.
+pub fn parse_validity(der: &[u8]) -> Result<Validity> {
+    let malformed = || Error::TrustMaterial("certificate validity could not be read".into());
+
+    // Certificate ::= SEQUENCE { tbsCertificate, signatureAlgorithm, signature }
+    let (0x30, certificate, _) = read_tlv(der).ok_or_else(malformed)? else {
+        return Err(malformed());
+    };
+    let (0x30, tbs, _) = read_tlv(certificate).ok_or_else(malformed)? else {
+        return Err(malformed());
+    };
+
+    // TBSCertificate ::= SEQUENCE {
+    //     version [0] EXPLICIT DEFAULT v1, serialNumber INTEGER,
+    //     signature AlgorithmIdentifier, issuer Name, validity Validity, ... }
+    //
+    // `version` is absent in a v1 certificate, so it is skipped by tag rather
+    // than by position; counting fields blindly reads `issuer` as `validity`.
+    let mut rest = tbs;
+    if let Some((0xA0, _, remainder)) = read_tlv(rest) {
+        rest = remainder;
+    }
+    // serialNumber, then the AlgorithmIdentifier and Name that precede validity.
+    for expected in [0x02u8, 0x30, 0x30] {
+        let (tag, _, remainder) = read_tlv(rest).ok_or_else(malformed)?;
+        if tag != expected {
+            return Err(malformed());
+        }
+        rest = remainder;
+    }
+
+    let (0x30, validity, _) = read_tlv(rest).ok_or_else(malformed)? else {
+        return Err(malformed());
+    };
+    let (not_before_tag, not_before, after) = read_tlv(validity).ok_or_else(malformed)?;
+    let (not_after_tag, not_after, _) = read_tlv(after).ok_or_else(malformed)?;
+
+    Ok(Validity {
+        not_before: parse_time(not_before_tag, not_before).ok_or_else(malformed)?,
+        not_after: parse_time(not_after_tag, not_after).ok_or_else(malformed)?,
+    })
+}
+
+/// Decode an X.509 `Time`, which is a CHOICE of two encodings.
+///
+/// UTCTime carries a two-digit year, and RFC 5280 §4.1.2.5.1 fixes the pivot:
+/// 50 and above mean 19xx, below 50 means 20xx. Guessing the other way turns a
+/// certificate that expired in 1998 into one valid until 2098.
+fn parse_time(tag: u8, contents: &[u8]) -> Option<i64> {
+    let text = core::str::from_utf8(contents).ok()?;
+    let (year, rest) = match tag {
+        // UTCTime: YYMMDDHHMMSSZ
+        0x17 => {
+            let yy: i64 = text.get(..2)?.parse().ok()?;
+            (if yy >= 50 { 1900 + yy } else { 2000 + yy }, text.get(2..)?)
+        }
+        // GeneralizedTime: YYYYMMDDHHMMSSZ
+        0x18 => (text.get(..4)?.parse().ok()?, text.get(4..)?),
+        _ => return None,
+    };
+
+    // Seconds are optional in GeneralizedTime, and fractional seconds and
+    // non-`Z` offsets are not accepted: a certificate using them is reported
+    // as unreadable rather than silently placed in the wrong century.
+    if !rest.ends_with('Z') {
+        return None;
+    }
+    let digits = &rest[..rest.len() - 1];
+    if digits.len() != 10 && digits.len() != 8 {
+        return None;
+    }
+    if !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let field = |i: usize| -> Option<i64> { digits.get(i..i + 2)?.parse().ok() };
+    let (month, day, hour, minute) = (field(0)?, field(2)?, field(4)?, field(6)?);
+    let second = if digits.len() == 10 { field(8)? } else { 0 };
+
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    // 60 is a leap second, which is legal in the encoding.
+    if hour > 23 || minute > 59 || second > 60 {
+        return None;
+    }
+
+    Some(days_from_civil(year, month, day) * 86_400 + hour * 3_600 + minute * 60 + second)
+}
+
+/// Days since 1970-01-01 for a proleptic Gregorian date.
+///
+/// Howard Hinnant's `days_from_civil`. Written out rather than pulled from a
+/// date crate because the core is forbidden to depend on a clock, and every
+/// such crate brings one along.
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = year - i64::from(month <= 2);
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+/// Decode an X.509 `Name` into `(key, value)` attribute pairs.
+///
+/// Keys use the RFC 4514 short label where did:x509 defines one, and the
+/// dotted OID otherwise, which is exactly the shape the `subject` predicate
+/// matches against.
+///
+/// This reads the DER rather than re-parsing a rendered RFC 4514 string.
+/// Rendering is lossy in the direction that matters: a value containing `,`
+/// or `+` is escaped on the way out, and splitting the rendered form back on
+/// those characters turns one attribute into two. Comparing structure avoids
+/// inventing an unescaping rule that has to agree exactly with whatever
+/// produced the string.
+///
+/// Attributes whose value is not a UTF-8-compatible string type are skipped;
+/// a predicate naming one simply fails to match, which is the safe direction.
+pub fn parse_name_attributes(name_der: &[u8]) -> Vec<(String, String)> {
+    // Name ::= RDNSequence ::= SEQUENCE OF RelativeDistinguishedName
+    // RelativeDistinguishedName ::= SET OF AttributeTypeAndValue
+    // AttributeTypeAndValue ::= SEQUENCE { type OBJECT IDENTIFIER, value ANY }
+    let Some((0x30, rdn_sequence, _)) = read_tlv(name_der) else {
+        return Vec::new();
+    };
+
+    let mut attributes = Vec::new();
+    let mut rdns = rdn_sequence;
+    while let Some((tag, rdn, remainder)) = read_tlv(rdns) {
+        rdns = remainder;
+        if tag != 0x31 {
+            continue;
+        }
+        let mut pairs = rdn;
+        while let Some((pair_tag, pair, pair_remainder)) = read_tlv(pairs) {
+            pairs = pair_remainder;
+            if pair_tag != 0x30 {
+                continue;
+            }
+            let Some((0x06, oid_bytes, after_oid)) = read_tlv(pair) else {
+                continue;
+            };
+            let Some(oid) = decode_oid(oid_bytes) else {
+                continue;
+            };
+            let Some((value_tag, value_bytes, _)) = read_tlv(after_oid) else {
+                continue;
+            };
+            // PrintableString, UTF8String, IA5String, T61String. BMPString and
+            // UniversalString are wide encodings and are left out rather than
+            // mangled into something that might accidentally compare equal.
+            if !matches!(value_tag, 0x13 | 0x0C | 0x16 | 0x14) {
+                continue;
+            }
+            let Ok(value) = core::str::from_utf8(value_bytes) else {
+                continue;
+            };
+            attributes.push((name_label(&oid), value.to_string()));
+        }
+    }
+    attributes
+}
+
+/// RFC 4514 short labels for the attribute types did:x509 names.
+fn name_label(oid: &str) -> String {
+    match oid {
+        "2.5.4.3" => "CN",
+        "2.5.4.6" => "C",
+        "2.5.4.7" => "L",
+        "2.5.4.8" => "ST",
+        "2.5.4.9" => "STREET",
+        "2.5.4.10" => "O",
+        "2.5.4.11" => "OU",
+        other => return other.to_string(),
+    }
+    .to_string()
+}
+
 /// Split one DER TLV, returning `(tag, contents, remainder)`.
 fn read_tlv(bytes: &[u8]) -> Option<(u8, &[u8], &[u8])> {
     let tag = *bytes.first()?;
@@ -287,6 +482,75 @@ mod eku_tests {
         assert_eq!(decode_oid(&[0x06]).unwrap(), "0.6");
         assert_eq!(decode_oid(&[0x2A]).unwrap(), "1.2");
         assert_eq!(decode_oid(&[0x55]).unwrap(), "2.5");
+    }
+}
+
+#[cfg(test)]
+mod validity_tests {
+    use super::*;
+
+    #[test]
+    fn days_from_civil_anchors_at_the_epoch() {
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
+        assert_eq!(days_from_civil(1969, 12, 31), -1);
+        assert_eq!(days_from_civil(2000, 3, 1), 11017);
+    }
+
+    /// 2000 is a leap year and 1900 is not; the era arithmetic is what gets
+    /// this right, and an off-by-one day here shifts every expiry check.
+    #[test]
+    fn days_from_civil_handles_the_century_leap_rule() {
+        assert_eq!(
+            days_from_civil(2000, 3, 1) - days_from_civil(2000, 2, 28),
+            2
+        );
+        assert_eq!(
+            days_from_civil(1900, 3, 1) - days_from_civil(1900, 2, 28),
+            1
+        );
+    }
+
+    #[test]
+    fn utctime_decodes() {
+        // 2026-04-23T00:00:00Z
+        assert_eq!(parse_time(0x17, b"260423000000Z").unwrap(), 1776902400);
+    }
+
+    /// RFC 5280 §4.1.2.5.1: two-digit years of 50 and above are 19xx.
+    #[test]
+    fn utctime_year_pivots_at_fifty() {
+        let y1999 = parse_time(0x17, b"991231235959Z").unwrap();
+        let y2000 = parse_time(0x17, b"000101000000Z").unwrap();
+        assert!(y1999 < y2000, "99 must mean 1999, not 2099");
+        assert_eq!(y2000 - y1999, 1);
+    }
+
+    #[test]
+    fn generalizedtime_decodes_with_and_without_seconds() {
+        assert_eq!(parse_time(0x18, b"20260423000000Z").unwrap(), 1776902400);
+        assert_eq!(parse_time(0x18, b"202604230000Z").unwrap(), 1776902400);
+    }
+
+    #[test]
+    fn unsupported_or_malformed_times_are_rejected() {
+        // Neither UTCTime nor GeneralizedTime.
+        assert_eq!(parse_time(0x04, b"260423000000Z"), None);
+        // A local-time offset, which RFC 5280 forbids.
+        assert_eq!(parse_time(0x17, b"260423000000+0100"), None);
+        // Fractional seconds.
+        assert_eq!(parse_time(0x18, b"20260423000000.5Z"), None);
+        assert_eq!(parse_time(0x17, b"2604230000ZZ"), None);
+        assert_eq!(parse_time(0x17, b"261323000000Z"), None, "month 13");
+        assert_eq!(parse_time(0x17, b"260423250000Z"), None, "hour 25");
+        assert_eq!(parse_time(0x17, b""), None);
+    }
+
+    #[test]
+    fn malformed_certificates_are_an_error_not_a_default() {
+        assert!(parse_validity(&[]).is_err());
+        assert!(parse_validity(&[0x30, 0x00]).is_err());
+        // A SEQUENCE whose contents are not a TBSCertificate.
+        assert!(parse_validity(&[0x30, 0x03, 0x02, 0x01, 0x00]).is_err());
     }
 }
 
