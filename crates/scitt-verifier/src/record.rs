@@ -504,6 +504,7 @@ mod tests {
             result: None,
             facts: None,
             save_trust: None,
+            trusted_roots: None,
             now: None,
         }
     }

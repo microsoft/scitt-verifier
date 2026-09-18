@@ -23,6 +23,7 @@
 //! and testable.
 
 use scitt_receipt::cbor;
+use scitt_receipt::chain::Outcome as ChainOutcome;
 use scitt_receipt::external::{self, DetachedSigner};
 use scitt_receipt::labels;
 use scitt_receipt::CborValue;
@@ -59,6 +60,38 @@ pub struct Assertions {
     /// Substring that must appear in the signing certificate's issuer.
     #[serde(default)]
     pub signer_issuer_contains: Option<String>,
+    /// Require that the signing certificate chain validated to a trust anchor.
+    ///
+    /// This is the assertion that gives `signerSubjectContains` and
+    /// `signerIssuerContains` their meaning. On their own those match strings
+    /// in a certificate the statement carries, which an attacker who
+    /// self-signs chooses freely. Once the chain is validated they describe a
+    /// certificate some authority actually issued.
+    ///
+    /// Pair it with `requireChainToRootSha256` unless the embedded root is
+    /// itself pinned somehow: a chain can validate against a root the
+    /// statement supplied, which proves internal consistency rather than
+    /// trust.
+    #[serde(default)]
+    pub certificate_chain_validated: Option<bool>,
+    /// SHA-256, hex, of the root the chain must terminate at.
+    ///
+    /// Pins trust to a specific authority rather than to whatever root the
+    /// statement happened to carry. Hashing the certificate rather than
+    /// matching its subject means the value cannot be satisfied by minting a
+    /// new certificate with the same name.
+    #[serde(default)]
+    pub require_chain_to_root_sha256: Option<String>,
+    /// Require every certificate to have been valid at the statement's `iat`.
+    ///
+    /// Off by default deliberately. A statement signed legitimately in 2023
+    /// should not start failing when its certificate expires on schedule —
+    /// the ledger already witnessed the registration, and expiry after the
+    /// fact is not evidence of forgery. Turn it on when you specifically want
+    /// "the certificate was live when this was signed", which is a stronger
+    /// and narrower claim.
+    #[serde(default)]
+    pub certificate_valid_at_signing_time: Option<bool>,
     /// Exactly how many receipts the statement must carry. Must be 1.
     ///
     /// Counts receipts *present*, not receipts that verified, because the
@@ -1500,6 +1533,47 @@ impl Policy {
             });
         }
 
+        if let Some(required) = a.certificate_chain_validated {
+            results.push(chain_validated_result(facts, required));
+        }
+
+        if let Some(expected) = &a.require_chain_to_root_sha256 {
+            results.push(chain_root_result(facts, expected));
+        }
+
+        if let Some(required) = a.certificate_valid_at_signing_time {
+            let name = "certificateValidAtSigningTime";
+            results.push(match facts.certificates_valid_at_signing_time {
+                None => result(
+                    name,
+                    Outcome::CannotEvaluate,
+                    "the chain was not validated, or the statement declares no iat to check \
+                     against",
+                ),
+                Some(valid) if valid == required => result(
+                    name,
+                    Outcome::Pass,
+                    if valid {
+                        "every certificate was valid when the statement was signed"
+                    } else {
+                        "a certificate was outside its validity window when the statement was \
+                         signed, as required"
+                    },
+                ),
+                Some(_) => result(
+                    name,
+                    Outcome::Fail,
+                    if required {
+                        "a certificate was outside its validity window when the statement was \
+                         signed"
+                    } else {
+                        "every certificate was valid when the statement was signed, but the \
+                         policy required otherwise"
+                    },
+                ),
+            });
+        }
+
         if let Some(expected) = a.receipt_count {
             // `receipts_present`, not `verified_receipts()`: this assertion
             // exists to notice that the file grew a receipt after the service
@@ -1631,6 +1705,127 @@ fn result(name: &str, outcome: Outcome, detail: impl Into<String>) -> AssertionR
         outcome,
         detail: detail.into(),
     }
+}
+
+/// Evaluate `certificateChainValidated`.
+///
+/// The three non-valid outcomes are kept apart rather than collapsed into one
+/// failure. "Did not validate" accuses the signer; "no chain supplied" and
+/// "this build cannot check it" do not, and a reader who cannot tell them
+/// apart will either distrust a good statement or go looking for the wrong
+/// fix.
+fn chain_validated_result(facts: &StatementFacts, required: bool) -> AssertionResult {
+    let name = "certificateChainValidated";
+    let Some(outcome) = &facts.chain_outcome else {
+        return result(
+            name,
+            Outcome::CannotEvaluate,
+            "certificate chain validation was not performed on this run",
+        );
+    };
+
+    match outcome {
+        ChainOutcome::Valid(details) => {
+            let anchor = if details.anchored_externally {
+                "a supplied trusted root"
+            } else {
+                // Worth spelling out: a chain can validate perfectly against a
+                // root the statement itself carried, which establishes
+                // internal consistency and not trust.
+                "the root embedded in the statement, which was not independently trusted"
+            };
+            if required {
+                result(
+                    name,
+                    Outcome::Pass,
+                    format!("the certificate chain validated to {anchor}"),
+                )
+            } else {
+                result(
+                    name,
+                    Outcome::Fail,
+                    format!(
+                        "the certificate chain validated to {anchor}, but the policy required \
+                         that it not validate"
+                    ),
+                )
+            }
+        }
+        ChainOutcome::Invalid(reason) if required => result(
+            name,
+            Outcome::Fail,
+            format!("the chain did not validate: {reason}"),
+        ),
+        ChainOutcome::Invalid(reason) => result(
+            name,
+            Outcome::Pass,
+            format!("the chain did not validate, as required: {reason}"),
+        ),
+        ChainOutcome::Insufficient(reason) => result(
+            name,
+            Outcome::CannotEvaluate,
+            format!("the chain could not be checked: {reason}"),
+        ),
+        ChainOutcome::Unsupported(reason) => result(
+            name,
+            Outcome::CannotEvaluate,
+            format!("this build cannot check this chain: {reason}"),
+        ),
+    }
+}
+
+/// Evaluate `requireChainToRootSha256`.
+fn chain_root_result(facts: &StatementFacts, expected: &str) -> AssertionResult {
+    let name = "requireChainToRootSha256";
+    let Some(outcome) = &facts.chain_outcome else {
+        return result(
+            name,
+            Outcome::CannotEvaluate,
+            "certificate chain validation was not performed on this run",
+        );
+    };
+
+    match outcome {
+        // Only a validated chain can pin a root. Comparing the hash of a
+        // certificate from an unvalidated chain would match whatever the
+        // statement's author put last, which is the attacker in the case this
+        // assertion exists to stop.
+        ChainOutcome::Valid(details) => {
+            let actual = hex(&details.root_sha256);
+            if actual.eq_ignore_ascii_case(expected.trim()) {
+                result(
+                    name,
+                    Outcome::Pass,
+                    format!("the chain terminates at root {actual}"),
+                )
+            } else {
+                result(
+                    name,
+                    Outcome::Fail,
+                    format!("the chain terminates at root {actual}, not {expected}"),
+                )
+            }
+        }
+        ChainOutcome::Invalid(reason) => result(
+            name,
+            Outcome::Fail,
+            format!("the chain did not validate, so its root proves nothing: {reason}"),
+        ),
+        ChainOutcome::Insufficient(reason) => result(
+            name,
+            Outcome::CannotEvaluate,
+            format!("the chain could not be checked: {reason}"),
+        ),
+        ChainOutcome::Unsupported(reason) => result(
+            name,
+            Outcome::CannotEvaluate,
+            format!("this build cannot check this chain: {reason}"),
+        ),
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Name an external signer for a report.
@@ -2337,10 +2532,118 @@ mod tests {
         CborValue::TextString(s.into())
     }
 
+    fn chain_policy(assertion: &str) -> Policy {
+        let json =
+            format!(r#"{{"policyId":"t","policyVersion":"1","assertions":{{{assertion}}}}}"#);
+        Policy::from_json(json.as_bytes()).expect("policy should parse")
+    }
+
+    fn facts_with_chain(outcome: Option<ChainOutcome>) -> StatementFacts {
+        StatementFacts {
+            certificate_chain_len: 2,
+            chain_outcome: outcome,
+            ..Default::default()
+        }
+    }
+
+    fn valid_chain(root: [u8; 32], anchored_externally: bool) -> ChainOutcome {
+        ChainOutcome::Valid(scitt_receipt::chain::Details {
+            root_sha256: root,
+            anchored_externally,
+            validated_at: 0,
+            path_len: 2,
+        })
+    }
+
     fn outcome_of(policy: &Policy, facts: &StatementFacts) -> Outcome {
         let decision = policy.evaluate(facts, 0);
         assert_eq!(decision.results.len(), 1, "expected exactly one result");
         decision.results[0].outcome
+    }
+
+    #[test]
+    fn a_validated_chain_satisfies_the_chain_assertion() {
+        let policy = chain_policy(r#""certificateChainValidated":true"#);
+        let facts = facts_with_chain(Some(valid_chain([0x11; 32], true)));
+        assert_eq!(outcome_of(&policy, &facts), Outcome::Pass);
+    }
+
+    #[test]
+    fn an_invalid_chain_fails_the_chain_assertion() {
+        let policy = chain_policy(r#""certificateChainValidated":true"#);
+        let facts = facts_with_chain(Some(ChainOutcome::Invalid("issuer mismatch".into())));
+        assert_eq!(outcome_of(&policy, &facts), Outcome::Fail);
+    }
+
+    /// The three reasons a chain has no verdict are not the same reason, but
+    /// they must all refuse to answer rather than guess. A build that cannot
+    /// verify ECDSA has not found the chain wanting; saying so as `Fail` would
+    /// accuse a chain nobody examined.
+    #[test]
+    fn an_unexamined_chain_cannot_be_evaluated() {
+        let policy = chain_policy(r#""certificateChainValidated":true"#);
+        for outcome in [
+            None,
+            Some(ChainOutcome::Insufficient("no chain present".into())),
+            Some(ChainOutcome::Unsupported("ECDSA".into())),
+        ] {
+            let facts = facts_with_chain(outcome);
+            assert_eq!(outcome_of(&policy, &facts), Outcome::CannotEvaluate);
+        }
+    }
+
+    #[test]
+    fn a_pinned_root_matches_case_insensitively() {
+        let expected = "11".repeat(32).to_uppercase();
+        let policy = chain_policy(&format!(r#""requireChainToRootSha256":"{expected}""#));
+        let facts = facts_with_chain(Some(valid_chain([0x11; 32], true)));
+        assert_eq!(outcome_of(&policy, &facts), Outcome::Pass);
+    }
+
+    #[test]
+    fn a_different_root_fails_the_pin() {
+        let policy = chain_policy(&format!(
+            r#""requireChainToRootSha256":"{}""#,
+            "11".repeat(32)
+        ));
+        let facts = facts_with_chain(Some(valid_chain([0x22; 32], true)));
+        assert_eq!(outcome_of(&policy, &facts), Outcome::Fail);
+    }
+
+    /// An unvalidated chain still has a last certificate, and hashing it would
+    /// produce a value that "matches" whatever the statement's author chose.
+    /// Pinning must therefore refuse to answer, not compare.
+    #[test]
+    fn a_pin_against_an_unexamined_chain_cannot_be_evaluated() {
+        let policy = chain_policy(&format!(
+            r#""requireChainToRootSha256":"{}""#,
+            "11".repeat(32)
+        ));
+        for outcome in [
+            None,
+            Some(ChainOutcome::Insufficient("no chain present".into())),
+            Some(ChainOutcome::Unsupported("ECDSA".into())),
+        ] {
+            let facts = facts_with_chain(outcome);
+            assert_eq!(outcome_of(&policy, &facts), Outcome::CannotEvaluate);
+        }
+    }
+
+    #[test]
+    fn validity_at_signing_time_reports_all_three_outcomes() {
+        let policy = chain_policy(r#""certificateValidAtSigningTime":true"#);
+
+        let mut facts = facts_with_chain(Some(valid_chain([0x11; 32], true)));
+        facts.certificates_valid_at_signing_time = Some(true);
+        assert_eq!(outcome_of(&policy, &facts), Outcome::Pass);
+
+        facts.certificates_valid_at_signing_time = Some(false);
+        assert_eq!(outcome_of(&policy, &facts), Outcome::Fail);
+
+        // No `iat` to check against, or no chain validated: either way nobody
+        // looked, which is not the same as looking and finding it expired.
+        facts.certificates_valid_at_signing_time = None;
+        assert_eq!(outcome_of(&policy, &facts), Outcome::CannotEvaluate);
     }
 
     #[test]

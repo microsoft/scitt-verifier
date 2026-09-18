@@ -85,13 +85,22 @@ pub enum Outcome {
     Valid(Details),
     /// A path was attempted and did not hold.
     Invalid(String),
-    /// Not enough material to reach a verdict either way.
+    /// The material needed to reach a verdict was not present.
     ///
     /// Distinct from [`Self::Invalid`] deliberately. A statement carrying no
     /// chain has not failed validation, and reporting it as a failure would
     /// claim an examination that never happened. It is the caller's policy,
     /// not this function, that decides whether missing evidence is fatal.
     Insufficient(String),
+    /// The material was present, but this build cannot check it.
+    ///
+    /// Separate from [`Self::Insufficient`] because the two have different
+    /// remedies and deserve different exit codes: missing input might be
+    /// supplied on the next run, whereas an unsupported algorithm will fail
+    /// identically forever until the tool itself changes. Telling a caller to
+    /// "supply the root" when the real problem is that nothing here can verify
+    /// ECDSA would send them after a fix that cannot work.
+    Unsupported(String),
 }
 
 /// What a successful validation established, for reporting.
@@ -204,7 +213,7 @@ pub fn validate(chain: &[Vec<u8>], options: &Options) -> Result<Outcome> {
         .chain(std::iter::once(chain[0].as_slice()))
         .collect();
     if let Some(gap) = capability_gap(&path_certs, &path_der)? {
-        return Ok(Outcome::Insufficient(gap));
+        return Ok(Outcome::Unsupported(gap));
     }
 
     let Ok(seconds) = u64::try_from(validated_at) else {
@@ -369,6 +378,31 @@ fn capability_gap(path: &[&Cert], path_der: &[&[u8]]) -> Result<Option<String>> 
     Ok(None)
 }
 
+/// Whether every certificate in the chain was valid at `unix_time`.
+///
+/// Separate from [`validate`] because it answers a different question. Path
+/// validation asks whether these certificates form a chain at all; this asks
+/// whether they were live at one particular moment — normally the receipt's
+/// `iat`, meaning "was this certificate valid when it was actually signed?".
+///
+/// Computed from the encoded validity windows rather than by re-running path
+/// validation, so a caller can have both answers without the stricter one
+/// overwriting the structural verdict.
+pub fn all_valid_at(chain: &[Vec<u8>], unix_time: i64) -> Result<bool> {
+    if chain.is_empty() {
+        return Err(Error::TrustMaterial(
+            "no certificates to check validity for".into(),
+        ));
+    }
+    for der_bytes in chain {
+        let validity = der::parse_validity(der_bytes)?;
+        if unix_time < validity.not_before || unix_time > validity.not_after {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// Pick the time to validate the path at. See the module comment.
 ///
 /// Kept free of certificate parsing so the policy itself can be tested
@@ -399,6 +433,62 @@ fn choose_time(validities: &[Validity], options: &Options) -> std::result::Resul
 fn sha256(bytes: &[u8]) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     Sha256::digest(bytes).into()
+}
+
+/// Read DER certificates out of a PEM document.
+///
+/// Anything that is not a `CERTIFICATE` block is rejected rather than skipped.
+/// A root file is trust material: silently ignoring a private key or an
+/// unrecognised block would let an operator anchor to fewer roots than the
+/// file appears to contain and never learn it.
+pub fn parse_pem_certificates(pem: &str) -> Result<Vec<Vec<u8>>> {
+    const BEGIN: &str = "-----BEGIN ";
+    const END: &str = "-----END ";
+
+    let mut certificates = Vec::new();
+    let mut body: Option<String> = None;
+
+    for line in pem.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix(BEGIN) {
+            let label = rest.trim_end_matches('-');
+            if label != "CERTIFICATE" {
+                return Err(Error::TrustMaterial(format!(
+                    "expected only CERTIFICATE blocks, found '{label}'"
+                )));
+            }
+            if body.is_some() {
+                return Err(Error::TrustMaterial(
+                    "a PEM block began before the previous one ended".into(),
+                ));
+            }
+            body = Some(String::new());
+        } else if line.starts_with(END) {
+            let Some(encoded) = body.take() else {
+                return Err(Error::TrustMaterial(
+                    "a PEM block ended without beginning".into(),
+                ));
+            };
+            let der_bytes = tav_crypto::base64::base64_standard_decode(&encoded).map_err(|e| {
+                Error::TrustMaterial(format!("a PEM block is not valid base64: {e}"))
+            })?;
+            certificates.push(der_bytes);
+        } else if let Some(accumulating) = body.as_mut() {
+            accumulating.push_str(line);
+        }
+    }
+
+    if body.is_some() {
+        return Err(Error::TrustMaterial(
+            "a PEM block began and was never closed".into(),
+        ));
+    }
+    if certificates.is_empty() {
+        return Err(Error::TrustMaterial(
+            "no CERTIFICATE blocks were found".into(),
+        ));
+    }
+    Ok(certificates)
 }
 
 #[cfg(test)]
@@ -479,5 +569,32 @@ mod tests {
 
         let disjoint = [validity(1_000, 2_000), validity(3_000, 4_000)];
         assert_eq!(choose_time(&disjoint, &options), Ok(42));
+    }
+
+    #[test]
+    fn pem_certificates_are_decoded_in_order() {
+        let pem = "-----BEGIN CERTIFICATE-----\nAAEC\n-----END CERTIFICATE-----\n\
+                   -----BEGIN CERTIFICATE-----\nAwQF\n-----END CERTIFICATE-----\n";
+        assert_eq!(
+            parse_pem_certificates(pem).unwrap(),
+            vec![vec![0, 1, 2], vec![3, 4, 5]]
+        );
+    }
+
+    #[test]
+    fn non_certificate_blocks_are_refused_rather_than_skipped() {
+        let pem = "-----BEGIN PRIVATE KEY-----\nAAEC\n-----END PRIVATE KEY-----\n";
+        assert!(parse_pem_certificates(pem).is_err());
+    }
+
+    #[test]
+    fn a_file_with_no_certificates_is_an_error() {
+        assert!(parse_pem_certificates("# just a comment\n").is_err());
+    }
+
+    #[test]
+    fn an_unterminated_block_is_an_error() {
+        let pem = "-----BEGIN CERTIFICATE-----\nAAEC\n";
+        assert!(parse_pem_certificates(pem).is_err());
     }
 }

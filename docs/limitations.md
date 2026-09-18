@@ -44,28 +44,30 @@ from a URL the statement itself chose would not establish anything anyway.
 Hash algorithms: SHA-256, SHA-384, and SHA-512. Any other value in header 258
 is reported as *cannot compare*, never approximated with a different hash.
 
-## Not implemented in this release
+## Partially implemented
 
-### Certificate chain validation to a trusted root
+### Certificate chain validation without `--trusted-roots`
 
-*Reported at runtime:* `appraisal.notChecked` code `CertificateChainNotValidated`,
-or code `NoCertificateChain` when the statement carries no chain at all.
+*Reported at runtime:* `appraisal.notChecked` code
+`CertificateChainNotAnchoredExternally`, or code `NoCertificateChain` when the
+statement carries no chain at all. Code `CertificateChainNotValidated` is
+reported when the chain could not be examined at all.
 
-The statement signature is verified against the public key in the leaf
-certificate embedded in the statement itself. That proves the statement is
-internally consistent. It does **not** prove the certificate chains to a root
-you trust.
+The chain is always validated: every certificate is checked to be signed by the
+next, and the path must end at a self-issued anchor. Without `--trusted-roots`
+that anchor is the root the statement itself carries, so the result establishes
+that the chain is *internally consistent* — not that it leads anywhere you
+trust.
 
-*Consequence:* an attacker who can present any self-signed certificate produces
-a statement whose signature "verifies". The receipt binding still protects you —
-they cannot get a ledger receipt for it without registering with the
-transparency service — but do not read `signatureValid: true` as an identity
-claim.
+*Consequence:* an attacker who mints their own root produces a chain that is
+equally consistent. The receipt binding still protects you — they cannot get a
+ledger receipt for it without registering with the transparency service — but
+do not read a validated chain as an identity claim unless you supplied the root.
 
-*What actually protects you today:* registration. An attacker who self-signs
-still has to get that statement admitted to a transparency service whose keys
-are in your `--scitt-keys` file, and the receipt is what this tool verifies
-cryptographically.
+*What actually protects you today:* registration, and `--trusted-roots`. Pass a
+PEM file of the CAs you accept and the anchor must come from that file; the gap
+above then disappears and the `certificateChainValidated` and
+`requireChainToRootSha256` assertions become meaningful.
 
 *What does not:* `signerSubjectContains` and `signerIssuerContains` substring-match
 the leaf certificate embedded in the statement — the same certificate an attacker
@@ -73,10 +75,37 @@ in the paragraph above minted. Against that attacker they prove nothing, because
 they choose the strings. They are useful for catching an *honest* mistake — a
 build signed by the wrong team, or by a legitimate CA you did not intend to
 accept — and worthless as a defence against forgery. Do not treat them as a
-substitute for chain validation.
+substitute for supplying roots.
 
-*Planned:* `--trusted-roots`, using the chain validation already available in
-the underlying crypto crate.
+## Not implemented in this release
+
+### ECDSA-signed certificate chains
+
+*Reported at runtime:* `appraisal.notChecked` code `CertificateChainUnsupported`,
+naming the signature algorithm OID.
+
+The pinned crypto backend verifies RSA certificate signatures only — PKCS#1 v1.5
+with SHA-256/384/512, and RSA-PSS. A chain whose certificates are signed with
+ECDSA cannot be checked here at all. AMD's hardware bill-of-materials signing
+chain is one real example.
+
+*Consequence:* the chain is **unexamined**, not known-good. This is deliberately
+a different code from the gaps above: supplying a root will not fix it, and only
+a newer build can. Everything else about such a statement — the leaf signature,
+the receipt, the payload — is still verified normally.
+
+### Certificates using unhandled critical extensions
+
+*Reported at runtime:* `appraisal.notChecked` code `CertificateChainUnsupported`,
+naming the extension OID.
+
+RFC 5280 requires a verifier to refuse a certificate marking an extension
+critical that it does not understand. The path validation here processes
+`basicConstraints` and `keyUsage`; a certificate marking anything else critical —
+extended key usage, for instance — is reported as unsupported rather than
+invalid. Refusing to process an extension says nothing about whether the chain
+is genuine, and reporting it as a failure would accuse a chain that may be
+perfectly well formed.
 
 ### Certificate revocation
 

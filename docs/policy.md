@@ -151,6 +151,9 @@ that ran passed. That first clause is not redundant — see
 | `maxAgeDays` | `number` | Registration within N days of now |
 | `minSvn` | `number` | Minimum security version number, for anti-rollback |
 | `requireKidBoundToKey` | `boolean` | Every receipt's kid must be the digest of its signing key |
+| `certificateChainValidated` | `boolean` | The signing certificate chain must validate to an anchor |
+| `requireChainToRootSha256` | `string` | Hex SHA-256 of the root the chain must terminate at |
+| `certificateValidAtSigningTime` | `boolean` | Every certificate must be within its validity window at the receipt's `iat` |
 | `statementSubject` | `object` | The CWT `sub` claim the statement makes about itself |
 | `statementIssuer` | `object` | The CWT `iss` claim naming who signed the statement |
 | `protectedHeaders` | `object[]` | Assertions on individual protected header entries, by label path |
@@ -412,6 +415,44 @@ assertion at all. A policy whose only assertion is `requireKidBoundToKey: false`
 parses successfully, evaluates nothing, and exits 3 —
 `PolicyProducedNoAssertions`, "policy parsed but evaluated no assertions, so it
 made no decision". Omit the field rather than setting it to `false`.
+
+### `certificateChainValidated`, `requireChainToRootSha256` and `certificateValidAtSigningTime`
+
+```json
+{
+  "certificateChainValidated": true,
+  "requireChainToRootSha256": "a1b2c3…",
+  "certificateValidAtSigningTime": true
+}
+```
+
+The chain is always validated: every certificate must be signed by the next,
+and the path must end at a self-issued anchor. What `--trusted-roots` changes is
+*which* anchor is allowed — a CA from the PEM file you supplied, rather than
+whatever root the statement itself carried.
+
+**This is the distinction that decides whether these assertions mean anything.**
+Without `--trusted-roots`, `certificateChainValidated` passes for a chain an
+attacker minted end to end: it is internally consistent, and consistency is not
+identity. The run says so — `appraisal.notChecked` carries
+`CertificateChainNotAnchoredExternally`. Pair the assertion with
+`--trusted-roots`, or pin the anchor with `requireChainToRootSha256`, which
+compares the hex SHA-256 of the root (case-insensitively) and so cannot be
+satisfied by minting a new certificate with the same subject.
+
+`certificateValidAtSigningTime` asks the narrower question: was every
+certificate inside its validity window at the receipt's `iat`? It is off by
+default on purpose. A statement registered legitimately in 2023 should not start
+failing in 2026 because a certificate expired on schedule — the ledger already
+witnessed the registration, and expiry after the fact is not evidence of
+forgery. Turn it on when you specifically want "the certificate was live when
+this was signed".
+
+All three report **cannot evaluate**, not *fail*, when the chain was not
+examined — no chain present, or a chain this build cannot check (see
+[limitations](limitations.md): ECDSA-signed certificates and unhandled critical
+extensions). "I did not look" is never evidence of compromise, and the exit code
+says 3 rather than 1 so you can tell the two apart in a pipeline.
 
 ### `protectedHeaders`
 

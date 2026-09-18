@@ -12,8 +12,8 @@
 use scitt_acquire::{limits, route_for, validate_host, Acquired, Failed, Outcome};
 use scitt_policy::Policy;
 use scitt_receipt::{
-    describe_receipt, verify_statement, KeyLookup, LedgerKeySet, ReceiptFacts, Sign1,
-    StatementFacts,
+    describe_receipt, verify_statement, verify_statement_with, KeyLookup, LedgerKeySet,
+    ReceiptFacts, Sign1, StatementFacts, VerifyOptions,
 };
 
 /// What selection concluded, before anything touched the network.
@@ -165,8 +165,9 @@ fn no_keys() -> LedgerKeySet {
 pub fn verify_scoped(
     statement_bytes: &[u8],
     acquired: &[Acquired],
+    options: &VerifyOptions,
 ) -> Result<StatementFacts, scitt_receipt::Error> {
-    let mut merged = verify_statement(statement_bytes, &no_keys())?;
+    let mut merged = verify_statement_with(statement_bytes, &no_keys(), options)?;
 
     let per_ledger: Vec<(&str, StatementFacts)> = acquired
         .iter()

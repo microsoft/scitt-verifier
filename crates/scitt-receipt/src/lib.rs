@@ -88,6 +88,21 @@ pub struct StatementFacts {
     /// Whether the issuer's signature over the statement verified.
     pub signature_valid: Option<bool>,
     pub certificate_chain_len: usize,
+    /// What certificate chain validation established, if it was requested.
+    ///
+    /// `None` means it was not requested at all — which is not the same as a
+    /// chain that failed, and must never be reported as one. The variants
+    /// inside distinguish the rest: a chain that did not hold, material that
+    /// was missing, and a check this build cannot perform.
+    pub chain_outcome: Option<chain::Outcome>,
+    /// Whether every certificate was valid at the statement's own `iat`.
+    ///
+    /// `None` when chain validation was not requested, or when the statement
+    /// declares no `iat` to check against. Recorded separately from
+    /// [`Self::chain_outcome`] because expiry after signing is not a defect —
+    /// see `chain`'s module comment — so a policy that cares must ask for it
+    /// explicitly rather than getting it folded into the structural verdict.
+    pub certificates_valid_at_signing_time: Option<bool>,
     pub leaf_subject: Option<String>,
     pub leaf_issuer: Option<String>,
     /// The statement's protected header bucket, exactly as it was parsed.
@@ -137,7 +152,31 @@ impl StatementFacts {
 }
 
 /// Verify a transparent statement end to end, minus policy.
+///
+/// Certificate chain validation is not attempted; see
+/// [`verify_statement_with`] to supply trusted roots and evaluate the chain.
+/// Kept as-is so existing callers keep their exact meaning rather than
+/// silently acquiring a check they never asked for.
 pub fn verify_statement(statement_bytes: &[u8], key_set: &LedgerKeySet) -> Result<StatementFacts> {
+    verify_statement_with(statement_bytes, key_set, &VerifyOptions::default())
+}
+
+/// Options that change what [`verify_statement_with`] checks.
+#[derive(Debug, Clone, Default)]
+pub struct VerifyOptions {
+    /// Validate the signing certificate chain, and how.
+    ///
+    /// `None` skips chain validation entirely, which is reported as a gap
+    /// rather than passed over in silence.
+    pub chain: Option<chain::Options>,
+}
+
+/// Verify a transparent statement end to end, minus policy.
+pub fn verify_statement_with(
+    statement_bytes: &[u8],
+    key_set: &LedgerKeySet,
+    options: &VerifyOptions,
+) -> Result<StatementFacts> {
     let statement = Sign1::parse(statement_bytes)?;
     let mut problems = Vec::new();
 
@@ -182,6 +221,47 @@ pub fn verify_statement(statement_bytes: &[u8], key_set: &LedgerKeySet) -> Resul
         }
     };
 
+    // Chain validation is a separate question from signature validity: the
+    // signature above was checked against the leaf the statement itself
+    // carries, which proves internal consistency and nothing about who signed.
+    let chain_outcome = match &options.chain {
+        Some(chain_options) => match chain::validate(&chain, chain_options) {
+            Ok(outcome) => {
+                if let chain::Outcome::Invalid(reason) = &outcome {
+                    problems.push(format!("certificate chain did not validate: {reason}"));
+                }
+                Some(outcome)
+            }
+            // A chain that could not even be parsed is recorded as a problem
+            // rather than dropped, so the report never implies the check
+            // passed quietly.
+            Err(e) => {
+                problems.push(format!("certificate chain could not be evaluated: {e}"));
+                None
+            }
+        },
+        None => None,
+    };
+
+    // Asked only when a chain was actually validated: reporting "valid at
+    // signing time" for a chain nobody checked would dress an unexamined
+    // certificate up as an examined one.
+    let certificates_valid_at_signing_time = match (&chain_outcome, statement.cwt()) {
+        (Some(_), Some(claims)) => match claims.iat {
+            Some(iat) => match chain::all_valid_at(&chain, iat) {
+                Ok(valid) => Some(valid),
+                Err(e) => {
+                    problems.push(format!(
+                        "certificate validity at signing time could not be checked: {e}"
+                    ));
+                    None
+                }
+            },
+            None => None,
+        },
+        _ => None,
+    };
+
     let receipt_blobs = statement.receipts();
     if receipt_blobs.is_empty() {
         problems.push("statement carries no receipts; it is signed but not transparent".into());
@@ -211,6 +291,8 @@ pub fn verify_statement(statement_bytes: &[u8], key_set: &LedgerKeySet) -> Resul
         payload: statement.payload.clone(),
         signature_valid,
         certificate_chain_len: chain.len(),
+        chain_outcome,
+        certificates_valid_at_signing_time,
         leaf_subject,
         leaf_issuer,
         protected: Some(statement.protected.clone()),
