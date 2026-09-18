@@ -3,4 +3,8 @@
 Cargo.lock.orig
 *.pdb
 scitt-evidence.json
+corpus/tools/service-cert.pem
+crates/scitt-wasm/pkg-node/
+crates/scitt-wasm/dist/
 .DS_Store
+__pycache__/

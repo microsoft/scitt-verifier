@@ -40,14 +40,14 @@ const SCENARIOS = [
   {
     label: 'Verified',
     statement: b64(join(fixtures, 'transparent-statement.cose')),
-    keys: b64(join(fixtures, 'musa-mst-july-scitt-keys.cbor')),
+    keys: b64(join(fixtures, 'mst-test-scitt-keys.cbor')),
     policy: b64(join(policies, 'fixture-mst.json')),
     note: 'A real MST transparent statement, its ledger key set, and a policy it satisfies.',
   },
   {
     label: 'Policy not satisfied',
     statement: b64(join(fixtures, 'transparent-statement.cose')),
-    keys: b64(join(fixtures, 'musa-mst-july-scitt-keys.cbor')),
+    keys: b64(join(fixtures, 'mst-test-scitt-keys.cbor')),
     policy: b64(join(policies, 'wrong-issuer.json')),
     note: 'The same statement, unaltered. Only the rules changed \u2014 this policy '
         + 'accepts a transparency service the statement was not registered with.',
@@ -55,7 +55,7 @@ const SCENARIOS = [
   {
     label: 'Payload altered after signing',
     statement: b64(join(fixtures, 'payload-tampered.cose')),
-    keys: b64(join(fixtures, 'musa-mst-july-scitt-keys.cbor')),
+    keys: b64(join(fixtures, 'mst-test-scitt-keys.cbor')),
     policy: b64(join(policies, 'fixture-mst.json')),
     note: 'Two findings at once, and the page reports the one that indicts the bytes. The '
         + 'signature no longer covers this payload, so it fails first. The receipt is '
@@ -65,7 +65,7 @@ const SCENARIOS = [
   {
     label: 'Receipt signature fails',
     statement: b64(join(fixtures, 'tampered-statement.cose')),
-    keys: b64(join(fixtures, 'musa-mst-july-scitt-keys.cbor')),
+    keys: b64(join(fixtures, 'mst-test-scitt-keys.cbor')),
     policy: b64(join(policies, 'fixture-mst.json')),
     note: 'The receipt was altered. The statement\u2019s own signature is untouched, and '
         + 'the page says so rather than condemning the whole file.',
@@ -73,7 +73,7 @@ const SCENARIOS = [
   {
     label: 'Key set does not hold the key',
     statement: b64(join(fixtures, 'transparent-statement.cose')),
-    keys: b64(join(fixtures, 'stale-scitt-keys.cbor')),
+    keys: b64(join(fixtures, 'other-service-scitt-keys.cbor')),
     policy: b64(join(policies, 'fixture-mst.json')),
     note: 'A rotation and a forgery look identical from here, so this is reported as '
         + 'unproven rather than as a failure.',
@@ -81,7 +81,7 @@ const SCENARIOS = [
   {
     label: 'Bound to its artifact',
     statement: b64(join(fixtures, 'transparent-statement.cose')),
-    keys: b64(join(fixtures, 'musa-mst-july-scitt-keys.cbor')),
+    keys: b64(join(fixtures, 'mst-test-scitt-keys.cbor')),
     policy: b64(join(policies, 'fixture-mst.json')),
     artifact: b64(join(fixtures, 'artifact.bin')),
     artifactName: 'artifact.bin',
@@ -93,7 +93,7 @@ const SCENARIOS = [
   {
     label: 'Wrong artifact',
     statement: b64(join(fixtures, 'transparent-statement.cose')),
-    keys: b64(join(fixtures, 'musa-mst-july-scitt-keys.cbor')),
+    keys: b64(join(fixtures, 'mst-test-scitt-keys.cbor')),
     policy: b64(join(policies, 'fixture-mst.json')),
     artifact: b64(join(fixtures, 'bad-artifact.bin')),
     artifactName: 'bad-artifact.bin',
@@ -105,7 +105,7 @@ const SCENARIOS = [
   {
     label: 'Hash envelope',
     statement: b64(join(fixtures, 'hash-envelope.cose')),
-    keys: b64(join(fixtures, 'musa-mst-july-scitt-keys.cbor')),
+    keys: b64(join(fixtures, 'mst-test-scitt-keys.cbor')),
     policy: '',
     artifact: b64(join(fixtures, 'hash-envelope-artifact.spdx.json')),
     artifactName: 'hash-envelope-artifact.spdx.json',

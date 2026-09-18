@@ -177,7 +177,7 @@ check('not styled as a failure', stale.banner.includes('v-fail'), false);
 console.log('\n--- policy failure names what it saw ---');
 const wrongPolicy = load(1);
 contains('a failing assertion is rendered', wrongPolicy.assertions, 't-fail');
-contains('detail names the observed issuer', wrongPolicy.assertions, 'musa-mst-july');
+contains('detail names the observed issuer', wrongPolicy.assertions, 'mst-test-scitt-verifier');
 contains('and the verdict separates policy from tampering', wrongPolicy.because, 'different finding');
 
 console.log('\n--- editing the policy changes the verdict, with no rebuild ---');

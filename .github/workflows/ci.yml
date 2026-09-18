@@ -220,7 +220,7 @@ jobs:
           set -euo pipefail
           ./target/release/scitt-verifier verify \
             --statement corpus/fixtures/transparent-statement.cose \
-            --scitt-keys corpus/fixtures/musa-mst-july-scitt-keys.cbor \
+            --scitt-keys corpus/fixtures/mst-test-scitt-keys.cbor \
             --policy corpus/policies/fixture-mst.json \
             --result /tmp/result.json \
             --format text
@@ -229,7 +229,7 @@ jobs:
           jq -e '.signedStatement.provenance.coveredBy == "statement-signer"' /tmp/result.json
           ./target/release/scitt-verifier verify \
             --statement corpus/fixtures/transparent-statement.cose \
-            --scitt-keys corpus/fixtures/musa-mst-july-scitt-keys.cbor \
+            --scitt-keys corpus/fixtures/mst-test-scitt-keys.cbor \
             --policy corpus/policies/fixture-mst.json \
             --result /tmp/result.json \
             --format text
