@@ -223,6 +223,40 @@ pub fn parse_validity(der: &[u8]) -> Result<Validity> {
     })
 }
 
+/// The OID of the algorithm a certificate's signature was made with.
+///
+/// Read so that an algorithm the crypto backend cannot verify is reported as
+/// a limit of this build rather than as a bad chain. The two are not the same
+/// claim, and only one of them accuses the signer of anything.
+///
+/// Malformed input is an error for the same reason as [`parse_validity`]: a
+/// certificate whose algorithm cannot be read must not be waved through as if
+/// it were supported.
+pub fn parse_signature_algorithm_oid(der: &[u8]) -> Result<String> {
+    let malformed =
+        || Error::TrustMaterial("certificate signature algorithm could not be read".into());
+
+    // Certificate ::= SEQUENCE { tbsCertificate, signatureAlgorithm, signature }
+    //
+    // The outer `signatureAlgorithm` is read rather than the one inside the
+    // TBSCertificate. RFC 5280 requires them to match, and this one is what
+    // the signature was actually made with.
+    let (0x30, certificate, _) = read_tlv(der).ok_or_else(malformed)? else {
+        return Err(malformed());
+    };
+    let (0x30, _tbs, after_tbs) = read_tlv(certificate).ok_or_else(malformed)? else {
+        return Err(malformed());
+    };
+    let (0x30, algorithm, _) = read_tlv(after_tbs).ok_or_else(malformed)? else {
+        return Err(malformed());
+    };
+    let (0x06, oid, _) = read_tlv(algorithm).ok_or_else(malformed)? else {
+        return Err(malformed());
+    };
+
+    decode_oid(oid).ok_or_else(malformed)
+}
+
 /// Decode an X.509 `Time`, which is a CHOICE of two encodings.
 ///
 /// UTCTime carries a two-digit year, and RFC 5280 §4.1.2.5.1 fixes the pivot:
@@ -551,6 +585,30 @@ mod validity_tests {
         assert!(parse_validity(&[0x30, 0x00]).is_err());
         // A SEQUENCE whose contents are not a TBSCertificate.
         assert!(parse_validity(&[0x30, 0x03, 0x02, 0x01, 0x00]).is_err());
+    }
+
+    #[test]
+    fn reads_the_outer_signature_algorithm_oid() {
+        // Certificate ::= SEQUENCE { tbsCertificate, signatureAlgorithm, ... }
+        // with an empty TBS and sha256WithRSAEncryption as the algorithm.
+        let der = [
+            0x30, 0x0F, // Certificate SEQUENCE
+            0x30, 0x00, // tbsCertificate, contents irrelevant here
+            0x30, 0x0B, // AlgorithmIdentifier SEQUENCE
+            0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0B,
+        ];
+        assert_eq!(
+            parse_signature_algorithm_oid(&der).unwrap(),
+            "1.2.840.113549.1.1.11"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_signature_algorithm_is_an_error_not_a_guess() {
+        assert!(parse_signature_algorithm_oid(&[]).is_err());
+        assert!(parse_signature_algorithm_oid(&[0x30, 0x00]).is_err());
+        // Present but not an AlgorithmIdentifier.
+        assert!(parse_signature_algorithm_oid(&[0x30, 0x04, 0x30, 0x00, 0x05, 0x00]).is_err());
     }
 }
 

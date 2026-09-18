@@ -42,6 +42,7 @@
 
 pub mod binding;
 pub mod cbor;
+pub mod chain;
 pub mod der;
 pub mod didx509;
 pub mod error;
