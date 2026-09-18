@@ -252,13 +252,24 @@ fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
         policy: policy_state(&decision),
     };
 
-    let verdict = decide(&facts, &binding, &decision, args.binding_mode);
+    let verdict = decide(
+        &facts,
+        &binding,
+        &decision,
+        args.binding_mode,
+        args.trusted_roots.is_some(),
+    );
     // Acquisition diagnostics come first because they explain absences the
     // later ones only describe. "The key could not be fetched" is the cause;
     // "no receipt verified" is the consequence, and a reader handed the
     // consequence alone will go looking in the wrong place.
     let mut diagnostics = acquisition_diagnostics;
-    diagnostics.extend(diagnose(&facts, &binding, &decision));
+    diagnostics.extend(diagnose(
+        &facts,
+        &binding,
+        &decision,
+        args.trusted_roots.is_some(),
+    ));
     if verdict == Verdict::StatementTransparent {
         // A pass, but a narrower one than most readers assume. Recorded as a
         // diagnostic so a pipeline can gate on it without parsing prose.
@@ -895,6 +906,7 @@ fn decide(
     binding: &BindingResult,
     decision: &PolicyDecision,
     mode: BindingMode,
+    anchoring_requested: bool,
 ) -> Verdict {
     if facts.signature_valid == Some(false) || binding.outcome == Binding::Mismatch {
         return Verdict::Untrusted;
@@ -908,6 +920,19 @@ fn decide(
     // `--trusted-roots` be answered "no" in silence.
     if matches!(facts.chain_outcome, Some(ChainOutcome::Invalid(_))) {
         return Verdict::Untrusted;
+    }
+
+    // Asked but unanswerable. An operator who passed `--trusted-roots` posed a
+    // question; a build that cannot check ECDSA, or a chain missing its root,
+    // leaves it unanswered, and an unanswered question must not exit 0.
+    //
+    // Deliberately conditional on `anchoring_requested`. Chain validation runs
+    // on every statement, so treating every unsupported chain as fatal would
+    // turn a check nobody asked for into a new way for existing pipelines to
+    // break — and "I did not look" is still not evidence of compromise.
+    // Without the flag this stays a declared gap; with it, it is exit 3.
+    if anchoring_requested && !matches!(facts.chain_outcome, Some(ChainOutcome::Valid(_))) {
+        return Verdict::CannotEvaluate;
     }
 
     // No verified receipt means the statement is, at best, merely signed.
@@ -958,6 +983,7 @@ fn diagnose(
     facts: &StatementFacts,
     binding: &BindingResult,
     decision: &PolicyDecision,
+    anchoring_requested: bool,
 ) -> Vec<Diagnostic> {
     let mut out = Vec::new();
 
@@ -983,6 +1009,21 @@ fn diagnose(
             Category::SignerIdentity,
             format!("the signing certificate chain did not validate: {reason}"),
             "Treat this artifact as untrusted. If you passed --trusted-roots, confirm the statement really was signed under one of them.",
+        ));
+    }
+    // Only when the operator asked. Without `--trusted-roots` an unexaminable
+    // chain is a declared gap, not a failure, and raising it to an error here
+    // would put a red diagnostic on runs that legitimately pass.
+    if anchoring_requested && !matches!(facts.chain_outcome, Some(ChainOutcome::Valid(_))) {
+        let reason = match &facts.chain_outcome {
+            Some(ChainOutcome::Unsupported(r)) | Some(ChainOutcome::Insufficient(r)) => r.clone(),
+            _ => "the chain was not evaluated".to_string(),
+        };
+        out.push(Diagnostic::error(
+            "CertificateChainNotAnchored",
+            Category::Unsupported,
+            format!("--trusted-roots was supplied, but the chain could not be anchored: {reason}"),
+            "This run cannot tell you whether the signer is one you trust. Do not read the result as if it could.",
         ));
     }
 

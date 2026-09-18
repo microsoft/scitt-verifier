@@ -166,6 +166,18 @@ pub fn resolve(did: &DidX509, chain: &[Vec<u8>]) -> Result<Resolution> {
         )));
     };
 
+    // `parse` refuses a predicate-less identifier, but `DidX509` can also be
+    // built field by field. Re-checked here because the loop below is a no-op
+    // on an empty list: a CA-only constraint would otherwise resolve as a
+    // match, pinning the authority while asserting nothing about the leaf, and
+    // any certificate that CA ever issued would satisfy it.
+    if did.predicates.is_empty() {
+        return Err(Error::TrustMaterial(
+            "did:x509 carries no predicates, so it constrains only the CA and not the signer"
+                .into(),
+        ));
+    }
+
     let leaf = &chain[0];
     for (name, value) in &did.predicates {
         match check_predicate(name, value, leaf)? {
@@ -386,6 +398,21 @@ mod tests {
 
     /// A chain whose *leaf* hashes to the fingerprint must not match. The
     /// fingerprint names a certificate authority; letting the leaf answer for
+    /// `parse` refuses a predicate-less identifier, but the struct is public
+    /// and can be built field by field. A CA-only constraint pins the
+    /// authority and says nothing about the signer, so every certificate that
+    /// CA ever issued would satisfy it.
+    #[test]
+    fn a_predicate_less_identifier_is_refused_at_resolution_too() {
+        let certs: Vec<Vec<u8>> = vec![vec![9; 8], vec![1; 8]];
+        let did = DidX509 {
+            fingerprint_alg: "sha256".into(),
+            fingerprint: base64_encode_no_padding(&Sha256::digest(&certs[1])),
+            predicates: Vec::new(),
+        };
+        assert!(resolve(&did, &certs).is_err());
+    }
+
     /// it would let any signer pin itself.
     #[test]
     fn the_leaf_is_never_accepted_as_the_certificate_authority() {

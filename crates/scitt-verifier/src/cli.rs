@@ -180,11 +180,12 @@ pub struct VerifyArgs {
     pub save_trust: Option<PathBuf>,
     /// PEM file of roots the signing certificate chain must lead to.
     ///
-    /// Absent means chain validation is not attempted at all, and is reported
-    /// as a gap. It deliberately does not fall back to validating against the
-    /// root the statement itself carries: that would report "chain validated"
-    /// for a self-signed forgery, which is the exact confusion this flag
-    /// exists to remove.
+    /// The chain is validated either way. What this changes is the anchor:
+    /// with it, the path must terminate at a certificate from this file, and
+    /// failing to do so is a verdict rather than a caveat. Without it the
+    /// anchor is the root the statement itself carried, which establishes
+    /// internal consistency and is reported as a gap rather than as trust —
+    /// a self-signed forgery is internally consistent too.
     pub trusted_roots: Option<PathBuf>,
     pub now: Option<i64>,
 }

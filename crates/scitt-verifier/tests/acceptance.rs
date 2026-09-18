@@ -2094,6 +2094,22 @@ fn trusted_roots_that_the_chain_does_not_reach_make_the_run_untrusted() {
         "the refusal must say why:\n{}",
         refused.stdout
     );
+
+    // A block that base64-decodes to something that is not a certificate. This
+    // exited 0 before the roots file was parsed rather than merely decoded:
+    // the strong flag was accepted and the weak check silently run.
+    let garbage = dir.join("not-a-certificate.pem");
+    std::fs::write(
+        &garbage,
+        "-----BEGIN CERTIFICATE-----\nAQIDBAUGBwgJCgsMDQ4PEA==\n-----END CERTIFICATE-----\n",
+    )
+    .unwrap();
+    let broken = verify(&["--trusted-roots", &garbage.display().to_string()]);
+    assert_eq!(
+        broken.code, 4,
+        "an unusable roots file is a broken invocation, never a quiet downgrade:\n{}",
+        broken.stdout
+    );
 }
 
 /// The certificates the corpus statement actually carries, leaf first.

@@ -342,8 +342,10 @@ fn select_anchor(
 
 /// Report anything on the path this build cannot actually check.
 ///
-/// Returning `Some` means no verdict is available, so the caller reports
-/// [`Outcome::Insufficient`]. Both cases below are real: a production AMD
+/// Returning `Some` means no verdict is available because of a limit in this
+/// tool, so the caller reports [`Outcome::Unsupported`] — not
+/// [`Outcome::Insufficient`], which is for material that was simply absent and
+/// might be supplied next run. Both cases below are real: a production AMD
 /// chain is ECDSA-signed, and a production Microsoft chain marks its
 /// extendedKeyUsage critical. OpenSSL-based verifiers accept both, so calling
 /// either one invalid would contradict the service that issued them.
@@ -472,6 +474,16 @@ pub fn parse_pem_certificates(pem: &str) -> Result<Vec<Vec<u8>>> {
             let der_bytes = tav_crypto::base64::base64_standard_decode(&encoded).map_err(|e| {
                 Error::TrustMaterial(format!("a PEM block is not valid base64: {e}"))
             })?;
+            // Parsed, not merely decoded. A block that base64-decodes to
+            // something that is not a certificate has to fail *here*, where the
+            // caller can still treat it as a broken invocation. Deferring it
+            // leaves a run that was handed roots reporting only "chain not
+            // validated" — the weak answer, under the strong flag.
+            <tav_crypto::Crypto as CertificateBackend>::from_der(&der_bytes).map_err(|e| {
+                Error::TrustMaterial(format!(
+                    "a CERTIFICATE block did not decode to a valid certificate: {e}"
+                ))
+            })?;
             certificates.push(der_bytes);
         } else if let Some(accumulating) = body.as_mut() {
             accumulating.push_str(line);
@@ -571,13 +583,17 @@ mod tests {
         assert_eq!(choose_time(&disjoint, &options), Ok(42));
     }
 
+    /// The positive round-trip is covered end to end in the acceptance suite,
+    /// which builds a PEM from the corpus statement's own chain. It cannot be
+    /// unit-tested here without embedding a real certificate, and a fabricated
+    /// one would only test the base64 step this no longer stops at.
     #[test]
-    fn pem_certificates_are_decoded_in_order() {
-        let pem = "-----BEGIN CERTIFICATE-----\nAAEC\n-----END CERTIFICATE-----\n\
-                   -----BEGIN CERTIFICATE-----\nAwQF\n-----END CERTIFICATE-----\n";
-        assert_eq!(
-            parse_pem_certificates(pem).unwrap(),
-            vec![vec![0, 1, 2], vec![3, 4, 5]]
+    fn a_block_that_is_not_a_certificate_is_refused() {
+        let pem = "-----BEGIN CERTIFICATE-----\nAAEC\n-----END CERTIFICATE-----\n";
+        let message = parse_pem_certificates(pem).unwrap_err().to_string();
+        assert!(
+            message.contains("valid certificate"),
+            "decoded bytes must be parsed, not just base64-decoded: {message}"
         );
     }
 
