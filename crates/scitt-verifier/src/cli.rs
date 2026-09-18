@@ -19,8 +19,9 @@ USAGE:
 INSPECT OPTIONS:
     --statement <FILE>       Transparent statement (COSE_Sign1).           [required]
     --verbose, -v            Add the certificate chain, per-receipt headers,
-                             the decoded inclusion proof, and the full payload.
-                             Without it, large blobs are summarised; the JSON
+                             the decoded inclusion proof, and untruncated
+                             payload claims. Without it, large blobs are
+                             summarised; the JSON
                              marks each one "elided": true so a consumer can
                              tell a summary from the real thing.
     --format <FORMAT>        text | json                                   [default: text]
@@ -28,7 +29,10 @@ INSPECT OPTIONS:
 inspect reports what the file says. It verifies nothing — use `verify` to
 make a decision. Its JSON carries "verified": false for the same reason.
 
-To extract a payload, read it out of the JSON:
+A payload the statement declares to be JSON is listed claim by claim, each
+beside the `path` a payloadJson policy rule uses to reach it.
+
+To extract a payload whole, read it out of the JSON:
     inspect --statement s.cose --format json --verbose | jq -r .payload.json
 Binary payloads appear as .payload.hex.
 

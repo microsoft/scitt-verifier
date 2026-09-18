@@ -32,6 +32,7 @@ Five values in that output are the ones you will quote in a policy:
 | `Signing certificate` → `subject` / `issuer` | `signerSubjectContains` / `signerIssuerContains` |
 | `Receipt 1` → `registered at` — `1785197841` | `registeredAfter` / `maxAgeDays` |
 | any protected header, by the label in brackets | `protectedHeaders` |
+| `Payload` → `json` — any claim, by the path in brackets | `payloadJson` |
 
 Copy the values; do not retype them. `issuer` is an exact match, and a
 truncated hostname fails in a way that looks like a rejected artifact.
@@ -153,6 +154,7 @@ that ran passed. That first clause is not redundant — see
 | `statementSubject` | `object` | The CWT `sub` claim the statement makes about itself |
 | `statementIssuer` | `object` | The CWT `iss` claim naming who signed the statement |
 | `protectedHeaders` | `object[]` | Assertions on individual protected header entries, by label path |
+| `payloadJson` | `object[]` | Assertions on claims inside the signed JSON payload, by path |
 | `externalSignatures` | `object[]` | Cryptographically verify a detached signature carried in a protected header |
 
 An empty `assertions` object is rejected: a policy that asserts nothing accepts
@@ -630,6 +632,153 @@ statement *claims*, not that the claim was independently checked.
 
 To check it, use [`externalSignatures`](#externalsignatures).
 
+#### `exists`: asserting presence without pinning a value
+
+Every other matcher states a type and a value. `exists` states neither:
+
+```json
+{"path": [15, "svn"], "exists": true}
+{"path": ["debug-mode"], "exists": false}
+```
+
+It is the only rule available when a header must be there but its value cannot
+be predicted — a nonce, a per-run identifier, a build timestamp. Without it the
+choice was to pin a value that legitimately varies, or to assert nothing at all.
+
+`false` is not a convenience spelling. It is the only way to write "this label
+must not appear", and it is the one rule for which **absence is a `pass`**
+rather than the `cannot-evaluate` an absent header produces for every other
+matcher. That inversion is the point: a policy refusing a debug or test-mode
+label is asserting something real about the statement.
+
+`exists` may not be combined with `text`, `int` or `alg`. Pairing them is
+either redundant — every type matcher already requires the header to be present
+— or contradictory, and which one it was would depend on which the engine
+consulted first.
+
+### `payloadJson`
+
+Every assertion above reads the envelope. This one reads the document the
+envelope carries, which is where the fields a release gate actually wants
+usually live: a build id, a source commit, a package version.
+
+```json
+"payloadJson": [
+  {"path": ["source", "commit"], "text": {"equals": "907a1bdbd0a05d557e3d8325f009ba662a2733cd"}},
+  {"path": ["source", "branch"], "text": {"equals": "refs/heads/master"}},
+  {"path": ["build", "id"], "exists": true},
+  {"path": ["build", "debug"], "bool": false},
+  {"path": ["tags", 0], "text": {"equals": "release"}}
+]
+```
+
+Without it, a gate has to run `verify` and then pick the payload apart with a
+second tool — and that second step sits outside the decision, outside the
+verification record, and outside the exit code the pipeline branches on. One
+policy can now say *registered by this ledger **and** built from this commit*,
+and an auditor reading the record months later sees both halves.
+
+`inspect` prints every claim beside the `path` that reaches it, ready to paste:
+
+```text
+Payload
+  bytes               72096
+  content type        application/json
+  sha-256             cda6cdfcddedf014af68b5b1e9453c5148b874b49d7eba287439914a65234be8
+  json
+    ['build']                                    object of 2
+      ['build', 'id']                              '138849098'
+      ['build', 'number']                          '1.11.03195.4884'
+    ['security-policy-base64']                   5676 chars: cGFja2FnZSBwb2xpY3kKCmltcG9ydCBm…
+    ['source']                                   object of 2
+      ['source', 'branch']                         'refs/heads/master'
+```
+
+#### Paths
+
+Written exactly as they are for a protected header: a JSON string addresses an
+object key, a JSON number an array index. One notation covers both halves of a
+policy, and the CBOR ambiguity does not arise — JSON object keys are always
+strings and arrays always indexed by position, so the segment's own type says
+which is meant. Even a key that looks numeric, `{"2024": …}`, is addressed
+unambiguously as `"2024"`.
+
+This is a segment array rather than an [RFC 6901][rfc6901] JSON Pointer
+specifically so there is **no escaping convention to get wrong**. A key
+containing `/` or `~` is just a string here; in a pointer it must be written
+`~1` or `~0`, and a mis-escaped pointer resolves to nothing — so the rule
+reports "no such claim", which to the person reading the report is
+indistinguishable from a payload that genuinely lacks the field. Keys
+containing `/` are not hypothetical; media-type-keyed objects are routine in
+in-toto and OCI descriptors.
+
+[rfc6901]: https://www.rfc-editor.org/rfc/rfc6901
+
+#### Matchers
+
+| Matcher | Matches |
+|---|---|
+| `text` | A JSON string. Same `equals` / `startsWith` / `oneOf` as elsewhere |
+| `int` | A JSON integer |
+| `bool` | Exactly `true` or `false` |
+| `exists` | Presence or absence, whatever the type — see above |
+
+Exactly one per rule.
+
+**Types are not coerced.** A build id written as the *string* `"138849098"`
+fails an `int` matcher rather than being converted, and a fractional number or
+one beyond the range of a 64-bit integer fails rather than being rounded. The
+type a producer chose is part of what they signed, and silently converting it
+would let a report show a pass against a value the engine never compared.
+
+#### Only a payload the issuer declared to be JSON is read
+
+The content type comes from the protected header. It is never sniffed from the
+bytes: a document is JSON because its issuer signed a claim that it is, and
+guessing would let a policy read a structure nobody attested. `application/json`
+and any [RFC 6839][rfc6839] `+json` suffix — `application/spdx+json`,
+`application/vnd.in-toto+json` — are read; a `charset` parameter is ignored.
+
+[rfc6839]: https://www.rfc-editor.org/rfc/rfc6839
+
+#### Outcomes
+
+| Situation | Outcome |
+|---|---|
+| The claim is present and matches | `pass` |
+| The claim is present and does not match | `fail` |
+| The claim is present but is a different JSON type | `fail` |
+| The path descends into a scalar, or indexes an object by position | `fail` |
+| The statement declares JSON and its payload is not valid JSON | `fail` — the statement contradicts itself |
+| The payload repeats an object key | `fail` — see below |
+| The claim is absent | `cannotEvaluate` (or `pass`/`fail` under `exists`) |
+| The statement declares a content type that is not JSON | `cannotEvaluate` |
+| The statement declares no content type at all | `cannotEvaluate` |
+| The statement is a hash envelope | `cannotEvaluate` — the payload is a digest of the document, not the document |
+| The payload is detached | `cannotEvaluate` |
+
+The split between the last five rows and the rest is the one that matters. "This
+statement is not the kind this rule applies to" and "this statement is broken"
+call for opposite responses from whoever reads the report.
+
+#### A repeated key is refused, not resolved
+
+JSON permits an object to name the same key twice, and implementations disagree
+about which one wins. A signed document carrying
+`{"commit": "good", "commit": "bad"}` would otherwise satisfy a policy here
+while meaning something else to the next tool that read the very same bytes.
+Neither value can be trusted, so neither is chosen — the same refusal the header
+path already makes for a repeated CBOR label.
+
+#### What a payload claim is worth
+
+The payload is covered by the issuer's signature and carried into the receipt by
+the claim digest, so this is the **same strength class as `protectedHeaders`** —
+not weaker for sitting outside the header bucket. As with `protectedHeaders`,
+the tool assigns the value no meaning: it reports that the issuer signed this
+claim with this value, and what that is worth depends on what the field means to
+you.
+
 ### `externalSignatures`
 
 Some producers carry a *second party's* signature inside the statement's
@@ -782,6 +931,13 @@ receipt-covered bucket, so its strength matches `statementSubject` and
 `statementIssuer` — with the caveat that the tool assigns the value no meaning.
 It reports that the issuer signed this label with this value; what that is
 worth depends entirely on what the label means to you.
+
+`payloadJson` reads the document inside the same signed, receipt-covered
+envelope, so it sits in the same class as `protectedHeaders` — the issuer signed
+it and the claim digest carries it into the receipt. It is the assertion most
+likely to be load-bearing in practice, because a commit or a build id is what a
+deployment gate is actually trying to pin, but the tool assigns the field no
+meaning: what a passing claim is worth depends on what that field means to you.
 
 `externalSignatures` is the one assertion that performs cryptography of its own
 rather than reading a fact established elsewhere. A pass means a private key was

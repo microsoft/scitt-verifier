@@ -1,5 +1,75 @@
 # Changelog
 
+## Unreleased
+
+### Policy can assert on claims inside the payload
+
+The assertions this tool shipped with all read the COSE envelope. The fields a
+release gate actually wants — a build id, a source commit, a package version —
+live in the payload, so a gate had to run `verify` and then pick the payload
+apart with a second tool. That second step sat outside the decision, outside the
+verification record, and outside the exit code the pipeline branches on.
+
+`payloadJson` closes that gap:
+
+```json
+"payloadJson": [
+  {"path": ["source", "commit"], "text": {"equals": "907a1bd…"}},
+  {"path": ["build", "id"], "exists": true}
+]
+```
+
+One policy now says *registered by this ledger **and** built from this commit*,
+and both halves land in the record an auditor reads.
+
+Paths are written exactly as they are for `protectedHeaders` rather than as
+RFC 6901 JSON Pointers, so there is no escaping convention to get wrong: a key
+containing `/` is just a string. A mis-escaped pointer would resolve to nothing
+and report "no such claim", which is indistinguishable from a payload that
+genuinely lacks the field.
+
+Only a payload whose **declared** content type says JSON is read —
+`application/json` or any RFC 6839 `+json` suffix. The bytes are never sniffed:
+a document is JSON because its issuer signed a claim that it is. A hash
+envelope, a detached payload, a missing content type, and any other declared
+type all give `cannotEvaluate`; a statement that declares JSON and carries
+something else **fails**, because that is the statement contradicting itself
+rather than a missing input.
+
+Types are not coerced. A build id written as the string `"138849098"` fails an
+`int` matcher instead of being converted, and a repeated object key is refused
+outright rather than resolved — parsers disagree about which copy wins, so a
+signed document could otherwise satisfy this policy while meaning something else
+to the next tool that read the same bytes.
+
+### `inspect` shows the payload
+
+`Payload / bytes 72096` named the shape and stopped, which proved a payload was
+there and gave a policy author nothing to write a rule against. It is the same
+dead end the uninterpreted-header listing was written to remove, one level down.
+Each claim is now printed beside the `path` that reaches it, ready to paste into
+a `payloadJson` rule.
+
+This also fixes a mismatch between the help text and the behaviour: `--verbose`
+advertised "the full payload", but only `--format json` ever produced it.
+
+Sniffing is deliberately not done here either — `inspect` decodes exactly what
+`payloadJson` will read, so the listing can never advertise a rule the policy
+engine would refuse to evaluate.
+
+### `exists`, for headers and payload claims
+
+```json
+{"path": [15, "svn"], "exists": true}
+{"path": ["debug-mode"], "exists": false}
+```
+
+Every other matcher has to look at a value, so a header whose value cannot be
+predicted — a nonce, a per-run identifier — left the author choosing between
+pinning something that legitimately varies and asserting nothing. `false` is the
+only way to write "this must not appear", and it is the one rule for which
+absence is a `pass` rather than `cannotEvaluate`.
+
 ## 0.4.0
 
 ### `--online` fetches transparency service keys during the run

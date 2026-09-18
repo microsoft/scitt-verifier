@@ -111,12 +111,27 @@ definition is affected.
 | `fixture-mst.json` | Matches the committed fixture. Used by the conformance suite |
 | `fixture-mst-unpinned-count.json` | `fixture-mst.json` without `receiptCount`, so the suite can prove the verdict disregards an appended receipt separately from an operator opting in to a count |
 | `wrong-issuer.json` | Scoped to a service the fixture was not registered with. Must fail with exit 2 |
+| `payload-claims.json` | Asks for a claim inside the payload of a fixture that declares `application/cose`. Must report `cannot-evaluate`, never a pass |
 | `example-release-gate.json` | A starting point for a real deployment gate |
 | `example-dr-pair.json` | A gate for a service running under a primary and a disaster recovery hostname, since `issuer` matching is exact |
 
 The `example-` policies name invented hosts. They are templates to edit, not
-policies to run: the two `fixture-` entries and `wrong-issuer.json` are the only
-ones that describe the committed fixtures.
+policies to run: the two `fixture-` entries, `wrong-issuer.json`, and
+`payload-claims.json` are the only ones that describe the committed fixtures.
+
+`payload-claims.json` is the odd one, because what it pins is a *refusal*.
+Every committed fixture declares `application/cose` or a hash envelope, so none
+of them has a payload this assertion may read. That is precisely what makes it
+worth committing: the content-type gate is the whole safety property of
+`payloadJson`, and a gate is only proven by something it turns away. A future
+change that started sniffing bytes instead of trusting the signed `cty` would
+leave every other test green.
+
+It is also an honest record of a hole in this corpus. There is no fixture with
+a JSON payload, so nothing here demonstrates `payloadJson` *succeeding* end to
+end — that path is covered by unit tests in `scitt-policy` only. Closing it
+needs real bytes from a service that registers JSON claims, not a synthesised
+file, for the reason given in "Reusing this corpus" below.
 
 ## Reusing this corpus
 
