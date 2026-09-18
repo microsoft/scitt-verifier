@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
 
 ### Policy can assert on claims inside the payload
 
@@ -70,7 +70,14 @@ pinning something that legitimately varies and asserting nothing. `false` is the
 only way to write "this must not appear", and it is the one rule for which
 absence is a `pass` rather than `cannotEvaluate`.
 
-## 0.4.0
+### Older binaries reject policies that use the new assertions
+
+A policy containing `payloadJson` or `exists` is refused outright by 0.3.0 and
+earlier, with exit 4 and `unknown field 'payloadJson'`. That is intended, and
+worth planning a rollout around: a policy is a security control, and a binary
+that silently skipped the rules it did not recognise would report a pass for
+checks nobody ran. Upgrade the verifier before distributing a policy that uses
+them.
 
 ### `--online` fetches transparency service keys during the run
 
