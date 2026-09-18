@@ -37,7 +37,7 @@ fn run(args: &[&str]) -> Run {
 
 fn verify(extra: &[&str]) -> Run {
     let statement = corpus(&["fixtures", "transparent-statement.cose"]);
-    let keys = corpus(&["fixtures", "musa-mst-july-scitt-keys.cbor"]);
+    let keys = corpus(&["fixtures", "mst-test-scitt-keys.cbor"]);
     let policy = corpus(&["policies", "fixture-mst.json"]);
     let mut args = vec![
         "verify",
@@ -73,7 +73,7 @@ fn a_genuine_statement_without_an_artifact_is_only_statement_transparent() {
 #[test]
 fn a_tampered_payload_exits_one() {
     let statement = corpus(&["fixtures", "payload-tampered.cose"]);
-    let keys = corpus(&["fixtures", "musa-mst-july-scitt-keys.cbor"]);
+    let keys = corpus(&["fixtures", "mst-test-scitt-keys.cbor"]);
     let policy = corpus(&["policies", "fixture-mst.json"]);
     let r = run(&[
         "verify",
@@ -102,7 +102,7 @@ fn a_tampered_payload_exits_one() {
 #[test]
 fn an_appended_broken_receipt_does_not_deny_the_gate() {
     let statement = corpus(&["fixtures", "appended-receipt.cose"]);
-    let keys = corpus(&["fixtures", "musa-mst-july-scitt-keys.cbor"]);
+    let keys = corpus(&["fixtures", "mst-test-scitt-keys.cbor"]);
     // Deliberately a policy with no `receiptCount`. The property under test is
     // the verdict's own behaviour: an unverifiable receipt beside a good one
     // changes nothing. An operator who wants the stricter rule asks for it, and
@@ -154,7 +154,7 @@ fn an_appended_broken_receipt_does_not_deny_the_gate() {
 #[test]
 fn an_appended_receipt_fails_a_policy_that_pins_the_count() {
     let statement = corpus(&["fixtures", "appended-receipt.cose"]);
-    let keys = corpus(&["fixtures", "musa-mst-july-scitt-keys.cbor"]);
+    let keys = corpus(&["fixtures", "mst-test-scitt-keys.cbor"]);
     let policy = corpus(&["policies", "fixture-mst.json"]);
     let r = run(&[
         "verify",
@@ -193,7 +193,7 @@ fn an_appended_receipt_fails_a_policy_that_pins_the_count() {
 #[test]
 fn a_statement_whose_only_receipt_fails_exits_three_not_one() {
     let statement = corpus(&["fixtures", "tampered-statement.cose"]);
-    let keys = corpus(&["fixtures", "musa-mst-july-scitt-keys.cbor"]);
+    let keys = corpus(&["fixtures", "mst-test-scitt-keys.cbor"]);
     let policy = corpus(&["policies", "fixture-mst.json"]);
     let r = run(&[
         "verify",
@@ -224,7 +224,7 @@ fn stale_trust_material_exits_three_not_one() {
     // reported with the same exit code as a forged artifact. One is an
     // operational chore; the other is an incident.
     let statement = corpus(&["fixtures", "transparent-statement.cose"]);
-    let keys = corpus(&["fixtures", "stale-scitt-keys.cbor"]);
+    let keys = corpus(&["fixtures", "other-service-scitt-keys.cbor"]);
     let policy = corpus(&["policies", "fixture-mst.json"]);
     let r = run(&[
         "verify",
@@ -247,7 +247,7 @@ fn stale_trust_material_exits_three_not_one() {
 #[test]
 fn a_policy_that_rejects_the_issuer_exits_two() {
     let statement = corpus(&["fixtures", "transparent-statement.cose"]);
-    let keys = corpus(&["fixtures", "musa-mst-july-scitt-keys.cbor"]);
+    let keys = corpus(&["fixtures", "mst-test-scitt-keys.cbor"]);
     let policy = corpus(&["policies", "wrong-issuer.json"]);
     let r = run(&[
         "verify",
@@ -279,12 +279,12 @@ fn fixtures_are_byte_exact() {
     for (name, expected) in [
         ("artifact.bin", 21usize),
         ("bad-artifact.bin", 20),
-        ("transparent-statement.cose", 9270),
-        ("tampered-statement.cose", 9270),
-        ("appended-receipt.cose", 10074),
-        ("payload-tampered.cose", 9270),
-        ("musa-mst-july-scitt-keys.cbor", 1219),
-        ("stale-scitt-keys.cbor", 523),
+        ("transparent-statement.cose", 5401),
+        ("tampered-statement.cose", 5401),
+        ("appended-receipt.cose", 5989),
+        ("payload-tampered.cose", 5401),
+        ("mst-test-scitt-keys.cbor", 175),
+        ("other-service-scitt-keys.cbor", 523),
     ] {
         let bytes = std::fs::read(corpus(&["fixtures", name]))
             .unwrap_or_else(|e| panic!("fixture {name} must be readable: {e}"));
@@ -341,7 +341,7 @@ fn an_unknown_option_exits_four() {
 /// silently drop a check its author believed was running.
 #[test]
 fn the_removed_issuer_flag_is_refused_rather_than_ignored() {
-    let r = verify(&["--issuer", "musa-mst-aug-2.confidential-ledger.azure.com"]);
+    let r = verify(&["--issuer", "example-ledger.confidential-ledger.azure.com"]);
     assert_eq!(r.code, 4, "{}", r.stderr);
     assert!(r.stderr.contains("unknown option"), "{}", r.stderr);
 }
@@ -349,7 +349,7 @@ fn the_removed_issuer_flag_is_refused_rather_than_ignored() {
 #[test]
 fn a_missing_policy_exits_four() {
     let statement = corpus(&["fixtures", "transparent-statement.cose"]);
-    let keys = corpus(&["fixtures", "musa-mst-july-scitt-keys.cbor"]);
+    let keys = corpus(&["fixtures", "mst-test-scitt-keys.cbor"]);
     let r = run(&["verify", "--statement", &statement, "--scitt-keys", &keys]);
     assert_eq!(r.code, 4);
     assert!(r.stderr.contains("--policy is required"));
@@ -484,8 +484,8 @@ fn every_failure_path_still_writes_a_record() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let statement = corpus(&["fixtures", "transparent-statement.cose"]);
-    let keys = corpus(&["fixtures", "musa-mst-july-scitt-keys.cbor"]);
-    let stale = corpus(&["fixtures", "stale-scitt-keys.cbor"]);
+    let keys = corpus(&["fixtures", "mst-test-scitt-keys.cbor"]);
+    let stale = corpus(&["fixtures", "other-service-scitt-keys.cbor"]);
     let policy = corpus(&["policies", "fixture-mst.json"]);
     let artifact = corpus(&["fixtures", "artifact.bin"]);
     let missing = dir.join("does-not-exist").display().to_string();
@@ -760,7 +760,7 @@ fn a_policy_that_evaluates_nothing_still_names_the_problem() {
     .unwrap();
 
     let statement = corpus(&["fixtures", "transparent-statement.cose"]);
-    let keys = corpus(&["fixtures", "musa-mst-july-scitt-keys.cbor"]);
+    let keys = corpus(&["fixtures", "mst-test-scitt-keys.cbor"]);
     let r = run(&[
         "verify",
         "--statement",
@@ -787,7 +787,7 @@ fn a_policy_that_evaluates_nothing_still_names_the_problem() {
 #[test]
 fn json_mode_is_one_protocol() {
     let statement = corpus(&["fixtures", "transparent-statement.cose"]);
-    let keys = corpus(&["fixtures", "stale-scitt-keys.cbor"]);
+    let keys = corpus(&["fixtures", "other-service-scitt-keys.cbor"]);
     let policy = corpus(&["policies", "fixture-mst.json"]);
     let r = run(&[
         "verify",
@@ -885,7 +885,7 @@ fn help_and_version_succeed() {
 
 fn verify_envelope(extra: &[&str]) -> Run {
     let statement = corpus(&["fixtures", "hash-envelope.cose"]);
-    let keys = corpus(&["fixtures", "musa-mst-july-scitt-keys.cbor"]);
+    let keys = corpus(&["fixtures", "mst-test-scitt-keys.cbor"]);
     let policy = corpus(&["policies", "fixture-mst.json"]);
     let mut args = vec![
         "verify",
@@ -1063,7 +1063,7 @@ fn verify_with_subject_policy(name: &str, criteria: &str) -> Run {
     .unwrap();
 
     let statement = corpus(&["fixtures", "transparent-statement.cose"]);
-    let keys = corpus(&["fixtures", "musa-mst-july-scitt-keys.cbor"]);
+    let keys = corpus(&["fixtures", "mst-test-scitt-keys.cbor"]);
     let r = run(&[
         "verify",
         "--statement",
@@ -1106,10 +1106,15 @@ fn a_statement_about_something_else_fails_the_policy() {
 }
 
 /// The real `iss` claim in the corpus statement. A `did:x509` binds the CA
-/// fingerprint and the EKU, and Microsoft Signing Transparency authenticates it
-/// at registration, so a receipt over this claim means the service checked the
+/// fingerprint and the EKU, and the transparency service authenticates it at
+/// registration, so a receipt over this claim means the service checked the
 /// signer was entitled to the identity.
-const FIXTURE_ISSUER: &str = "did:x509:0:sha256:1UncIxT3oW5JalFUkbJzvJwJjkCgcNYe8WAocPDEAtg::eku:1.3.6.1.4.1.311.97.1.3.1.29433.35007.34545.16815.37291.11644.53265.56135";
+///
+/// The fingerprint is the SHA-256 of the corpus issuing CA, so it changes
+/// whenever `corpus/tools/generate_fixtures.py` mints a new chain. The
+/// regenerator prints the value to paste here.
+const FIXTURE_ISSUER: &str =
+    "did:x509:0:sha256:12_fzPuLgftjDn11g05T4lOItyjNHc7akSntxDcX3xw::eku:1.3.6.1.4.1.311.97.1.3.1";
 
 fn verify_with_issuer_policy(name: &str, criteria: &str) -> Run {
     let dir = std::env::temp_dir().join(format!("scitt-verifier-issuer-{name}"));
@@ -1125,7 +1130,7 @@ fn verify_with_issuer_policy(name: &str, criteria: &str) -> Run {
     .unwrap();
 
     let statement = corpus(&["fixtures", "transparent-statement.cose"]);
-    let keys = corpus(&["fixtures", "musa-mst-july-scitt-keys.cbor"]);
+    let keys = corpus(&["fixtures", "mst-test-scitt-keys.cbor"]);
     let r = run(&[
         "verify",
         "--statement",
@@ -1174,7 +1179,7 @@ fn an_issuer_prefix_pins_the_authority_without_pinning_the_eku() {
     // `equals` pin would reject.
     let r = verify_with_issuer_policy(
         "prefix",
-        r#"{"startsWith":"did:x509:0:sha256:1UncIxT3oW5JalFUkbJzvJwJjkCgcNYe8WAocPDEAtg"}"#,
+        r#"{"startsWith":"did:x509:0:sha256:12_fzPuLgftjDn11g05T4lOItyjNHc7akSntxDcX3xw"}"#,
     );
     assert_eq!(r.code, 0, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
     assert!(r.stdout.contains("[pass] statementIssuer"), "{}", r.stdout);
@@ -1221,7 +1226,7 @@ fn verify_with_header_policy(name: &str, list: &str) -> Run {
     .unwrap();
 
     let statement = corpus(&["fixtures", "transparent-statement.cose"]);
-    let keys = corpus(&["fixtures", "musa-mst-july-scitt-keys.cbor"]);
+    let keys = corpus(&["fixtures", "mst-test-scitt-keys.cbor"]);
     let r = run(&[
         "verify",
         "--statement",
@@ -1463,7 +1468,7 @@ fn a_nested_path_read_from_inspect_can_be_pasted_into_a_policy() {
     )
     .unwrap();
 
-    let keys = corpus(&["fixtures", "musa-mst-aug-scitt-keys.cbor"]);
+    let keys = corpus(&["fixtures", "mst-test-scitt-keys.cbor"]);
     let r = run(&[
         "verify",
         "--statement",
@@ -1580,7 +1585,7 @@ fn verify_cbor_header_fixture(name: &str, assertions: &str) -> Run {
     .unwrap();
 
     let statement = corpus(&["fixtures", "cbor-header.cose"]);
-    let keys = corpus(&["fixtures", "musa-mst-aug-scitt-keys.cbor"]);
+    let keys = corpus(&["fixtures", "mst-test-scitt-keys.cbor"]);
     let r = run(&[
         "verify",
         "--statement",
@@ -1679,7 +1684,7 @@ fn verify_nested_fixture(name: &str, assertions: &str) -> Run {
     .unwrap();
 
     let statement = corpus(&["fixtures", "nested-sign1.cose"]);
-    let keys = corpus(&["fixtures", "musa-mst-aug-scitt-keys.cbor"]);
+    let keys = corpus(&["fixtures", "mst-test-scitt-keys.cbor"]);
     let r = run(&[
         "verify",
         "--statement",
@@ -1787,7 +1792,10 @@ fn a_key_set_and_online_together_are_refused() {
 
 #[test]
 fn ledger_without_online_is_refused() {
-    let r = verify(&["--ledger", "musa-mst-july.confidential-ledger.azure.com"]);
+    let r = verify(&[
+        "--ledger",
+        "mst-test-scitt-verifier.confidential-ledger.azure.com",
+    ]);
     assert_eq!(r.code, 4, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
 }
 
@@ -1994,7 +2002,7 @@ fn a_payload_claim_is_not_read_from_a_statement_that_declares_another_type() {
     // bytes might happen to parse — so this must abstain rather than pass,
     // and must not report the claim merely absent.
     let statement = corpus(&["fixtures", "transparent-statement.cose"]);
-    let keys = corpus(&["fixtures", "musa-mst-july-scitt-keys.cbor"]);
+    let keys = corpus(&["fixtures", "mst-test-scitt-keys.cbor"]);
     let policy = corpus(&["policies", "payload-claims.json"]);
     let r = run(&[
         "verify",

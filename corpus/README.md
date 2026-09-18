@@ -7,34 +7,43 @@ implementing SCITT receipt verification independently.
 
 | File | What it is |
 |---|---|
-| `transparent-statement.cose` | A genuine transparent statement from Microsoft Signing Transparency: PS256, a four-certificate chain, and one CCF receipt |
+| `transparent-statement.cose` | A genuine transparent statement: PS256, a four-certificate chain, and one CCF receipt |
 | `tampered-statement.cose` | The same statement with a byte flipped inside the *receipt* — the Issuer's signature over the statement still verifies, but the transparency service's signature over the Merkle root does not |
 | `appended-receipt.cose` | The genuine statement with a second, corrupted receipt appended to the unprotected header — no key required, since nothing signs that bucket |
 | `payload-tampered.cose` | The same statement with a modified payload — the receipt is untouched and still valid *for the original statement* |
 | `artifact.bin` | The 21-byte artifact the genuine statement's payload equals — `Hello from MST Team\r\n`, **CRLF included** |
 | `bad-artifact.bin` | A different artifact, for the negative binding case |
-| `musa-mst-july-scitt-keys.cbor` | The transparency service's signing keys, as a COSE_KeySet |
-| `stale-scitt-keys.cbor` | A key set from before a rotation — parses fine, contains the wrong kid |
-| `cbor-header.cose` | A component manifest registered on a second service, carrying a detached supplier signature under a **CBOR-valued text label**, `external-signature`. ES256, a two-certificate chain, one CCF receipt |
-| `musa-mst-aug-scitt-keys.cbor` | The second service's keys, for `cbor-header.cose` and `nested-sign1.cose` |
+| `mst-test-scitt-keys.cbor` | The transparency service's signing keys, as a COSE_KeySet |
+| `other-service-scitt-keys.cbor` | A key set from a *different* transparency service — parses fine, contains the wrong kid |
+| `cbor-header.cose` | A component manifest carrying a detached supplier signature under a **CBOR-valued text label**, `external-signature`. ES256, a two-certificate chain, one CCF receipt |
 | `nested-sign1.cose` | The same claim in COSE's own shape: a tag-18 COSE_Sign1 with a **detached payload** under the text label `external-statement`. RS256 supplier signature, ES256 envelope, one CCF receipt |
+
+Every `.cose` file here was registered on a real transparency service, so every
+receipt, inclusion proof and root signature is genuine. The signing identities
+are not: they are throwaway certificates minted by
+`corpus/tools/generate_fixtures.py` for this corpus alone. Nothing here
+corresponds to a real product, part, or signer, and no fixture carries anyone
+else's bytes.
 
 `payload-tampered.cose` is the most instructive of these. Its receipt is
 genuine, its inclusion proof is valid, and its root signature verifies. It is
 still not evidence about this payload, because the claims digest no longer
 matches. Any implementation that omits the binding check will accept it.
 
-Every file here is exact bytes from a transparency service, so `.gitattributes`
-marks `*.cose`, `*.cbor`, and `*.bin` as binary. This is not cosmetic:
+Every file here is exact bytes as returned by the transparency service, so
+`.gitattributes` marks `*.cose`, `*.cbor`, and `*.bin` as binary. This is not
+cosmetic:
 `artifact.bin` is pure ASCII ending in CRLF, and without that rule git will
 classify it as text and rewrite the line ending on checkout, changing its length
 and breaking the binding check. `fixtures_are_byte_exact` in the acceptance
 suite fails loudly if that ever happens again.
 
-`stale-scitt-keys.cbor` exercises the other distinction worth defending: a
-rotated key must produce a different outcome from a forged artifact. One is an
-operational chore, the other is an incident, and a verifier that reports them
-identically will train its users to ignore both.
+`other-service-scitt-keys.cbor` exercises the other distinction worth
+defending: trust material that does not cover this receipt must produce a
+different outcome from a forged artifact. One is an operational problem — the
+wrong key set was fetched, or the service's keys have moved on — the other is
+an incident, and a verifier that reports them identically will train its users
+to ignore both.
 
 `appended-receipt.cose` and `tampered-statement.cose` together pin what a
 broken receipt may and may not do. Receipts travel in the unprotected header,
@@ -66,17 +75,16 @@ certificate is self-signed, so subject and issuer name the same throwaway
 identity, and pinning either proves only that whoever assembled the fixture
 chose that string. That makes it the honest demonstration of the assertion's
 ceiling. The two identities are also deliberately unrelated: the envelope is
-signed by a load-test identity, while the header's `x5chain` carries a separate,
-throwaway supplier certificate generated for this fixture alone. Nothing in this
-file corresponds to a real product, part, or signer.
+signed by one throwaway chain, while the header's `x5chain` carries a separate
+supplier certificate generated for this fixture alone.
 
 `nested-sign1.cose` carries the same claim in the shape COSE already defines: a
 tag-18 COSE_Sign1 under the text label `external-statement`, with its payload
 **detached** (`nil`) so the outer statement's bytes are not duplicated. At the
-size of a certificate chain the wrapper costs five bytes over the hand-rolled
-descriptor — 1,522 against 1,517 — while removing the question the descriptor
-cannot answer, since `Sig_structure` names exactly which bytes are covered
-instead of leaving it to convention.
+size of a certificate chain the wrapper costs nothing — 1,539 bytes against the
+descriptor's 1,596 — while removing the question the descriptor cannot answer,
+since `Sig_structure` names exactly which bytes are covered instead of leaving
+it to convention.
 
 It exists because the two shapes are read by different code paths and must not
 silently read each other. It also guards a specific defect: the upstream COSE
@@ -88,20 +96,45 @@ and this fixture is what proves it.
 
 ## Pinned values
 
-Independently confirmed against the .NET prototype and `pyscitt`:
+Computed by `pyscitt` and `cbor2` in `corpus/tools/generate_fixtures.py`,
+independently of the code under test:
 
 | Property | Value |
 |---|---|
-| Signed statement length | 8462 bytes |
-| Claim digest (SHA-256) | `5207494c12c986e33324c602e535717f67f0a6b56235f413e4a07d4d66d59565` |
-| Merkle root | `f369f5f4ce1e2bf6aa120e7f86e907130ede4ed75944e663d4c7b0a14da35993` |
+| Signed statement length | 4809 bytes |
+| Claim digest (SHA-256) | `6f7607e4d68fd01298c47897357a093944de8c033c99bbb3284b8243aa0e6d11` |
+| Merkle root | `c8dee06dcaa9268cd2910ca78d24a18490789a9d24acba96534dfe8f3b788c14` |
 | Statement algorithm | PS256 (COSE −37) |
 | Receipt algorithm | ES384 (COSE −35) |
 
-These are asserted in `crates/scitt-receipt/tests/conformance.rs`. **A failure
-there is not a test to update.** If the claim digest changes, the definition of
-"the same statement" has changed, and every receipt ever issued against the old
-definition is affected.
+These are asserted in `crates/scitt-receipt/tests/conformance.rs` and again
+through the JavaScript boundary in `crates/scitt-wasm/tests/corpus.node.mjs`.
+**A failure there is not a test to update.** If the claim digest changes for a
+fixture that has not been regenerated, the definition of "the same statement"
+has changed, and every receipt ever issued against the old definition is
+affected.
+
+## Regenerating
+
+`corpus/tools/generate_fixtures.py` rebuilds every fixture from scratch:
+
+```sh
+python corpus/tools/generate_fixtures.py \
+  --ledger mst-test-scitt-verifier.confidential-ledger.azure.com \
+  --out corpus/fixtures
+```
+
+It mints throwaway keys and certificates, signs, registers each statement on
+the named service, recaptures the transparent statement, derives the three
+mutants structurally rather than by copying byte offsets, and captures the
+service's key set. It then prints the pinned values above and the `did:x509`
+issuer, both of which move with the freshly minted CA and have to be pasted
+into `conformance.rs`, `corpus.node.mjs` and `acceptance.rs`.
+
+The tool exists because the corpus previously could not be rebuilt: it was
+signed against one person's test ledger, and when that ledger was deleted every
+`--online` example in the documentation broke with no way to produce new bytes.
+Fixtures that cannot be regenerated cannot be corrected.
 
 ## Policies
 
@@ -129,13 +162,20 @@ leave every other test green.
 
 It is also an honest record of a hole in this corpus. There is no fixture with
 a JSON payload, so nothing here demonstrates `payloadJson` *succeeding* end to
-end — that path is covered by unit tests in `scitt-policy` only. Closing it
-needs real bytes from a service that registers JSON claims, not a synthesised
-file, for the reason given in "Reusing this corpus" below.
+end — that path is covered by unit tests in `scitt-policy` only. Now that
+`generate_fixtures.py` registers statements on a live service, closing it is a
+matter of signing one more statement with `cty: application/json`; it is left
+open deliberately rather than for want of a way to produce the bytes.
 
 ## Reusing this corpus
 
-The fixtures are real bytes from a real transparency service, not synthesised.
-If you are implementing verification independently — in TypeScript for a browser,
-in Go, in another language — these are useful as a cross-implementation check.
-The pinned digests above are the values to reproduce.
+The receipts here are real: each statement was registered on a live
+transparency service, so the inclusion proofs and root signatures are the
+service's own. If you are implementing verification independently — in
+TypeScript for a browser, in Go, in another language — these are useful as a
+cross-implementation check. The pinned digests above are the values to
+reproduce.
+
+What the corpus deliberately does not carry is a real signer. Every
+certificate is throwaway, so nothing here can be used to argue that a
+particular product, vendor or identity was or was not registered.

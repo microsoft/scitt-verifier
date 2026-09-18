@@ -26,7 +26,7 @@ Five values in that output are the ones you will quote in a policy:
 
 | `inspect` shows | Assertion that pins it |
 |---|---|
-| `Receipt 1` → `iss` — `musa-mst-july.confidential-ledger.azure.com` | `issuer` |
+| `Receipt 1` → `iss` — `mst-test-scitt-verifier.confidential-ledger.azure.com` | `issuer` |
 | `cwt claims` → `iss` — `did:x509:0:sha256:1Unc...` | `statementIssuer` |
 | `cwt claims` → `sub` — `unknown.intent` | `statementSubject` |
 | `Signing certificate` → `subject` / `issuer` | `signerSubjectContains` / `signerIssuerContains` |
@@ -46,7 +46,7 @@ Two assertions earn their place in almost every policy:
   "policyId": "example/baseline",
   "policyVersion": "1",
   "assertions": {
-    "issuer": ["musa-mst-july.confidential-ledger.azure.com"],
+    "issuer": ["mst-test-scitt-verifier.confidential-ledger.azure.com"],
     "receiptCount": 1
   }
 }
@@ -172,8 +172,8 @@ receipt declares in its own CWT `iss` claim.
 
 **Matching is exact, not substring.** This is the mistake worth warning about,
 because the assertion directly below it — `signerIssuerContains` — *is* a
-substring rule, and the two names look alike. `"issuer": ["musa-mst-july"]`
-does not match a receipt from `musa-mst-july.confidential-ledger.azure.com`; it
+substring rule, and the two names look alike. `"issuer": ["mst-test-scitt-verifier"]`
+does not match a receipt from `mst-test-scitt-verifier.confidential-ledger.azure.com`; it
 fails, and the report reads like a rejected artifact rather than a typo. Paste
 the full hostname from `inspect`.
 
@@ -276,8 +276,8 @@ said it. Both sit in the protected CWT claims, so the issuer's signature covers
 them, and the claim digest carries them into the receipt.
 
 ```json
-{ "statementIssuer": { "equals": "did:x509:0:sha256:1UncIxT3oW5J...::eku:1.3.6.1.4.1.311.97.1.3.1..." } }
-{ "statementIssuer": { "startsWith": "did:x509:0:sha256:1UncIxT3oW5J" } }
+{ "statementIssuer": { "equals": "did:x509:0:sha256:12_fzPuLgftjDn11g05...::eku:1.3.6.1.4.1.311.97.1.3.1..." } }
+{ "statementIssuer": { "startsWith": "did:x509:0:sha256:12_fzPuLgftjDn11g05" } }
 { "statementIssuer": { "oneOf": ["did:x509:0:sha256:aaa", "did:x509:0:sha256:bbb"] } }
 ```
 
@@ -1030,7 +1030,7 @@ identity:
   "assertions": {
     "issuer": ["contoso.confidential-ledger.azure.com"],
     "statementIssuer": {
-      "startsWith": "did:x509:0:sha256:1UncIxT3oW5JalFUkbJzvJwJjkCgcNYe8WAocPDEAtg::"
+      "startsWith": "did:x509:0:sha256:CONTOSO_CA_FINGERPRINT::"
     },
     "receiptCount": 1,
     "maxAgeDays": 30,
@@ -1044,16 +1044,16 @@ because the receipt covers the former and does not cover the latter. Add
 `signerIssuerContains` alongside it if you want the certificate DN in the
 report, but do not let it stand in for the identity check.
 
-**Runnable against this repository.** The statement in `corpus/fixtures` is a
-real Microsoft Signing Transparency artifact, so this policy exercises every
-value the walkthrough discovered:
+**Runnable against this repository.** The statement in `corpus/fixtures` carries
+a genuine receipt from a live transparency service, so this policy exercises
+every value the walkthrough discovered:
 
 ```json
 {
   "policyId": "example/walkthrough",
   "policyVersion": "1",
   "assertions": {
-    "issuer": ["musa-mst-july.confidential-ledger.azure.com"],
+    "issuer": ["mst-test-scitt-verifier.confidential-ledger.azure.com"],
     "statementSubject": { "equals": "unknown.intent" },
     "receiptCount": 1,
     "requireKidBoundToKey": true
@@ -1064,7 +1064,7 @@ value the walkthrough discovered:
 ```console
 $ scitt-verifier verify \
     --statement corpus/fixtures/transparent-statement.cose \
-    --scitt-keys corpus/fixtures/musa-mst-july-scitt-keys.cbor \
+    --scitt-keys corpus/fixtures/mst-test-scitt-keys.cbor \
     --policy walkthrough.json
 ```
 

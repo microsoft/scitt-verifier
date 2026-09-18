@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased
+
+### The conformance corpus can be regenerated
+
+Every fixture was signed against one person's test ledger. When that ledger was
+deleted the receipts stayed valid — they are self-contained — but the service
+stopped answering, so `--online`, `scitt-keys fetch`, and every worked example
+in the documentation failed against a host that no longer exists. There was no
+way to produce replacement bytes, which meant the corpus could not be corrected
+either.
+
+`corpus/tools/generate_fixtures.py` now rebuilds the whole corpus: it mints
+throwaway keys and certificates, signs, registers each statement on a named
+transparency service, recaptures the transparent statement, derives the tampered
+and appended variants structurally, and captures the service's key set. It
+computes the pinned claim digest and signed length with `pyscitt` and `cbor2`,
+independently of the code under test, so the cross-implementation check the
+constants exist for survives regeneration.
+
+The fixtures have been regenerated on a long-lived service and the pinned values
+updated to match. Two consequences for anyone using the corpus directly:
+
+- The key set is now `mst-test-scitt-keys.cbor`. It is no longer named after a
+  hostname, because naming a file after a service is what forced this change to
+  touch tests, workflows, the demo, and the documentation at once.
+- `stale-scitt-keys.cbor` is now `other-service-scitt-keys.cbor`. It was never
+  a rotated key set; it is a different service's keys, and it always tested that
+  trust material which does not cover a receipt reports `cannot-evaluate`
+  rather than a forgery.
+
+The signing identities in the corpus are throwaway certificates minted for it.
+The receipts remain genuine — each statement really was registered — so the
+corpus is still usable as a cross-implementation check.
+
 ## 0.4.0
 
 ### Policy can assert on claims inside the payload

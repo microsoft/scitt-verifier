@@ -3,8 +3,8 @@
   "policyVersion": "1",
   "description": "Matches the committed MST fixture. Used by the conformance suite; not a template for production.",
   "assertions": {
-    "issuer": ["musa-mst-july.confidential-ledger.azure.com"],
-    "signerIssuerContains": "Microsoft Corporation",
+    "issuer": ["mst-test-scitt-verifier.confidential-ledger.azure.com"],
+    "signerIssuerContains": "Example Corpus Issuing CA",
     "receiptCount": 1,
     "requireKidBoundToKey": true
   }

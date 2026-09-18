@@ -28,9 +28,9 @@ const fixtures = join(here, '..', '..', '..', 'corpus', 'fixtures');
 const read = (name) => new Uint8Array(readFileSync(join(fixtures, name)));
 
 const PINNED = {
-  signedStatementLength: 8462,
-  claimDigest: '5207494c12c986e33324c602e535717f67f0a6b56235f413e4a07d4d66d59565',
-  merkleRoot: 'f369f5f4ce1e2bf6aa120e7f86e907130ede4ed75944e663d4c7b0a14da35993',
+  signedStatementLength: 4809,
+  claimDigest: '6f7607e4d68fd01298c47897357a093944de8c033c99bbb3284b8243aa0e6d11',
+  merkleRoot: 'c8dee06dcaa9268cd2910ca78d24a18490789a9d24acba96534dfe8f3b788c14',
   statementAlg: -37, // PS256
   // ES384, not the ES256 that corpus/README.md claimed until the WASM shim
   // reproduced these values and disagreed. The header alg selects the curve
@@ -38,7 +38,7 @@ const PINNED = {
   receiptAlg: -35,
 };
 
-const ISSUER = 'musa-mst-july.confidential-ledger.azure.com';
+const ISSUER = 'mst-test-scitt-verifier.confidential-ledger.azure.com';
 
 let failures = 0;
 const check = (label, actual, expected) => {
@@ -52,8 +52,8 @@ const check = (label, actual, expected) => {
 };
 
 const genuine = read('transparent-statement.cose');
-const keys = read('musa-mst-july-scitt-keys.cbor');
-const staleKeys = read('stale-scitt-keys.cbor');
+const keys = read('mst-test-scitt-keys.cbor');
+const staleKeys = read('other-service-scitt-keys.cbor');
 
 // ---------------------------------------------------------------------------
 // 1. The genuine statement reproduces every pinned value.

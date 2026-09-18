@@ -58,7 +58,7 @@ jobs:
           bin="target/${{ matrix.target }}/release/scitt-verifier${{ matrix.ext }}"
           "$bin" verify \
             --statement corpus/fixtures/transparent-statement.cose \
-            --scitt-keys corpus/fixtures/musa-mst-july-scitt-keys.cbor \
+            --scitt-keys corpus/fixtures/mst-test-scitt-keys.cbor \
             --policy corpus/policies/fixture-mst.json \
             --format text
 

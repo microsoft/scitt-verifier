@@ -99,19 +99,19 @@ one legitimate reason to fetch inside a pipeline is a scheduled rotation job.
 
 ```console
 python tools/scitt-keys.py fetch \
-  --issuer musa-mst-july.confidential-ledger.azure.com \
+  --issuer mst-test-scitt-verifier.confidential-ledger.azure.com \
   --out    .well-known/scitt-keys.cbor
 ```
 
 ```text
-service certificate: https://identity.confidential-ledger.core.azure.com/ledgerIdentity/musa-mst-july
+service certificate: https://identity.confidential-ledger.core.azure.com/ledgerIdentity/mst-test-scitt-verifier
   subject CN=CCF Service
-  sha-256 651449f86ead650db7d53b909e10fd18826eb85f0db9fcd2d6093d3aec9dfab5
-key set: https://musa-mst-july.confidential-ledger.azure.com/.well-known/scitt-keys
-  1219 bytes, sha-256 570d8845a264b260939fc86bc7ba2b2a23c3c7223211247e1da97585cd995322
-  7 key(s), service key present and bound
+  sha-256 b021d80900d21bead1fb8b98f9442d7ed94ab5aa5bf26216202eb615e86dc768
+key set: https://mst-test-scitt-verifier.confidential-ledger.azure.com/.well-known/scitt-keys
+  175 bytes, sha-256 b146b954b2ba79eec5e59748d96064b5f18dfe4b13f90cf5868207985d6faf0e
+  1 key(s), service key present and bound
 
-new trust material: 7 key(s)
+new trust material: 1 key(s)
 ```
 
 Commit both the `.cbor` and the `.provenance.json` beside it.
