@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.4.0
+
+### `--online` fetches transparency service keys during the run
+
+Until now the only way to check a receipt was to hold the service's key set
+already, which meant committing a binary blob to the repository and renewing it
+by hand every time the service rotated. `--online` fetches it instead, and the
+new `online: true` input on the Action does the same.
+
+What it is allowed to fetch is decided by the policy's `issuer` allowlist, not
+by the statement. A receipt cannot nominate the service that vouches for it —
+that inversion is the whole reason the allowlist sits in a reviewed document.
+`--online` and `--scitt-keys` are mutually exclusive.
+
+The fetch is two authenticated steps: the identity service is asked over the
+public web PKI which certificate the ledger presents, and the key set is then
+fetched trusting only that certificate. The key set must contain the key the
+ledger authenticated with, checked against the key material rather than the
+`kid` label, or the acquisition fails.
+
+Verification itself is unchanged and still opens no socket. An acquisition
+failure is reported as an acquisition failure — never as a finding about the
+artifact, and never as a silent fallback to some other key.
+
+`--save-trust <dir>` writes the fetched key sets and service certificates for
+later offline replay with `--scitt-keys`, alongside a manifest recording which
+endpoint served what and when. It refuses to overwrite an existing snapshot,
+and refuses to let `--result` or `--facts` land on a file it wrote.
+
+The record grows an `acquisition` block describing every ledger contacted,
+including those that failed. The facts document carries it too: provenance is an
+observation, not a conclusion.
+
+### Known limits
+
+Revocation is still not checked, and `--online` does not change that — it
+fetches keys, never evidence. Online acquisition needs an x86-64 host with AVX2
+and ADX (2014 or later); the bundled TLS stack requires them, and a host without
+them is now refused with a diagnostic instead of aborting the process.
+
 ## 0.3.0
 
 ### An example policy no longer names a real service

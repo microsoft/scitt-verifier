@@ -8,10 +8,11 @@
 
 use std::path::PathBuf;
 
-pub const USAGE: &str = r#"scitt-verifier — verify SCITT transparent statements offline
+pub const USAGE: &str = r#"scitt-verifier — verify SCITT transparent statements
 
 USAGE:
     scitt-verifier verify  --statement <FILE> --scitt-keys <FILE> --policy <FILE> [OPTIONS]
+    scitt-verifier verify  --statement <FILE> --online --policy <FILE> [OPTIONS]
     scitt-verifier inspect --statement <FILE> [--verbose] [--format <FORMAT>]
     scitt-verifier --version | --help
 
@@ -33,7 +34,18 @@ Binary payloads appear as .payload.hex.
 
 VERIFY OPTIONS:
     --statement <FILE>       Transparent statement (COSE_Sign1).           [required]
-    --scitt-keys <FILE>      Transparency service signing keys (COSE_KeySet). [required]
+    --scitt-keys <FILE>      Transparency service signing keys (COSE_KeySet).
+                             One of --scitt-keys or --online is required.
+    --online                 Acquire the signing keys from a ledger the policy
+                             allowlists, over an authenticated connection.
+                             One of --scitt-keys or --online is required.
+    --ledger <HOST>          Acquire from this ledger only. It must appear in
+                             the policy's assertions.issuer allowlist: this
+                             narrows what the policy already accepts and can
+                             never add to it.                        [--online only]
+    --save-trust <DIR>       Write the acquired key sets, service certificates,
+                             and a provenance manifest here, for audit and for
+                             replay with --scitt-keys.               [--online only]
     --policy <FILE>          Relying-party policy document (JSON).         [required]
     --artifact <FILE>        The artifact the statement should describe.
     --binding-mode <MODE>    none | payload-bytes | payload-digest         [default: none]
@@ -46,7 +58,19 @@ VERIFY OPTIONS:
     --facts <FILE>           Write the observations only — no verdict, no policy.
                              A different document, not a different sink.
                              For systems that make their own decision.
-    --now <UNIX_SECONDS>     Override the clock, for reproducible runs.
+    --now <UNIX_SECONDS>     Override the clock, for reproducible runs. This
+                             changes how the statement is judged, never the
+                             recorded time of an acquisition that did happen.
+
+Verification is offline unless --online is passed. Without it this build makes
+no network request, including when a receipt names a key it does not hold.
+
+--online acquires keys only from issuers the policy already allowlists. The
+statement cannot introduce a ledger: a receipt naming one nobody allowlisted is
+reported as not selected, and no request is made for it.
+
+A live fetch establishes who served the keys. It does not establish that a key
+is unrevoked, that the set is current, or anything about the statement's signer.
 
 EXIT CODES:
     0  transparent, and the policy is satisfied
@@ -105,10 +129,29 @@ pub struct InspectArgs {
     pub format: Format,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrustSource {
+    /// A key set the operator already holds.
+    Local(PathBuf),
+    /// Acquire keys from an allowlisted ledger over an authenticated connection.
+    ///
+    /// `ledger` narrows the policy's allowlist to a single issuer. It cannot
+    /// widen it: an operator who names a ledger the policy does not accept has
+    /// contradicted themselves, and this build refuses rather than picking one
+    /// of the two answers.
+    Online { ledger: Option<String> },
+}
+
+/// One of these, never both and never neither.
+///
+/// Modelled as a sum type rather than two `Option` fields because "which trust
+/// material was used" is the single most consequential fact about a run, and a
+/// shape that can represent "both" or "neither" is a shape where some later
+/// branch has to decide what those mean.
 #[derive(Debug, Clone)]
 pub struct VerifyArgs {
     pub statement: PathBuf,
-    pub scitt_keys: PathBuf,
+    pub trust: TrustSource,
     pub policy: PathBuf,
     pub artifact: Option<PathBuf>,
     pub binding_mode: BindingMode,
@@ -121,6 +164,12 @@ pub struct VerifyArgs {
     /// nothing, and a keyless extraction path is how unauthenticated claims
     /// find their way into an admission policy.
     pub facts: Option<PathBuf>,
+    /// Where to preserve acquired trust material, if asked for.
+    ///
+    /// Online-only: there is nothing to save when the operator supplied the
+    /// keys themselves, and accepting the flag anyway would imply this run
+    /// produced something it did not.
+    pub save_trust: Option<PathBuf>,
     pub now: Option<i64>,
 }
 
@@ -144,6 +193,9 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
 
     let mut statement = None;
     let mut scitt_keys = None;
+    let mut online = false;
+    let mut ledger = None;
+    let mut save_trust = None;
     let mut policy = None;
     let mut artifact = None;
     let mut binding_mode = None;
@@ -156,6 +208,9 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         match flag.as_str() {
             "--statement" => statement = Some(PathBuf::from(value(&mut it, flag)?)),
             "--scitt-keys" => scitt_keys = Some(PathBuf::from(value(&mut it, flag)?)),
+            "--online" => online = true,
+            "--ledger" => ledger = Some(value(&mut it, flag)?.clone()),
+            "--save-trust" => save_trust = Some(PathBuf::from(value(&mut it, flag)?)),
             "--policy" => policy = Some(PathBuf::from(value(&mut it, flag)?)),
             "--artifact" => artifact = Some(PathBuf::from(value(&mut it, flag)?)),
             "--result" => result = Some(PathBuf::from(value(&mut it, flag)?)),
@@ -201,9 +256,51 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     }
 
     let statement = statement.ok_or("--statement is required")?;
-    let scitt_keys = scitt_keys.ok_or(
-        "--scitt-keys is required; without the transparency service's signing keys no receipt can be checked",
-    )?;
+
+    // Exactly one source of trust material. Accepting both would leave the
+    // question of which one a receipt was actually checked against to be
+    // answered by whichever branch ran first, and that is not a thing a reader
+    // of the record could recover afterwards.
+    // Online-only flags are rejected in an offline run rather than ignored.
+    // Accepting one silently would report success for a mode nobody selected.
+    if !online {
+        if ledger.is_some() {
+            return Err(
+                "--ledger selects which allowlisted ledger to acquire keys from, so it only \
+                 means something with --online."
+                    .into(),
+            );
+        }
+        if save_trust.is_some() {
+            return Err(
+                "--save-trust preserves material acquired by --online; an offline run has \
+                 nothing to preserve that the operator does not already have."
+                    .into(),
+            );
+        }
+    }
+
+    let trust = match (scitt_keys, online) {
+        (Some(_), true) => {
+            return Err(
+                "--scitt-keys and --online both supply trust material; pass exactly one. \
+                 Use --scitt-keys to verify against keys you already hold, or --online to \
+                 acquire them from a ledger the policy allowlists."
+                    .into(),
+            )
+        }
+        (None, false) => {
+            return Err(
+                "no trust material: pass --scitt-keys <FILE> to use keys you already hold, \
+                 or --online to acquire them from a ledger the policy allowlists. Without \
+                 either, no receipt can be checked."
+                    .into(),
+            )
+        }
+        (Some(path), false) => TrustSource::Local(path),
+        (None, true) => TrustSource::Online { ledger },
+    };
+
     // There is no default policy. A default would be this tool making a trust
     // decision on the relying party's behalf.
     let policy = policy.ok_or(
@@ -224,13 +321,14 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
 
     Ok(Command::Verify(Box::new(VerifyArgs {
         statement,
-        scitt_keys,
+        trust,
         policy,
         artifact,
         binding_mode,
         format,
         result,
         facts,
+        save_trust,
         now,
     })))
 }

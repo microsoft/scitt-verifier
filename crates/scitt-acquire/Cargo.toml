@@ -1,0 +1,37 @@
+[package]
+name = "scitt-acquire"
+description = "Authenticated online acquisition of SCITT ledger trust material"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# Networking lives here and nowhere else. `scitt-receipt` and `scitt-policy`
+# stay embeddable, and the CI `boundary` job keeps them that way; this crate is
+# what lets the CLI reach a ledger without either of them learning how.
+#
+# The TLS provider is `rustls-graviola` rather than the more common `ring` or
+# `aws-lc-rs` backends because both of those need a C toolchain, which would
+# cost the pure-Rust build the rest of this workspace has. That choice carries
+# no FIPS claim; see docs/trust-material.md.
+[dependencies]
+scitt-receipt = { path = "../scitt-receipt", default-features = false }
+serde_json = "1"
+ureq = { version = "3", default-features = false, features = [
+    "rustls-no-provider",
+    # Mozilla's root store, without the `rustls` umbrella feature, which would
+    # also pull `_ring` and with it a C toolchain.
+    "rustls-webpki-roots",
+] }
+rustls = { version = "0.23", default-features = false, features = ["tls12", "std"] }
+rustls-graviola = "0.4"
+rustls-pki-types = "1"
+webpki-roots = "1"
+
+[features]
+default = ["crypto_pure_rust"]
+crypto_pure_rust = ["scitt-receipt/crypto_pure_rust"]
+crypto_openssl = ["scitt-receipt/crypto_openssl"]
+

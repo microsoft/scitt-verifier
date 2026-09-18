@@ -46,8 +46,8 @@
 use scitt_receipt::{KeyLookup, ReceiptFacts};
 use serde_json::{json, Map, Value};
 
-use crate::cli::{BindingMode, VerifyArgs};
-use crate::outcome::{Assessment, Binding, Checks, Diagnostic, Gap, Trust};
+use crate::cli::{BindingMode, TrustSource, VerifyArgs};
+use crate::outcome::{Acquisition, Assessment, Binding, Checks, Diagnostic, Gap, Trust};
 
 /// The full record: observations, rules, and decision.
 ///
@@ -124,6 +124,14 @@ pub fn build(args: &VerifyArgs, assessment: &Assessment, now: i64) -> Value {
 
     root.insert("inputs".into(), inputs_json(args));
     root.insert("trust".into(), trust_json(&assessment.trust));
+    // Additive, and present only when a fetch was part of the run. A record
+    // from an offline run has no acquisition block at all, rather than an
+    // empty one: "did not fetch" and "fetched nothing" are different runs, and
+    // a consumer keying on the field's presence should get the right answer
+    // without having to read its contents.
+    if let Some(a) = &assessment.acquisition {
+        root.insert("acquisition".into(), acquisition_json(a));
+    }
     root.insert("signedStatement".into(), statement_json(assessment));
     root.insert("receipts".into(), receipts_json(assessment));
     root.insert("artifactBinding".into(), binding_json(args, assessment));
@@ -143,6 +151,14 @@ pub fn facts(args: &VerifyArgs, assessment: &Assessment, now: i64) -> Value {
     let mut root = header(FACTS_SCHEMA, now);
 
     root.insert("trust".into(), trust_json(&assessment.trust));
+    // Provenance is an observation — which endpoint was asked, what it served,
+    // when — not a conclusion, so it belongs here by the same rule that keeps
+    // the policy verdict out. Without it a reader asking "whose key was this
+    // checked against" gets `trust` saying the key set was acquired and
+    // nothing at all saying from where.
+    if let Some(a) = &assessment.acquisition {
+        root.insert("acquisition".into(), acquisition_json(a));
+    }
     root.insert("signedStatement".into(), statement_json(assessment));
     root.insert("receipts".into(), receipts_json(assessment));
     root.insert("artifactBinding".into(), binding_json(args, assessment));
@@ -174,14 +190,76 @@ fn inputs_json(args: &VerifyArgs) -> Value {
     json!({
         "canonical": false,
         "statement": args.statement.display().to_string(),
-        "scittKeys": args.scitt_keys.display().to_string(),
+        // Null in online mode: there was no key file. A path here would name a
+        // file the run never read, and a reader reproducing the run from this
+        // record would go looking for it.
+        "scittKeys": match &args.trust {
+            TrustSource::Local(p) => Value::from(p.display().to_string()),
+            TrustSource::Online { .. } => Value::Null,
+        },
         "policy": args.policy.display().to_string(),
         "artifact": args.artifact.as_ref().map(|p| p.display().to_string()),
     })
 }
 
-/// How the trust material arrived, and therefore what it is worth.
+/// What online mode asked for, what it got, and what it could not get.
 ///
+/// Every selected issuer appears exactly once, whether it answered or not. A
+/// block listing only successes would let a partial outage read as a complete
+/// picture, which is the failure this whole feature has to avoid: the point of
+/// fetching keys is to know whose keys they are, and a record that quietly
+/// omits the ledger nobody could reach does not support that.
+///
+/// The digests are the auditable part. `serviceCertSha256` says which
+/// certificate the connection was authenticated to, and `keysetSha256` says
+/// exactly which bytes were used, so a later run can be compared against this
+/// one without trusting either run's conclusion.
+fn acquisition_json(a: &Acquisition) -> Value {
+    let mut ledgers: Vec<Value> = a
+        .acquired
+        .iter()
+        .map(|x| provenance_json(&x.provenance, true))
+        .chain(
+            a.failed
+                .iter()
+                .map(|x| provenance_json(&x.provenance, false)),
+        )
+        .collect();
+    // Stable order regardless of which finished first, so two records over the
+    // same inputs differ only where the inputs differ.
+    ledgers.sort_by(|l, r| l["issuer"].as_str().cmp(&r["issuer"].as_str()));
+
+    json!({
+        "selected": a.selected,
+        "ledgers": ledgers,
+        // Present when selection stopped before any request. Explains an empty
+        // `selected` rather than leaving the reader to guess between "nothing
+        // was allowlisted" and "nothing was asked".
+        "notAttempted": a.not_attempted,
+    })
+}
+
+fn provenance_json(p: &scitt_acquire::Provenance, acquired: bool) -> Value {
+    json!({
+        "issuer": p.issuer,
+        "acquired": acquired,
+        "provider": p.provider,
+        "identityUrl": p.identity_url,
+        "keysetUrl": p.keyset_url,
+        "serviceCertSha256": p.service_cert_sha256,
+        "keysetSha256": p.keyset_sha256,
+        "serviceKeyKid": p.service_key_kid,
+        "acquiredAt": p.acquired_at,
+        "ambiguousKids": p.ambiguous_kids,
+        "failure": p.failure.as_ref().map(|e| json!({
+            "code": e.diagnostic.code(),
+            "detail": e.detail,
+            "configuration": e.diagnostic.is_configuration(),
+        })),
+    })
+}
+
+/// How the trust material arrived, and therefore what it is worth.///
 /// "The receipt signature is valid" means nothing without "valid under whose
 /// key, and who vouched for it". A consumer auditing a fleet needs to be able
 /// to query for runs that trusted an unsigned key set.
@@ -418,13 +496,14 @@ mod tests {
     fn args() -> VerifyArgs {
         VerifyArgs {
             statement: PathBuf::from("s.cose"),
-            scitt_keys: PathBuf::from("k.cbor"),
+            trust: TrustSource::Local(PathBuf::from("k.cbor")),
             policy: PathBuf::from("p.json"),
             artifact: None,
             binding_mode: BindingMode::None,
             format: Format::Text,
             result: None,
             facts: None,
+            save_trust: None,
             now: None,
         }
     }

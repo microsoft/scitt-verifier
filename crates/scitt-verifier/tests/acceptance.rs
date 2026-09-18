@@ -1749,3 +1749,240 @@ fn naming_the_wrong_convention_cannot_be_evaluated() {
         r.stdout
     );
 }
+
+// ---------------------------------------------------------------------------
+// Online key acquisition.
+//
+// Every test here is network-free by construction, and that is the point
+// rather than a convenience: each one pins a case where the tool must decide
+// *not* to send anything. A test that needed a live service to prove a request
+// was never made would be proving the opposite of what it claims.
+//
+// The paths that do reach a service are covered by the ignored live tests in
+// the scitt-acquire crate, where a real endpoint is named explicitly.
+// ---------------------------------------------------------------------------
+
+/// A run that names no ledger and no key set has not been told how to
+/// establish trust at all.
+#[test]
+fn verify_requires_either_a_key_set_or_online() {
+    let statement = corpus(&["fixtures", "transparent-statement.cose"]);
+    let policy = corpus(&["policies", "fixture-mst.json"]);
+    let r = run(&["verify", "--statement", &statement, "--policy", &policy]);
+    assert_eq!(r.code, 4, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stderr.contains("--scitt-keys") && r.stderr.contains("--online"),
+        "the error must name both ways out: {}",
+        r.stderr
+    );
+}
+
+/// Passing both is a contradiction, and guessing which one was meant is how a
+/// run ends up verifying against material the operator did not choose.
+#[test]
+fn a_key_set_and_online_together_are_refused() {
+    let r = verify(&["--online"]);
+    assert_eq!(r.code, 4, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
+}
+
+#[test]
+fn ledger_without_online_is_refused() {
+    let r = verify(&["--ledger", "musa-mst-july.confidential-ledger.azure.com"]);
+    assert_eq!(r.code, 4, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
+}
+
+#[test]
+fn save_trust_without_online_is_refused() {
+    let r = verify(&["--save-trust", "unused"]);
+    assert_eq!(r.code, 4, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
+}
+
+/// The central guarantee: the policy, not the statement, decides where this
+/// process connects. A policy with no allowlist has not authorised anything,
+/// so there is nothing to fall back to and nothing to infer from the receipt.
+#[test]
+fn online_without_an_issuer_allowlist_refuses_before_reaching_the_network() {
+    let statement = corpus(&["fixtures", "transparent-statement.cose"]);
+    let policy = corpus(&["policies", "minimal.json"]);
+    let r = run(&[
+        "verify",
+        "--statement",
+        &statement,
+        "--policy",
+        &policy,
+        "--online",
+    ]);
+    assert_eq!(r.code, 4, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("AcquisitionNotConfigured"),
+        "the operator must be told the policy is the missing piece: {}",
+        r.stdout
+    );
+    // A run that contacted nothing must not describe itself as holding keys it
+    // never obtained. The refusal is the whole point of this path, and a trust
+    // line reading "acquired from the transparency service" would contradict it
+    // three lines below the diagnostic.
+    assert!(
+        !r.stdout
+            .contains("key set acquired from the transparency service"),
+        "an empty-handed run claimed to have acquired a key set: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("none — no key set was obtained"),
+        "the trust line must say nothing was obtained: {}",
+        r.stdout
+    );
+}
+
+/// `--ledger` narrows the allowlist and can never extend it. Without this, the
+/// flag would be a way to bypass the policy from the command line, and the
+/// allowlist would only bind operators who did not know about it.
+#[test]
+fn an_explicit_ledger_outside_the_allowlist_is_refused() {
+    let statement = corpus(&["fixtures", "transparent-statement.cose"]);
+    let policy = corpus(&["policies", "fixture-mst.json"]);
+    let r = run(&[
+        "verify",
+        "--statement",
+        &statement,
+        "--policy",
+        &policy,
+        "--online",
+        "--ledger",
+        "attacker.confidential-ledger.azure.com",
+    ]);
+    assert_eq!(r.code, 4, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("not in the policy"),
+        "the refusal must say why: {}",
+        r.stdout
+    );
+}
+
+/// A receipt naming a service nobody allowlisted must not cause a request.
+///
+/// Receipts live in the statement's unprotected bucket, so anyone holding the
+/// file can append one. If an appended receipt could choose a destination, a
+/// verifier run would be an outbound request under an attacker's control.
+#[test]
+fn a_receipt_naming_an_unlisted_service_causes_no_request() {
+    let statement = corpus(&["fixtures", "transparent-statement.cose"]);
+    // Two allowlisted services, neither of which the fixture's receipt names,
+    // so selection has a real choice to make and correctly makes none.
+    let policy = corpus(&["policies", "example-dr-pair.json"]);
+    let r = run(&[
+        "verify",
+        "--statement",
+        &statement,
+        "--policy",
+        &policy,
+        "--online",
+    ]);
+    assert_eq!(
+        r.code, 3,
+        "an unlisted issuer is not a bad artifact, it is an unanswerable question: \
+         stdout:\n{}\nstderr:\n{}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("NoLedgerSelected"),
+        "the record must say nothing was selected: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("not looked up") || r.stdout.contains("not attempted"),
+        "the receipt must read as never consulted, not as an unknown key: {}",
+        r.stdout
+    );
+}
+
+/// An allowlist entry this build cannot bootstrap is a configuration fault,
+/// knowable without sending anything. Reporting it as an outage would tell the
+/// operator to retry something that can never succeed.
+#[test]
+fn an_unsupported_provider_is_a_configuration_fault_not_an_outage() {
+    let statement = corpus(&["fixtures", "transparent-statement.cose"]);
+    let policy = corpus(&["policies", "online-unsupported-provider.json"]);
+    let r = run(&[
+        "verify",
+        "--statement",
+        &statement,
+        "--policy",
+        &policy,
+        "--online",
+    ]);
+    assert_eq!(r.code, 4, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
+    assert!(
+        !r.stdout.contains("retry"),
+        "nothing here is worth retrying: {}",
+        r.stdout
+    );
+}
+
+/// A statement this tool cannot read is not a reason to contact anyone. Before
+/// this was checked up front, an unparseable statement produced no candidate
+/// issuers, which a single-entry allowlist ignored — so the run fetched keys it
+/// could never use, and only then failed on the same bytes.
+#[test]
+fn an_unreadable_statement_never_triggers_acquisition() {
+    let dir = std::env::temp_dir().join("scitt-verifier-unreadable-statement");
+    std::fs::create_dir_all(&dir).unwrap();
+    let statement = dir.join("not-a-statement.cose");
+    std::fs::write(&statement, b"this is not COSE").unwrap();
+    let statement = statement.display().to_string();
+    let policy = corpus(&["policies", "online-unsupported-provider.json"]);
+
+    let r = run(&[
+        "verify",
+        "--statement",
+        &statement,
+        "--policy",
+        &policy,
+        "--online",
+        "--format",
+        "json",
+    ]);
+
+    assert!(
+        !r.stdout.contains("\"acquisition\""),
+        "selection ran on a statement that could not be parsed: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains("unsupportedProvider"),
+        "the run reached provider routing instead of stopping at the statement: {}",
+        r.stdout
+    );
+}
+
+/// The offline record must not grow an acquisition block. A consumer keying on
+/// its presence has to be able to tell a fetch from no fetch.
+#[test]
+fn an_offline_run_records_no_acquisition() {
+    let r = verify(&["--format", "json"]);
+    assert_eq!(r.code, 0, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
+    assert!(
+        !r.stdout.contains("\"acquisition\""),
+        "an offline run must not claim to have acquired anything: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("\"scittKeys\""),
+        "an offline run must still record the key set it used: {}",
+        r.stdout
+    );
+}
+
+/// Help has to state the default plainly. A user who cannot tell from the help
+/// whether the tool makes a request cannot audit it without reading the source.
+#[test]
+fn help_says_verification_is_offline_unless_asked() {
+    let r = run(&["--help"]);
+    assert_eq!(r.code, 0);
+    assert!(
+        r.stdout.contains("offline unless --online is passed"),
+        "the default must be stated, not implied: {}",
+        r.stdout
+    );
+}

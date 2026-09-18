@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 scitt-receipt = { path = "../scitt-receipt", default-features = false }
 scitt-policy = { path = "../scitt-policy", default-features = false }
+scitt-acquire = { path = "../scitt-acquire", default-features = false }
 serde_json = "1"
 
 [features]

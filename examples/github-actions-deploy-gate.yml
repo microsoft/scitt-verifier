@@ -3,7 +3,8 @@
 # The shape to notice: verification happens *before* deployment, offline, using
 # trust material committed to this repository. Nothing in this job talks to the
 # transparency service, so the gate keeps working during an outage — and cannot
-# be tricked by one.
+# be tricked by one. See the note on `online:` below for the variant that does
+# contact the service, and what you give up by choosing it.
 #
 # ⚠️ Pin `uses:` to a release tag, as below — never to a branch. A deploy gate
 # that follows a moving ref can change what it enforces without a reviewed
@@ -43,16 +44,25 @@ jobs:
 
       - name: Verify the SBOM was registered on the transparency service
         id: scitt
-        uses: microsoft/scitt-verifier@v0.2.0
+        uses: microsoft/scitt-verifier@v0.4.0
         with:
           statement: sbom.spdx.json.cose
           artifact: sbom.spdx.json
           binding-mode: payload-bytes
           scitt-keys: .well-known/scitt-keys.cbor
           policy: .github/policies/release-gate.json
-          issuer: your-ledger.confidential-ledger.azure.com
           result: scitt-result.json
           on-unevaluable: fail
+      # Which transparency service is acceptable is a policy rule, set by the
+      # `issuer` assertion in release-gate.json — not an input here. Keeping it
+      # in the reviewed policy document means dropping it leaves a diff.
+      #
+      # To fetch the service keys during the run instead of committing them,
+      # replace `scitt-keys:` above with `online: true`. The policy's `issuer`
+      # allowlist then doubles as the list of services that may be contacted;
+      # the statement cannot add one. Everything else here is unchanged,
+      # including `on-unevaluable: fail` — which is what stops a service outage
+      # from becoming a deployment.
 
       # Keep the evidence. Six months from now the question will not be "did it
       # pass" but "what exactly did it check", and the answer lives in here.
