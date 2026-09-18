@@ -1,0 +1,10 @@
+{
+  "policyId": "corpus/payload-claims",
+  "policyVersion": "1",
+  "description": "Asks for a claim inside the payload. The fixture it runs against declares application/cose, so this policy is here to prove the content-type gate holds: a payload is read because its issuer signed a claim that it is JSON, never because the bytes might parse.",
+  "assertions": {
+    "payloadJson": [
+      { "path": ["source", "commit"], "exists": true }
+    ]
+  }
+}

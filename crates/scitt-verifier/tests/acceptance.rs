@@ -1986,3 +1986,42 @@ fn help_says_verification_is_offline_unless_asked() {
         r.stdout
     );
 }
+
+#[test]
+fn a_payload_claim_is_not_read_from_a_statement_that_declares_another_type() {
+    // The corpus fixture declares `application/cose`. A payload is read
+    // because its issuer signed a claim that it is JSON, never because the
+    // bytes might happen to parse — so this must abstain rather than pass,
+    // and must not report the claim merely absent.
+    let statement = corpus(&["fixtures", "transparent-statement.cose"]);
+    let keys = corpus(&["fixtures", "musa-mst-july-scitt-keys.cbor"]);
+    let policy = corpus(&["policies", "payload-claims.json"]);
+    let r = run(&[
+        "verify",
+        "--statement",
+        &statement,
+        "--scitt-keys",
+        &keys,
+        "--policy",
+        &policy,
+    ]);
+    assert_eq!(r.code, 3, "{}", r.stdout);
+    assert!(
+        r.stdout.contains("[CANNOT EVALUATE] payloadJson"),
+        "{}",
+        r.stdout
+    );
+    assert!(r.stdout.contains("not JSON"), "{}", r.stdout);
+}
+
+#[test]
+fn inspect_does_not_list_payload_claims_for_a_payload_declared_another_type() {
+    // The listing exists so an author can paste a `path` into a policy.
+    // Printing one for a payload `payloadJson` will refuse to read would
+    // advertise a rule that can only ever abstain.
+    let statement = corpus(&["fixtures", "transparent-statement.cose"]);
+    let r = run(&["inspect", "--statement", &statement, "--verbose"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(r.stdout.contains("Payload"), "{}", r.stdout);
+    assert!(!r.stdout.contains("\n  json\n"), "{}", r.stdout);
+}

@@ -22,6 +22,7 @@
 //! The crate takes no clock. `now` is passed in, so evaluation is reproducible
 //! and testable.
 
+use scitt_receipt::cbor;
 use scitt_receipt::external::{self, DetachedSigner};
 use scitt_receipt::labels;
 use scitt_receipt::CborValue;
@@ -142,6 +143,27 @@ pub struct Assertions {
     /// the relying party's job, which is the whole point of a policy.
     #[serde(default)]
     pub protected_headers: Option<Vec<HeaderAssertion>>,
+    /// Claims inside the signed JSON payload.
+    ///
+    /// The assertions above all read the envelope. This one reads the document
+    /// the envelope carries, which is where the fields a release gate actually
+    /// wants usually live — a build id, a source commit, a package version.
+    /// Without it a gate has to run `verify` and then pick the payload apart
+    /// with a second tool, and that second step is outside the decision, the
+    /// verification record, and the exit code the pipeline reads.
+    ///
+    /// The payload is covered by the issuer's signature and carried into the
+    /// receipt by the claim digest, so this is the same strength class as
+    /// `protectedHeaders` — not weaker for being outside the header bucket.
+    ///
+    /// Only a payload the statement *declares* to be JSON is read. The
+    /// content type is taken from the protected header, never sniffed from
+    /// the bytes: a document is JSON because its issuer signed a claim that it
+    /// is, and guessing would let a policy read a structure nobody attested.
+    /// A statement that declares something else, declares nothing, or carries
+    /// a digest instead of a document yields `cannotEvaluate`.
+    #[serde(default)]
+    pub payload_json: Option<Vec<PayloadAssertion>>,
     /// Detached signatures carried inside the protected header, checked
     /// cryptographically rather than merely described.
     ///
@@ -274,6 +296,74 @@ pub struct HeaderAssertion {
     /// claim is the author's.
     #[serde(default)]
     pub alg: Option<AlgMatch>,
+    /// The header must be present (`true`) or absent (`false`), whatever its
+    /// value.
+    ///
+    /// Every other matcher states a CBOR type, which is what makes it a rule.
+    /// This one deliberately does not, because presence is a claim about the
+    /// map rather than about the value, and it is the only question a relying
+    /// party can ask about a header whose value is unpredictable — a nonce, a
+    /// per-run identifier, a timestamp. Without it the choice was to pin a
+    /// value that legitimately varies, or to assert nothing.
+    ///
+    /// `false` is not a convenience: it is how a policy refuses a header. A
+    /// rule that a debug or test-mode label must not appear cannot be written
+    /// any other way, and absence is a `pass` for it rather than the
+    /// `cannotEvaluate` an absent header produces for every other matcher.
+    #[serde(default)]
+    pub exists: Option<bool>,
+}
+
+/// One assertion about one claim inside the JSON payload.
+///
+/// Paths are written exactly as they are for a protected header — a JSON
+/// string addresses an object key, a JSON number an array index — so one
+/// notation covers both halves of a policy and `inspect` can print a path that
+/// is pasteable into either.
+///
+/// There is no escaping convention to get wrong, which is the reason this is
+/// a segment array rather than an RFC 6901 pointer. A key containing `/` or
+/// `~` is just a string here; in a pointer it must be written `~1` or `~0`,
+/// and a mis-escaped pointer resolves to nothing, so the rule reports "no such
+/// claim" — indistinguishable, to the person reading the report, from a
+/// payload that genuinely lacks the field.
+///
+/// The CBOR ambiguity between a label and an index does not arise: JSON object
+/// keys are always strings and arrays are always indexed by position, so the
+/// segment's own type says which is meant with no overlap. Even a key that
+/// looks numeric, `{"2024": ...}`, is addressed unambiguously as `"2024"`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PayloadAssertion {
+    /// Where the claim lives, from the root of the payload document downwards.
+    pub path: Vec<PathSegment>,
+    /// The claim must be a JSON string matching this.
+    #[serde(default)]
+    pub text: Option<StringMatch>,
+    /// The claim must be a JSON integer matching this.
+    ///
+    /// A JSON number that is not an integer — `1.5`, or a value beyond the
+    /// range of `i64` — fails rather than being rounded or truncated. Silently
+    /// coercing would let a policy report a pass against a number it never
+    /// actually compared.
+    #[serde(default)]
+    pub int: Option<IntMatch>,
+    /// The claim must be exactly this JSON boolean.
+    ///
+    /// JSON has a boolean type and CBOR header assertions have no equivalent
+    /// matcher, so omitting it would leave a field like `"testMode": true`
+    /// unassertable while every other JSON scalar type was covered.
+    #[serde(default)]
+    pub bool: Option<bool>,
+    /// The claim must be present (`true`) or absent (`false`), whatever its
+    /// value and type.
+    ///
+    /// Reads the same way as `exists` on a protected header, and exists for
+    /// the same reason: a build id is worth requiring even when its value
+    /// cannot be predicted, and a field that must never appear cannot be
+    /// refused by any matcher that has to look at a value first.
+    #[serde(default)]
+    pub exists: Option<bool>,
 }
 
 /// One step in a header path: an integer label or index, or a text label.
@@ -679,20 +769,53 @@ impl HeaderAssertion {
 
         validate_path(&self.path, &field)?;
 
-        match (&self.text, &self.int, &self.alg) {
-            (None, None, None) => Err(format!(
-                "{field} declares no matcher; give it text, int or alg so the value's CBOR type \
-                 is stated. A header is matched by declared type because the value could be any \
-                 CBOR type, and a rule that accepts whichever type arrived is not a rule."
+        match (&self.text, &self.int, &self.alg, &self.exists) {
+            (None, None, None, None) => Err(format!(
+                "{field} declares no matcher; give it text, int, alg or exists so the value's \
+                 CBOR type is stated. A header is matched by declared type because the value \
+                 could be any CBOR type, and a rule that accepts whichever type arrived is not a \
+                 rule."
             )),
-            (Some(text), None, None) => text.validate(&format!("{field}.text")),
-            (None, Some(int), None) => int.validate(&format!("{field}.int")),
-            (None, None, Some(alg)) => alg.validate(&format!("{field}.alg")),
+            (Some(text), None, None, None) => text.validate(&format!("{field}.text")),
+            (None, Some(int), None, None) => int.validate(&format!("{field}.int")),
+            (None, None, Some(alg), None) => alg.validate(&format!("{field}.alg")),
+            // `exists` asks about the map rather than the value, so pairing it
+            // with a type matcher would be either redundant — every matcher
+            // already requires the header to be there — or contradictory.
+            (None, None, None, Some(_)) => Ok(()),
             // `int` and `alg` both read an integer, so a value satisfying one
             // and not the other would make the outcome depend on which the
             // engine happened to consult first.
             _ => Err(format!(
                 "{field} declares more than one matcher; a value has one CBOR type, so use one"
+            )),
+        }
+    }
+
+    /// Render the path the way a reader would write it back into the policy.
+    fn describe_path(&self) -> String {
+        let parts: Vec<String> = self.path.iter().map(ToString::to_string).collect();
+        format!("[{}]", parts.join(", "))
+    }
+}
+
+impl PayloadAssertion {
+    fn validate(&self, index: usize) -> Result<(), String> {
+        let field = format!("payloadJson[{index}]");
+
+        validate_path(&self.path, &field)?;
+
+        match (&self.text, &self.int, &self.bool, &self.exists) {
+            (None, None, None, None) => Err(format!(
+                "{field} declares no matcher; give it text, int, bool or exists so the claim's \
+                 JSON type is stated. A claim is matched by declared type for the same reason a \
+                 header is: a rule that accepts whichever type arrived is not a rule."
+            )),
+            (Some(text), None, None, None) => text.validate(&format!("{field}.text")),
+            (None, Some(int), None, None) => int.validate(&format!("{field}.int")),
+            (None, None, Some(_), None) | (None, None, None, Some(_)) => Ok(()),
+            _ => Err(format!(
+                "{field} declares more than one matcher; a claim has one JSON type, so use one"
             )),
         }
     }
@@ -772,6 +895,188 @@ fn resolve_path<'a>(
     Ok(Some(node))
 }
 
+/// Parse a JSON payload, refusing a document whose meaning depends on the
+/// parser.
+///
+/// JSON permits an object to repeat a key, and implementations disagree about
+/// which one wins — `serde_json` keeps the last, others keep the first. A
+/// signed document carrying `{"commit": "good", "commit": "bad"}` would then
+/// satisfy a policy here while meaning something else to the next tool that
+/// read the very same bytes, which is precisely the split-view the CBOR path
+/// already refuses one level up. Neither value can be trusted, so neither is
+/// chosen.
+///
+/// Duplicate detection needs a visitor because `serde_json::Map` has already
+/// discarded the collision by the time a `Value` exists.
+fn parse_payload_json(bytes: &[u8]) -> Result<serde_json::Value, String> {
+    serde_json::from_slice::<StrictJson>(bytes)
+        .map(|v| v.0)
+        .map_err(|e| e.to_string())
+}
+
+/// A `serde_json::Value` that refuses duplicate object keys as it is built.
+struct StrictJson(serde_json::Value);
+
+impl<'de> Deserialize<'de> for StrictJson {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        d.deserialize_any(StrictJsonVisitor).map(StrictJson)
+    }
+}
+
+struct StrictJsonVisitor;
+
+impl<'de> serde::de::Visitor<'de> for StrictJsonVisitor {
+    type Value = serde_json::Value;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("any JSON value")
+    }
+
+    fn visit_bool<E>(self, v: bool) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::Bool(v))
+    }
+
+    fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::from(v))
+    }
+
+    fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::from(v))
+    }
+
+    fn visit_f64<E>(self, v: f64) -> Result<Self::Value, E> {
+        Ok(serde_json::Number::from_f64(v)
+            .map_or(serde_json::Value::Null, serde_json::Value::Number))
+    }
+
+    fn visit_str<E>(self, v: &str) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::String(v.to_owned()))
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::Null)
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::Null)
+    }
+
+    fn visit_some<D: serde::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+        d.deserialize_any(self)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let mut items = Vec::new();
+        while let Some(StrictJson(item)) = seq.next_element()? {
+            items.push(item);
+        }
+        Ok(serde_json::Value::Array(items))
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut out = serde_json::Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            let StrictJson(value) = map.next_value()?;
+            if out.contains_key(&key) {
+                return Err(serde::de::Error::custom(format!(
+                    "object key '{key}' appears more than once; the document is ambiguous and no \
+                     value can be trusted"
+                )));
+            }
+            out.insert(key, value);
+        }
+        Ok(serde_json::Value::Object(out))
+    }
+}
+
+/// Follow a path into the JSON payload, or say why it could not be followed.
+///
+/// `Ok(None)` means the path led nowhere, which is "no such claim" and is a
+/// different answer from "present and wrong".
+///
+/// A text segment addresses an object key and an integer segment an array
+/// index. Unlike the CBOR walk, the node's type is not consulted to decide
+/// what a segment meant — JSON leaves no room for the question, since keys are
+/// always strings and indices always integers.
+fn resolve_json_path<'a>(
+    root: &'a serde_json::Value,
+    path: &[PathSegment],
+) -> Result<Option<&'a serde_json::Value>, String> {
+    let mut node = root;
+
+    for (depth, segment) in path.iter().enumerate() {
+        let next = match (node, segment) {
+            (serde_json::Value::Object(fields), PathSegment::Text(key)) => fields.get(key),
+            (serde_json::Value::Array(items), PathSegment::Int(i)) => {
+                usize::try_from(*i).ok().and_then(|i| items.get(i))
+            }
+            (serde_json::Value::Object(_), PathSegment::Int(_)) => {
+                return Err(format!(
+                    "path segment {segment} indexes by position, but the value at depth {depth} \
+                     is an object; name its key as a string"
+                ))
+            }
+            (serde_json::Value::Array(_), PathSegment::Text(_)) => {
+                return Err(format!(
+                    "path segment {segment} names a key, but the value at depth {depth} is an \
+                     array; index it by position"
+                ))
+            }
+            (other, _) => {
+                return Err(format!(
+                    "path segment {segment} cannot be applied at depth {depth}: the value there \
+                     is {}, which has no members",
+                    render_json_scalar(other)
+                ))
+            }
+        };
+
+        match next {
+            Some(value) => node = value,
+            None => return Ok(None),
+        }
+    }
+
+    Ok(Some(node))
+}
+
+/// Name a JSON value's type for a report, without quoting its contents.
+///
+/// Mirrors `render_scalar` for CBOR: a diagnostic should say what was found
+/// without pasting a payload into a pipeline log, and without producing a
+/// rendering a policy could then be tempted to match against.
+fn render_json_scalar(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "null".into(),
+        serde_json::Value::Bool(b) => format!("the boolean {b}"),
+        serde_json::Value::Number(n) => format!("the number {n}"),
+        serde_json::Value::String(s) => format!("a string of {} character(s)", s.chars().count()),
+        serde_json::Value::Array(items) => format!("an array of {}", items.len()),
+        serde_json::Value::Object(fields) => format!("an object of {} field(s)", fields.len()),
+    }
+}
+
+/// Whether a declared content type says the payload is a JSON document.
+///
+/// Accepts `application/json` and the RFC 6839 structured suffix `+json`, so
+/// `application/spdx+json` and `application/vnd.in-toto+json` are read without
+/// each profile needing to be listed here. Parameters after `;` are ignored;
+/// a charset does not change the structure.
+///
+/// Public so `inspect` decodes exactly what `payloadJson` will read. Two
+/// literals would drift, and the failure would be silent in the worse
+/// direction: output showing claims that no rule could then be written
+/// against, or a rule refusing a payload the listing had displayed.
+pub fn declares_json(content_type: &str) -> bool {
+    let base = content_type
+        .split(';')
+        .next()
+        .unwrap_or(content_type)
+        .trim()
+        .to_ascii_lowercase();
+    base == "application/json" || base == "text/json" || base.ends_with("+json")
+}
+
 impl Policy {
     pub fn from_json(bytes: &[u8]) -> Result<Self, String> {
         let policy: Policy = serde_json::from_slice(bytes)
@@ -793,6 +1098,14 @@ impl Policy {
             }
             for (index, header) in headers.iter().enumerate() {
                 header.validate(index)?;
+            }
+        }
+        if let Some(claims) = &policy.assertions.payload_json {
+            if claims.is_empty() {
+                return Err("payloadJson is empty; it would assert nothing".into());
+            }
+            for (index, claim) in claims.iter().enumerate() {
+                claim.validate(index)?;
             }
         }
         if let Some(externals) = &policy.assertions.external_signatures {
@@ -961,15 +1274,116 @@ impl Policy {
                 };
 
                 let Some(value) = found else {
-                    results.push(result(
-                        name,
-                        Outcome::CannotEvaluate,
-                        format!("{at}: no such protected header"),
-                    ));
+                    results.push(match header.exists {
+                        // The rule asked for absence and got it.
+                        Some(false) => result(
+                            name,
+                            Outcome::Pass,
+                            format!("{at}: no such protected header, as required"),
+                        ),
+                        Some(true) => result(
+                            name,
+                            Outcome::Fail,
+                            format!("{at}: no such protected header, but it is required"),
+                        ),
+                        None => result(
+                            name,
+                            Outcome::CannotEvaluate,
+                            format!("{at}: no such protected header"),
+                        ),
+                    });
                     continue;
                 };
 
+                if let Some(wanted) = header.exists {
+                    results.push(if wanted {
+                        result(name, Outcome::Pass, format!("{at}: present, as required"))
+                    } else {
+                        result(
+                            name,
+                            Outcome::Fail,
+                            format!("{at}: present, but it must not be"),
+                        )
+                    });
+                    continue;
+                }
+
                 results.push(evaluate_header(header, &at, value));
+            }
+        }
+
+        if let Some(claims) = &a.payload_json {
+            // Parsed once for the whole policy rather than per claim: the
+            // document can be large, and a second parse could not disagree
+            // with the first without one of them being wrong.
+            let document = payload_document(facts);
+
+            for claim in claims {
+                let name = "payloadJson";
+                let at = claim.describe_path();
+
+                let document = match &document {
+                    Ok(document) => document,
+                    // Declared-but-unparseable is the statement contradicting
+                    // itself, which is a finding about this statement rather
+                    // than a missing input, so it fails rather than abstains.
+                    Err(PayloadProblem::Malformed(why)) => {
+                        results.push(result(name, Outcome::Fail, format!("{at}: {why}")));
+                        continue;
+                    }
+                    Err(PayloadProblem::NotJson(why)) => {
+                        results.push(result(
+                            name,
+                            Outcome::CannotEvaluate,
+                            format!("{at}: {why}"),
+                        ));
+                        continue;
+                    }
+                };
+
+                let found = match resolve_json_path(document, &claim.path) {
+                    Ok(found) => found,
+                    Err(why) => {
+                        results.push(result(name, Outcome::Fail, format!("{at}: {why}")));
+                        continue;
+                    }
+                };
+
+                let Some(value) = found else {
+                    results.push(match claim.exists {
+                        Some(false) => result(
+                            name,
+                            Outcome::Pass,
+                            format!("{at}: no such claim, as required"),
+                        ),
+                        Some(true) => result(
+                            name,
+                            Outcome::Fail,
+                            format!("{at}: no such claim, but it is required"),
+                        ),
+                        None => result(
+                            name,
+                            Outcome::CannotEvaluate,
+                            format!("{at}: no such claim"),
+                        ),
+                    });
+                    continue;
+                };
+
+                if let Some(wanted) = claim.exists {
+                    results.push(if wanted {
+                        result(name, Outcome::Pass, format!("{at}: present, as required"))
+                    } else {
+                        result(
+                            name,
+                            Outcome::Fail,
+                            format!("{at}: present, but it must not be"),
+                        )
+                    });
+                    continue;
+                }
+
+                results.push(evaluate_claim(claim, &at, value));
             }
         }
 
@@ -1237,6 +1651,174 @@ fn describe_signer(signer: &DetachedSigner) -> String {
 /// The tool did reach an answer — the statement says something, and it is not
 /// what the policy described — and the detail names both types so an author
 /// who addressed the wrong label can see it immediately.
+/// Why a payload could not be read as a JSON document.
+enum PayloadProblem {
+    /// The statement does not offer a JSON document to read. Nothing is wrong
+    /// with it; it is simply not the kind of statement this rule applies to.
+    NotJson(String),
+    /// The statement declares JSON and is not. That is a defect in the
+    /// statement, not a gap in the inputs.
+    Malformed(String),
+}
+
+/// The payload as a JSON document, or why it is not one.
+///
+/// Every gate here is a refusal to guess. The content type comes from the
+/// protected header because that is the issuer's signed claim about what the
+/// bytes are; sniffing would let a policy read a structure nobody attested,
+/// and a payload that happens to parse as JSON is not thereby a JSON document.
+fn payload_document(facts: &StatementFacts) -> Result<serde_json::Value, PayloadProblem> {
+    let Some(protected) = &facts.protected else {
+        return Err(PayloadProblem::NotJson("no statement was parsed".into()));
+    };
+
+    // RFC 9995: the payload is a digest of the document, not the document, so
+    // there is nothing to descend into. Reporting "no such claim" here would
+    // invite an author to fix a path that was never the problem.
+    if cbor::opt_int_key(protected, labels::PAYLOAD_HASH_ALG).is_some() {
+        return Err(PayloadProblem::NotJson(
+            "the statement is a hash envelope, so its payload is a digest of the document rather \
+             than the document; verify the preimage separately"
+                .into(),
+        ));
+    }
+
+    let content_type = match cbor::opt_int_key(protected, labels::CONTENT_TYPE) {
+        Some(CborValue::TextString(s)) => s.clone(),
+        Some(CborValue::Int(i)) => format!("coap-content-format({i})"),
+        _ => {
+            return Err(PayloadProblem::NotJson(
+                "the statement declares no content type, so nothing says its payload is JSON"
+                    .into(),
+            ))
+        }
+    };
+
+    if !declares_json(&content_type) {
+        return Err(PayloadProblem::NotJson(format!(
+            "the statement declares content type '{content_type}', not JSON"
+        )));
+    }
+
+    let Some(bytes) = &facts.payload else {
+        return Err(PayloadProblem::NotJson(
+            "the payload is detached, so this file does not carry the document".into(),
+        ));
+    };
+
+    parse_payload_json(bytes).map_err(|why| {
+        PayloadProblem::Malformed(format!(
+            "the statement declares content type '{content_type}' but its payload is not valid \
+             JSON: {why}"
+        ))
+    })
+}
+
+/// Whether one payload claim satisfies its matcher.
+///
+/// `exists` is handled by the caller, which is where absence is still
+/// distinguishable from presence.
+fn evaluate_claim(
+    claim: &PayloadAssertion,
+    at: &str,
+    value: &serde_json::Value,
+) -> AssertionResult {
+    let name = "payloadJson";
+
+    if let Some(expected) = &claim.text {
+        return match value {
+            serde_json::Value::String(s) if expected.matches(s) => result(
+                name,
+                Outcome::Pass,
+                format!("{at}: '{s}' {}", expected.describe()),
+            ),
+            serde_json::Value::String(s) => result(
+                name,
+                Outcome::Fail,
+                format!("{at}: '{s}' does not match: it {}", expected.describe()),
+            ),
+            other => result(
+                name,
+                Outcome::Fail,
+                format!(
+                    "{at}: expected a string, found {}",
+                    render_json_scalar(other)
+                ),
+            ),
+        };
+    }
+
+    if let Some(expected) = &claim.int {
+        return match value {
+            // `as_i64` is `None` for a fractional number and for one outside
+            // the range, so neither is silently rounded into a comparison the
+            // policy never asked for. A build id written as the *string*
+            // "138849098" is a string, and fails here rather than being
+            // coerced — the type a producer chose is part of what they signed.
+            serde_json::Value::Number(n) => match n.as_i64() {
+                Some(i) if expected.matches(i) => result(
+                    name,
+                    Outcome::Pass,
+                    format!("{at}: {i} {}", expected.describe()),
+                ),
+                Some(i) => result(
+                    name,
+                    Outcome::Fail,
+                    format!("{at}: {i} does not match: it {}", expected.describe()),
+                ),
+                None => result(
+                    name,
+                    Outcome::Fail,
+                    format!(
+                        "{at}: expected an integer, found the number {n}, which is not one this \
+                         build can compare exactly"
+                    ),
+                ),
+            },
+            other => result(
+                name,
+                Outcome::Fail,
+                format!(
+                    "{at}: expected an integer, found {}",
+                    render_json_scalar(other)
+                ),
+            ),
+        };
+    }
+
+    if let Some(expected) = &claim.bool {
+        return match value {
+            serde_json::Value::Bool(b) if b == expected => result(
+                name,
+                Outcome::Pass,
+                format!("{at}: {b} must equal {expected}"),
+            ),
+            serde_json::Value::Bool(b) => result(
+                name,
+                Outcome::Fail,
+                format!("{at}: {b} does not match: it must equal {expected}"),
+            ),
+            other => result(
+                name,
+                Outcome::Fail,
+                format!(
+                    "{at}: expected a boolean, found {}",
+                    render_json_scalar(other)
+                ),
+            ),
+        };
+    }
+
+    // `validate` refuses an assertion with no matcher, so this is unreachable
+    // by a parsed policy. Reporting rather than panicking keeps a future
+    // matcher that forgets to extend this from aborting a verification.
+    result(
+        name,
+        Outcome::CannotEvaluate,
+        format!("{at}: this build understands no matcher on this assertion"),
+    )
+}
+
 fn evaluate_header(header: &HeaderAssertion, at: &str, value: &CborValue) -> AssertionResult {
     let name = "protectedHeaders";
 
@@ -2073,5 +2655,356 @@ mod tests {
         let decision = policy.evaluate(&facts, 0);
         assert_eq!(decision.results.len(), 2);
         assert!(decision.satisfied());
+    }
+
+    // ----- payloadJson -------------------------------------------------
+
+    fn payload_policy(claims: &str) -> Policy {
+        let json = format!(
+            r#"{{"policyId":"p","policyVersion":"1","assertions":{{"payloadJson":[{claims}]}}}}"#
+        );
+        Policy::from_json(json.as_bytes()).unwrap()
+    }
+
+    /// Facts for a statement that declares `content_type` and carries `body`.
+    fn json_facts(content_type: &str, body: &str) -> StatementFacts {
+        StatementFacts {
+            protected: Some(map(vec![(
+                CborValue::Int(labels::CONTENT_TYPE),
+                text(content_type),
+            )])),
+            payload: Some(body.as_bytes().to_vec()),
+            ..Default::default()
+        }
+    }
+
+    const BUILD: &str = r#"{"build":{"id":"138849098","number":7,"debug":false},
+                            "source":{"commit":"907a1bd"},"tags":["a","b"]}"#;
+
+    fn json_outcome(claim: &str, body: &str) -> Outcome {
+        outcome_of(
+            &payload_policy(claim),
+            &json_facts("application/json", body),
+        )
+    }
+
+    fn json_detail(claim: &str, body: &str) -> String {
+        let policy = payload_policy(claim);
+        let decision = policy.evaluate(&json_facts("application/json", body), 0);
+        decision.results[0].detail.clone()
+    }
+
+    #[test]
+    fn a_claim_inside_the_signed_payload_is_matched() {
+        let claim = r#"{"path":["source","commit"],"text":{"equals":"907a1bd"}}"#;
+        assert_eq!(json_outcome(claim, BUILD), Outcome::Pass);
+    }
+
+    #[test]
+    fn a_claim_that_disagrees_fails() {
+        let claim = r#"{"path":["source","commit"],"text":{"equals":"deadbeef"}}"#;
+        assert_eq!(json_outcome(claim, BUILD), Outcome::Fail);
+    }
+
+    #[test]
+    fn a_missing_claim_is_not_a_failure() {
+        // The same distinction every other assertion draws: a payload that
+        // does not carry the field has not made a claim this rule could have
+        // rejected, and reporting a failure would send the reader hunting for
+        // a value that was never there.
+        let claim = r#"{"path":["source","tag"],"text":{"equals":"v1"}}"#;
+        assert_eq!(json_outcome(claim, BUILD), Outcome::CannotEvaluate);
+    }
+
+    #[test]
+    fn an_integer_claim_is_matched() {
+        let claim = r#"{"path":["build","number"],"int":{"equals":7}}"#;
+        assert_eq!(json_outcome(claim, BUILD), Outcome::Pass);
+    }
+
+    #[test]
+    fn a_numeric_string_is_not_coerced_into_an_integer() {
+        // `build.id` is the *string* "138849098". Coercing it would let a
+        // policy report a pass against a value it never compared, and the
+        // type a producer chose is part of what they signed.
+        let claim = r#"{"path":["build","id"],"int":{"equals":138849098}}"#;
+        assert_eq!(json_outcome(claim, BUILD), Outcome::Fail);
+        assert!(json_detail(claim, BUILD).contains("expected an integer"));
+    }
+
+    #[test]
+    fn a_fractional_number_is_not_rounded_into_a_comparison() {
+        let body = r#"{"n":1.5}"#;
+        let claim = r#"{"path":["n"],"int":{"equals":1}}"#;
+        assert_eq!(json_outcome(claim, body), Outcome::Fail);
+    }
+
+    #[test]
+    fn a_number_too_large_to_compare_exactly_fails_rather_than_wrapping() {
+        let body = r#"{"n":123456789012345678901234567890}"#;
+        let claim = r#"{"path":["n"],"int":{"equals":0}}"#;
+        assert_eq!(json_outcome(claim, body), Outcome::Fail);
+    }
+
+    #[test]
+    fn a_boolean_claim_is_matched() {
+        let claim = r#"{"path":["build","debug"],"bool":false}"#;
+        assert_eq!(json_outcome(claim, BUILD), Outcome::Pass);
+    }
+
+    #[test]
+    fn a_boolean_claim_that_disagrees_fails() {
+        let claim = r#"{"path":["build","debug"],"bool":true}"#;
+        assert_eq!(json_outcome(claim, BUILD), Outcome::Fail);
+    }
+
+    #[test]
+    fn an_array_element_is_addressed_by_position() {
+        let claim = r#"{"path":["tags",1],"text":{"equals":"b"}}"#;
+        assert_eq!(json_outcome(claim, BUILD), Outcome::Pass);
+    }
+
+    #[test]
+    fn indexing_an_object_by_position_fails_with_a_reason() {
+        let claim = r#"{"path":["build",0],"text":{"equals":"x"}}"#;
+        assert_eq!(json_outcome(claim, BUILD), Outcome::Fail);
+        assert!(json_detail(claim, BUILD).contains("name its key as a string"));
+    }
+
+    #[test]
+    fn naming_a_key_inside_an_array_fails_with_a_reason() {
+        let claim = r#"{"path":["tags","a"],"text":{"equals":"a"}}"#;
+        assert_eq!(json_outcome(claim, BUILD), Outcome::Fail);
+        assert!(json_detail(claim, BUILD).contains("index it by position"));
+    }
+
+    #[test]
+    fn descending_into_a_scalar_fails_rather_than_reporting_it_absent() {
+        // "no such claim" would send the author to fix a path that resolved
+        // perfectly well until it ran out of document.
+        let claim = r#"{"path":["source","commit","x"],"text":{"equals":"y"}}"#;
+        assert_eq!(json_outcome(claim, BUILD), Outcome::Fail);
+        assert!(json_detail(claim, BUILD).contains("has no members"));
+    }
+
+    #[test]
+    fn a_required_claim_passes_on_presence_and_fails_on_absence() {
+        // The whole point of `exists`: a build id is worth requiring even when
+        // nobody can predict its value.
+        let present = r#"{"path":["build","id"],"exists":true}"#;
+        let absent = r#"{"path":["build","gone"],"exists":true}"#;
+        assert_eq!(json_outcome(present, BUILD), Outcome::Pass);
+        assert_eq!(json_outcome(absent, BUILD), Outcome::Fail);
+    }
+
+    #[test]
+    fn a_forbidden_claim_passes_on_absence_and_fails_on_presence() {
+        // Absence is a `pass` here and `cannotEvaluate` everywhere else,
+        // because this is the one rule for which absence is the answer.
+        let absent = r#"{"path":["build","gone"],"exists":false}"#;
+        let present = r#"{"path":["build","id"],"exists":false}"#;
+        assert_eq!(json_outcome(absent, BUILD), Outcome::Pass);
+        assert_eq!(json_outcome(present, BUILD), Outcome::Fail);
+    }
+
+    #[test]
+    fn a_payload_declared_as_something_else_is_never_read() {
+        // Sniffing would let a policy read a structure nobody attested. The
+        // bytes here are valid JSON and must still not be consulted.
+        let facts = json_facts("application/octet-stream", BUILD);
+        let policy = payload_policy(r#"{"path":["source","commit"],"text":{"equals":"907a1bd"}}"#);
+        assert_eq!(outcome_of(&policy, &facts), Outcome::CannotEvaluate);
+    }
+
+    #[test]
+    fn a_payload_with_no_declared_content_type_is_never_read() {
+        let facts = StatementFacts {
+            protected: Some(map(vec![])),
+            payload: Some(BUILD.as_bytes().to_vec()),
+            ..Default::default()
+        };
+        let policy = payload_policy(r#"{"path":["source","commit"],"text":{"equals":"907a1bd"}}"#);
+        assert_eq!(outcome_of(&policy, &facts), Outcome::CannotEvaluate);
+    }
+
+    #[test]
+    fn a_structured_json_suffix_is_read() {
+        // RFC 6839: an SBOM or an in-toto attestation is JSON, and listing
+        // every profile here would mean a new one silently stopped working.
+        let facts = json_facts("application/spdx+json", BUILD);
+        let policy = payload_policy(r#"{"path":["source","commit"],"text":{"equals":"907a1bd"}}"#);
+        assert_eq!(outcome_of(&policy, &facts), Outcome::Pass);
+    }
+
+    #[test]
+    fn a_charset_parameter_does_not_change_the_structure() {
+        let facts = json_facts("application/json; charset=utf-8", BUILD);
+        let policy = payload_policy(r#"{"path":["source","commit"],"text":{"equals":"907a1bd"}}"#);
+        assert_eq!(outcome_of(&policy, &facts), Outcome::Pass);
+    }
+
+    #[test]
+    fn a_hash_envelope_carries_a_digest_rather_than_a_document() {
+        // RFC 9995. Reporting "no such claim" would invite the author to fix
+        // a path that was never the problem.
+        let facts = StatementFacts {
+            protected: Some(map(vec![
+                (
+                    CborValue::Int(labels::CONTENT_TYPE),
+                    text("application/json"),
+                ),
+                (
+                    CborValue::Int(labels::PAYLOAD_HASH_ALG),
+                    CborValue::Int(-16),
+                ),
+            ])),
+            payload: Some(vec![0u8; 32]),
+            ..Default::default()
+        };
+        let policy = payload_policy(r#"{"path":["source","commit"],"text":{"equals":"907a1bd"}}"#);
+        assert_eq!(outcome_of(&policy, &facts), Outcome::CannotEvaluate);
+        let decision = policy.evaluate(&facts, 0);
+        assert!(decision.results[0].detail.contains("hash envelope"));
+    }
+
+    #[test]
+    fn a_detached_payload_has_no_document_to_read() {
+        let facts = StatementFacts {
+            protected: Some(map(vec![(
+                CborValue::Int(labels::CONTENT_TYPE),
+                text("application/json"),
+            )])),
+            payload: None,
+            ..Default::default()
+        };
+        let policy = payload_policy(r#"{"path":["source","commit"],"text":{"equals":"907a1bd"}}"#);
+        assert_eq!(outcome_of(&policy, &facts), Outcome::CannotEvaluate);
+    }
+
+    #[test]
+    fn a_payload_that_contradicts_its_content_type_fails() {
+        // Declared-but-unparseable is the statement contradicting itself. That
+        // is a finding about this statement, not a missing input, so it must
+        // not read as `cannotEvaluate` alongside "this is not a JSON
+        // statement" — the two call for opposite responses.
+        let claim = r#"{"path":["source"],"text":{"equals":"x"}}"#;
+        assert_eq!(json_outcome(claim, "not json at all"), Outcome::Fail);
+    }
+
+    #[test]
+    fn a_payload_repeating_a_key_is_refused() {
+        // JSON permits it and parsers disagree about which wins, so a signed
+        // document could satisfy this policy while meaning something else to
+        // the next tool reading the very same bytes. Neither value can be
+        // trusted, so neither is chosen — the same refusal the CBOR path makes
+        // one level up.
+        let body = r#"{"commit":"good","commit":"bad"}"#;
+        let claim = r#"{"path":["commit"],"text":{"equals":"good"}}"#;
+        assert_eq!(json_outcome(claim, body), Outcome::Fail);
+        assert!(json_detail(claim, body).contains("more than once"));
+    }
+
+    #[test]
+    fn a_duplicate_key_nested_deep_is_refused_too() {
+        let body = r#"{"a":{"b":[{"k":1,"k":2}]}}"#;
+        let claim = r#"{"path":["a","b",0,"k"],"int":{"equals":1}}"#;
+        assert_eq!(json_outcome(claim, body), Outcome::Fail);
+    }
+
+    #[test]
+    fn a_payload_claim_with_no_matcher_is_refused() {
+        let json = br#"{"policyId":"p","policyVersion":"1","assertions":{"payloadJson":[
+            {"path":["a"]}]}}"#;
+        let err = Policy::from_json(json).unwrap_err();
+        assert!(err.contains("declares no matcher"), "{err}");
+    }
+
+    #[test]
+    fn a_payload_claim_with_two_matchers_is_refused() {
+        let json = br#"{"policyId":"p","policyVersion":"1","assertions":{"payloadJson":[
+            {"path":["a"],"text":{"equals":"x"},"bool":true}]}}"#;
+        let err = Policy::from_json(json).unwrap_err();
+        assert!(err.contains("more than one matcher"), "{err}");
+    }
+
+    #[test]
+    fn an_empty_payload_json_list_is_refused() {
+        let json = br#"{"policyId":"p","policyVersion":"1","assertions":{"payloadJson":[]}}"#;
+        assert!(Policy::from_json(json).is_err());
+    }
+
+    #[test]
+    fn a_payload_path_may_not_outrun_what_the_engine_will_walk() {
+        let deep: Vec<String> = (0..=MAX_HEADER_PATH_DEPTH)
+            .map(|i| format!("\"{i}\""))
+            .collect();
+        let json = format!(
+            r#"{{"policyId":"p","policyVersion":"1","assertions":{{"payloadJson":[
+                {{"path":[{}],"text":{{"equals":"x"}}}}]}}}}"#,
+            deep.join(",")
+        );
+        assert!(Policy::from_json(json.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn a_payload_path_wildcard_is_refused_rather_than_read_as_a_key() {
+        let json = br#"{"policyId":"p","policyVersion":"1","assertions":{"payloadJson":[
+            {"path":["*"],"text":{"equals":"x"}}]}}"#;
+        assert!(Policy::from_json(json).is_err());
+    }
+
+    #[test]
+    fn a_policy_of_only_payload_claims_is_not_empty() {
+        // Guards the reflective `is_empty`: a policy using only the newest
+        // assertion must not be rejected as declaring nothing.
+        payload_policy(r#"{"path":["a"],"exists":true}"#);
+    }
+
+    #[test]
+    fn a_json_content_type_is_recognised_by_structure_not_by_list() {
+        assert!(declares_json("application/json"));
+        assert!(declares_json("APPLICATION/JSON"));
+        assert!(declares_json("application/vnd.in-toto+json"));
+        assert!(declares_json("application/json; charset=utf-8"));
+        assert!(!declares_json("application/cbor"));
+        assert!(!declares_json("application/jsonish"));
+        assert!(!declares_json("text/plain"));
+    }
+
+    // ----- protectedHeaders: exists -----------------------------------
+
+    #[test]
+    fn a_required_header_passes_on_presence_and_fails_on_absence() {
+        let facts = facts_with_protected(map(vec![(CborValue::Int(1), CborValue::Int(-7))]));
+        assert_eq!(
+            outcome_of(&header_policy(r#"{"path":[1],"exists":true}"#), &facts),
+            Outcome::Pass
+        );
+        assert_eq!(
+            outcome_of(&header_policy(r#"{"path":[9],"exists":true}"#), &facts),
+            Outcome::Fail
+        );
+    }
+
+    #[test]
+    fn a_forbidden_header_passes_on_absence_and_fails_on_presence() {
+        let facts = facts_with_protected(map(vec![(CborValue::Int(1), CborValue::Int(-7))]));
+        assert_eq!(
+            outcome_of(&header_policy(r#"{"path":[9],"exists":false}"#), &facts),
+            Outcome::Pass
+        );
+        assert_eq!(
+            outcome_of(&header_policy(r#"{"path":[1],"exists":false}"#), &facts),
+            Outcome::Fail
+        );
+    }
+
+    #[test]
+    fn a_header_exists_rule_may_not_also_state_a_type() {
+        // Pairing them is either redundant or contradictory, and which one it
+        // is would depend on which the engine consulted first.
+        let json = br#"{"policyId":"p","policyVersion":"1","assertions":{"protectedHeaders":[
+            {"path":[1],"exists":true,"int":{"equals":-7}}]}}"#;
+        assert!(Policy::from_json(json).is_err());
     }
 }

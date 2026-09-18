@@ -276,6 +276,7 @@ pub fn inspect(statement: &Sign1, verbose: bool) -> scitt_receipt::Result<()> {
                 }
             } else {
                 println!("  {:<19} {}", "sha-256", scitt_receipt::sha256_hex(bytes));
+                print_payload_json(statement, bytes, verbose);
             }
         }
         None => println!("  detached — the payload is not carried in this file"),
@@ -433,6 +434,94 @@ fn print_members(value: &CborValue, path: &str, verbose: bool, depth: usize) {
         let heading = format!("[{child}]");
         println!("{indent}{heading:<28} {}", scalar(member, verbose, false));
         print_members(member, &child, verbose, depth + 1);
+    }
+}
+
+/// Print the payload's claims, each with the `path` a policy uses to reach it.
+///
+/// `bytes 72096` names the shape and stops, which is the same dead end
+/// `print_members` was written to remove one level up: it proves a payload is
+/// there, gives an author nothing to write a rule against, and sends them to
+/// decode the file in a second tool. The fields a gate actually wants — a
+/// build id, a source commit — live here and nowhere else.
+///
+/// Only a payload the statement *declares* to be JSON is decoded, matching
+/// what `payloadJson` will read. Sniffing the bytes would print structure the
+/// issuer never claimed was there, and invite a rule against it that the
+/// policy engine would then refuse to evaluate.
+fn print_payload_json(statement: &Sign1, bytes: &[u8], verbose: bool) {
+    let Some(content_type) = statement.content_type() else {
+        return;
+    };
+    if !scitt_policy::declares_json(&content_type) {
+        return;
+    }
+
+    println!("  json");
+    match serde_json::from_slice::<serde_json::Value>(bytes) {
+        Ok(document) => print_claims(&document, None, verbose, 0),
+        // Loud rather than silent: a statement whose content type and payload
+        // disagree is a defect, and `payloadJson` will fail against it.
+        Err(why) => println!("    not valid JSON, despite the declared content type: {why}"),
+    }
+}
+
+/// Print each claim in a JSON document beside its policy `path`.
+///
+/// `path` is `None` at the root, where there is no segment to print yet.
+/// `depth` counts segments already spent, so the walk stops where
+/// `MAX_HEADER_PATH_DEPTH` stops — printing a claim past it would advertise a
+/// rule the policy engine refuses to parse.
+fn print_claims(value: &serde_json::Value, path: Option<&str>, verbose: bool, depth: usize) {
+    let members: Vec<(String, &serde_json::Value)> = match value {
+        serde_json::Value::Object(fields) => fields
+            .iter()
+            // A key is quoted because that is how it is written in a path; a
+            // bare `build` would suggest an identifier rather than a string.
+            .map(|(k, v)| (format!("'{k}'"), v))
+            .collect(),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (i.to_string(), v))
+            .collect(),
+        _ => return,
+    };
+
+    let indent = "  ".repeat(depth + 2);
+    if depth >= scitt_policy::MAX_HEADER_PATH_DEPTH {
+        println!("{indent}… deeper than a policy path can address");
+        return;
+    }
+
+    for (segment, member) in members {
+        let child = match path {
+            Some(parent) => format!("{parent}, {segment}"),
+            None => segment,
+        };
+        let heading = format!("[{child}]");
+        println!("{indent}{heading:<44} {}", json_scalar(member, verbose));
+        print_claims(member, Some(&child), verbose, depth + 1);
+    }
+}
+
+/// Render one JSON value for the payload listing.
+///
+/// A container names its shape, because its members are printed underneath it
+/// on their own lines. A long string is summarised unless asked for, so a
+/// 20 KB base64 blob does not bury the four fields worth reading.
+fn json_scalar(value: &serde_json::Value, verbose: bool) -> String {
+    match value {
+        serde_json::Value::Null => "null".into(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) if !verbose && s.chars().count() > TEXT_LIMIT => {
+            let head: String = s.chars().take(32).collect();
+            format!("{} chars: {head}…", s.chars().count())
+        }
+        serde_json::Value::String(s) => format!("'{s}'"),
+        serde_json::Value::Array(items) => format!("array of {}", items.len()),
+        serde_json::Value::Object(fields) => format!("object of {}", fields.len()),
     }
 }
 
