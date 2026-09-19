@@ -2552,6 +2552,8 @@ mod tests {
             anchored_externally,
             validated_at: 0,
             path_len: 2,
+            path_not_before: 0,
+            path_not_after: i64::MAX,
         })
     }
 

@@ -95,13 +95,28 @@ pub struct StatementFacts {
     /// inside distinguish the rest: a chain that did not hold, material that
     /// was missing, and a check this build cannot perform.
     pub chain_outcome: Option<chain::Outcome>,
-    /// Whether every certificate was valid at the statement's own `iat`.
+    /// Whether the validated path was live at every verified registration time.
     ///
-    /// `None` when chain validation was not requested, or when the statement
-    /// declares no `iat` to check against. Recorded separately from
-    /// [`Self::chain_outcome`] because expiry after signing is not a defect —
-    /// see `chain`'s module comment — so a policy that cares must ask for it
-    /// explicitly rather than getting it folded into the structural verdict.
+    /// The time comes from the `iat` of each receipt that verified completely,
+    /// never from the statement's own CWT. A signer who kept an expired key
+    /// controls the statement's `iat` and can set it to any in-window instant,
+    /// so answering from it would let the holder of an expired certificate
+    /// satisfy the check by declaring a convenient timestamp. A receipt is
+    /// countersigned by the ledger and cannot be moved after the fact.
+    ///
+    /// It witnesses *registration*, not the signing instant — the ledger saw
+    /// the statement when it was submitted, which is the closest independently
+    /// attested time that exists. With several receipts the answer is the
+    /// conjunction: every registration this statement can prove must have
+    /// happened while the certificates were live, so one late registration is
+    /// enough to make this `false`.
+    ///
+    /// `None` when the chain did not validate — an unexamined path has no
+    /// window to ask about — or when no fully verified receipt carries an
+    /// `iat`. Recorded separately from [`Self::chain_outcome`] because expiry
+    /// after signing is not a defect, see `chain`'s module comment, so a policy
+    /// that cares must ask for it explicitly rather than getting it folded into
+    /// the structural verdict.
     pub certificates_valid_at_signing_time: Option<bool>,
     pub leaf_subject: Option<String>,
     pub leaf_issuer: Option<String>,
@@ -243,25 +258,12 @@ pub fn verify_statement_with(
         None => None,
     };
 
-    // Asked only when a chain was actually validated: reporting "valid at
-    // signing time" for a chain nobody checked would dress an unexamined
-    // certificate up as an examined one.
-    let certificates_valid_at_signing_time = match (&chain_outcome, statement.cwt()) {
-        (Some(_), Some(claims)) => match claims.iat {
-            Some(iat) => match chain::all_valid_at(&chain, iat) {
-                Ok(valid) => Some(valid),
-                Err(e) => {
-                    problems.push(format!(
-                        "certificate validity at signing time could not be checked: {e}"
-                    ));
-                    None
-                }
-            },
-            None => None,
-        },
-        _ => None,
-    };
-
+    // Asked only of a path that actually validated, and only about times the
+    // ledger attested. `Some(_)` alone would admit `Unsupported` and
+    // `Insufficient` outcomes, letting a policy that explicitly demanded this
+    // check be satisfied by parsing certificate windows off a chain nobody
+    // managed to validate. Deferred until after the receipts are verified
+    // because the times it needs come from them.
     let receipt_blobs = statement.receipts();
     if receipt_blobs.is_empty() {
         problems.push("statement carries no receipts; it is signed but not transparent".into());
@@ -282,6 +284,11 @@ pub fn verify_statement_with(
         }
     }
 
+    let certificates_valid_at_signing_time = match &chain_outcome {
+        Some(chain::Outcome::Valid(details)) => valid_at_registrations(details, &receipts),
+        _ => None,
+    };
+
     Ok(StatementFacts {
         alg: statement.alg().ok(),
         cwt: statement.cwt().unwrap_or_default(),
@@ -300,4 +307,104 @@ pub fn verify_statement_with(
         receipts_present: receipt_blobs.len(),
         problems,
     })
+}
+
+/// Whether the validated path was live at every attested registration time.
+///
+/// Only receipts that verified completely contribute. A receipt whose root
+/// signature did not check out, or whose claims digest names a different
+/// statement, is not evidence of when anything was registered — treating its
+/// `iat` as attested would hand the answer back to whoever wrote the bytes,
+/// which is the weakness that reading the statement's own `iat` had.
+///
+/// `None` when nothing attested a time, so the caller reports "cannot
+/// evaluate" rather than a pass. The conjunction is deliberate: each receipt
+/// is a separate registration event, and a statement whose certificates had
+/// expired by the time of its second registration has not satisfied "the
+/// certificates were live when this was registered".
+fn valid_at_registrations(details: &chain::Details, receipts: &[ReceiptFacts]) -> Option<bool> {
+    let mut attested = receipts
+        .iter()
+        .filter(|facts| facts.fully_verified())
+        .filter_map(|facts| facts.registered_at)
+        .peekable();
+    attested.peek()?;
+    Some(attested.all(|at| details.valid_at(at)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn details(not_before: i64, not_after: i64) -> chain::Details {
+        chain::Details {
+            root_sha256: [0; 32],
+            anchored_externally: true,
+            validated_at: not_before,
+            path_len: 2,
+            path_not_before: not_before,
+            path_not_after: not_after,
+        }
+    }
+
+    fn verified_at(registered_at: Option<i64>) -> ReceiptFacts {
+        ReceiptFacts {
+            registered_at,
+            root_signature_valid: Some(true),
+            bound_to_statement: Some(true),
+            key_lookup: Some(KeyLookup::Found),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_registration_inside_the_path_window_passes() {
+        let receipts = [verified_at(Some(150))];
+        assert_eq!(
+            valid_at_registrations(&details(100, 200), &receipts),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn a_registration_after_the_path_expired_fails() {
+        let receipts = [verified_at(Some(250))];
+        assert_eq!(
+            valid_at_registrations(&details(100, 200), &receipts),
+            Some(false)
+        );
+    }
+
+    /// Each receipt is its own registration event, so the strictest one wins.
+    /// Taking the earliest instead would let a statement re-registered long
+    /// after its certificates expired keep claiming they were live.
+    #[test]
+    fn every_registration_must_fall_inside_the_window() {
+        let receipts = [verified_at(Some(150)), verified_at(Some(250))];
+        assert_eq!(
+            valid_at_registrations(&details(100, 200), &receipts),
+            Some(false)
+        );
+    }
+
+    /// The whole point of the change: an unverified receipt's `iat` is just a
+    /// number someone wrote, exactly like the statement's own.
+    #[test]
+    fn an_unverified_receipt_contributes_no_time() {
+        let unverified = ReceiptFacts {
+            registered_at: Some(150),
+            root_signature_valid: Some(false),
+            ..Default::default()
+        };
+        assert_eq!(
+            valid_at_registrations(&details(100, 200), &[unverified]),
+            None
+        );
+    }
+
+    #[test]
+    fn a_verified_receipt_without_a_time_leaves_the_question_open() {
+        let receipts = [verified_at(None)];
+        assert_eq!(valid_at_registrations(&details(100, 200), &receipts), None);
+    }
 }

@@ -153,7 +153,7 @@ that ran passed. That first clause is not redundant — see
 | `requireKidBoundToKey` | `boolean` | Every receipt's kid must be the digest of its signing key |
 | `certificateChainValidated` | `boolean` | The signing certificate chain must validate to an anchor |
 | `requireChainToRootSha256` | `string` | Hex SHA-256 of the root the chain must terminate at |
-| `certificateValidAtSigningTime` | `boolean` | Every certificate must be within its validity window at the receipt's `iat` |
+| `certificateValidAtSigningTime` | `boolean` | Every certificate on the validated path must be within its validity window at every verified receipt's registration time |
 | `statementSubject` | `object` | The CWT `sub` claim the statement makes about itself |
 | `statementIssuer` | `object` | The CWT `iss` claim naming who signed the statement |
 | `protectedHeaders` | `object[]` | Assertions on individual protected header entries, by label path |
@@ -441,15 +441,33 @@ compares the hex SHA-256 of the root (case-insensitively) and so cannot be
 satisfied by minting a new certificate with the same subject.
 
 `certificateValidAtSigningTime` asks the narrower question: was every
-certificate inside its validity window at the receipt's `iat`? It is off by
-default on purpose. A statement registered legitimately in 2023 should not start
-failing in 2026 because a certificate expired on schedule — the ledger already
-witnessed the registration, and expiry after the fact is not evidence of
-forgery. Turn it on when you specifically want "the certificate was live when
-this was signed".
+certificate on the validated path inside its validity window when the statement
+was *registered*? It is off by default on purpose. A statement registered
+legitimately in 2023 should not start failing in 2026 because a certificate
+expired on schedule — the ledger already witnessed the registration, and expiry
+after the fact is not evidence of forgery. Turn it on when you specifically want
+"the certificate was live when this was signed".
 
-All three report **cannot evaluate**, not *fail*, when the chain was not
-examined — no chain present, or a chain this build cannot check (see
+Three details decide what it is worth:
+
+* **The time comes from the receipts, not the statement.** Each receipt that
+  verified completely contributes its `iat`. The statement's own `iat` is never
+  used: a signer who kept an expired key controls it and could set it to any
+  in-window instant, so reading it would let exactly the party the check is
+  aimed at choose the answer. A receipt is countersigned by the ledger.
+* **It witnesses registration, not signing.** No one can attest the instant a
+  private key was used. Registration is the closest independently attested time
+  that exists, and the name of this assertion is older than that distinction.
+* **With several receipts, all of them must fall inside the window.** Each is a
+  separate registration event, so one registration made after the certificates
+  expired is enough to fail.
+
+It reports **cannot evaluate** when the chain did not validate, or when no fully
+verified receipt carried an `iat`.
+
+`certificateChainValidated` and `requireChainToRootSha256` likewise report
+**cannot evaluate**, not *fail*, when the chain was not examined — no chain
+present, or a chain this build cannot check (see
 [limitations](limitations.md): ECDSA-signed certificates and unhandled critical
 extensions). "I did not look" is never evidence of compromise, and the exit code
 says 3 rather than 1 so you can tell the two apart in a pipeline.

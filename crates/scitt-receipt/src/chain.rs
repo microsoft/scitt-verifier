@@ -40,16 +40,20 @@ use tav_crypto::{CertificateBackend, CryptoBackend};
 
 type Cert = <tav_crypto::Crypto as CertificateBackend>::Certificate;
 
-/// Certificate signature algorithms the pinned crypto backend can verify.
+/// Extensions the RFC 5280 policy refuses to evaluate rather than process,
+/// paired with whether a non-critical occurrence is refused too.
 ///
-/// TAV's path verification accepts RSA only — PKCS#1 v1.5 with SHA-256/384/512
-/// and RSA-PSS. There is deliberately no ECDSA entry: `parse_signature_algorithm`
-/// has no branch for it, so an ECDSA-signed chain cannot be checked at all.
-const VERIFIABLE_SIGNATURE_OIDS: &[&str] = &[
-    "1.2.840.113549.1.1.10", // RSASSA-PSS
-    "1.2.840.113549.1.1.11", // sha256WithRSAEncryption
-    "1.2.840.113549.1.1.12", // sha384WithRSAEncryption
-    "1.2.840.113549.1.1.13", // sha512WithRSAEncryption
+/// Mirrors the `assert_skipped_extension_not_present` calls in TAV's
+/// `x509_policy`. Four of the five are refused even when non-critical, which
+/// is stricter than RFC 5280 requires: a non-critical `nameConstraints` is
+/// legal and may be ignored by a verifier. Listing them here keeps a chain
+/// that is merely beyond this build from being reported as one that failed.
+const SKIPPED_EXTENSION_OIDS: &[(&str, bool)] = &[
+    ("2.5.29.32", false), // certificatePolicies, refused only when critical
+    ("2.5.29.33", true),  // policyMappings
+    ("2.5.29.30", true),  // nameConstraints
+    ("2.5.29.36", true),  // policyConstraints
+    ("2.5.29.54", true),  // inhibitAnyPolicy
 ];
 
 /// Critical extensions the RFC 5280 policy knows how to process.
@@ -118,6 +122,25 @@ pub struct Details {
     pub validated_at: i64,
     /// Number of certificates on the path, anchor included.
     pub path_len: usize,
+    /// Latest `notBefore` across the certificates that actually formed the
+    /// path, anchor included.
+    pub path_not_before: i64,
+    /// Earliest `notAfter` across the same certificates.
+    ///
+    /// Together with [`Self::path_not_before`] this is the window during which
+    /// the whole selected path was simultaneously live. It is recorded here,
+    /// rather than recomputed from the transported `x5chain`, because the two
+    /// differ whenever the anchor was supplied externally — and a check that
+    /// silently used the statement's own copy would answer a question about a
+    /// path that was never the one validated.
+    pub path_not_after: i64,
+}
+
+impl Details {
+    /// Whether every certificate on the validated path was live at `unix_time`.
+    pub fn valid_at(&self, unix_time: i64) -> bool {
+        unix_time >= self.path_not_before && unix_time <= self.path_not_after
+    }
 }
 
 impl Outcome {
@@ -159,11 +182,48 @@ pub fn validate(chain: &[Vec<u8>], options: &Options) -> Result<Outcome> {
     let parsed = parse_all(chain)?;
     let roots = parse_roots(&options.trusted_roots)?;
 
-    let selection = match select_anchor(chain, &parsed, &roots, options)? {
-        Ok(selection) => selection,
+    let candidates = match anchor_candidates(chain, &parsed, &roots, options)? {
+        Ok(candidates) => candidates,
         Err(outcome) => return Ok(outcome),
     };
 
+    // Every plausible anchor is tried before the chain is called invalid.
+    // During a CA rotation two roots can share a subject name and differ in
+    // key, so a name match is a shortlist entry rather than an answer.
+    // Stopping at the first one would make the verdict depend on the order
+    // certificates happen to appear in the operator's bundle.
+    let mut failure: Option<Outcome> = None;
+    let mut capability_gap: Option<Outcome> = None;
+
+    for selection in candidates {
+        match attempt(chain, &parsed, &roots, options, &selection)? {
+            valid @ Outcome::Valid(_) => return Ok(valid),
+            unsupported @ Outcome::Unsupported(_) => {
+                capability_gap.get_or_insert(unsupported);
+            }
+            other => {
+                failure.get_or_insert(other);
+            }
+        }
+    }
+
+    // "One candidate could not be examined at all" outranks "another candidate
+    // did not verify". Reporting only the second would present a partial
+    // examination as a complete one, and the difference decides whether the
+    // caller is being told the tool fell short or the signer did.
+    Ok(capability_gap
+        .or(failure)
+        .unwrap_or_else(|| Outcome::Invalid("no trust anchor candidate produced a path".into())))
+}
+
+/// Try one candidate anchor end to end.
+fn attempt(
+    chain: &[Vec<u8>],
+    parsed: &[Cert],
+    roots: &[Cert],
+    options: &Options,
+    selection: &Selection,
+) -> Result<Outcome> {
     let top = chain.len() - 1;
     let (anchor, anchor_der): (&Cert, &[u8]) = match selection.root_index {
         Some(i) => (&roots[i], options.trusted_roots[i].as_slice()),
@@ -188,6 +248,7 @@ pub fn validate(chain: &[Vec<u8>], options: &Options) -> Result<Outcome> {
         validities.push(der::parse_validity(der_bytes)?);
     }
 
+    let (path_not_before, path_not_after) = path_window(&validities);
     let validated_at = match choose_time(&validities, options) {
         Ok(time) => time,
         Err(outcome) => return Ok(outcome),
@@ -235,6 +296,8 @@ pub fn validate(chain: &[Vec<u8>], options: &Options) -> Result<Outcome> {
             anchored_externally: selection.root_index.is_some(),
             validated_at,
             path_len: intermediate_refs.len() + 2,
+            path_not_before,
+            path_not_after,
         })),
         Err(e) => Ok(Outcome::Invalid(format!(
             "certificate path did not verify: {e}"
@@ -270,28 +333,32 @@ fn parse_roots(roots: &[Vec<u8>]) -> Result<Vec<Cert>> {
         .collect()
 }
 
-/// Choose the trust anchor and the intermediates beneath it.
+/// Shortlist the trust anchors worth trying, best candidate first.
 ///
 /// Returns `Err(Outcome)` for the cases that cannot proceed, so callers report
 /// them verbatim rather than reinterpreting them.
-fn select_anchor(
+fn anchor_candidates(
     chain: &[Vec<u8>],
     parsed: &[Cert],
     roots: &[Cert],
     options: &Options,
-) -> Result<std::result::Result<Selection, Outcome>> {
+) -> Result<std::result::Result<Vec<Selection>, Outcome>> {
     let top = parsed.len() - 1;
 
     if !roots.is_empty() {
+        let mut exact = Vec::new();
+        let mut by_name = Vec::new();
+
         for (i, root) in roots.iter().enumerate() {
             // The chain already ends at this root: drop the statement's copy
             // and anchor on the caller's, so the anchor is one they vouched
             // for rather than one the statement supplied.
             if chain[top] == options.trusted_roots[i] {
-                return Ok(Ok(Selection {
+                exact.push(Selection {
                     root_index: Some(i),
                     intermediates: (1..top).collect(),
-                }));
+                });
+                continue;
             }
 
             // The partial-chain case: the statement omitted the root and the
@@ -303,21 +370,29 @@ fn select_anchor(
                 )
                 .unwrap_or(false);
             if issued_top {
-                return Ok(Ok(Selection {
+                by_name.push(Selection {
                     root_index: Some(i),
                     intermediates: (1..=top).collect(),
-                }));
+                });
             }
         }
 
-        // Name matching only shortlists a candidate; `verify_chain` still has
-        // to check the signature. Failing here means not even a candidate
-        // existed, which is a real negative answer rather than missing input.
-        return Ok(Err(Outcome::Invalid(format!(
-            "the chain ends at '{}', which none of the {} supplied trusted root(s) issued",
-            <tav_crypto::Crypto as CertificateBackend>::subject_name(&parsed[top]),
-            roots.len()
-        ))));
+        // Byte-identical roots are tried ahead of every name match, across the
+        // whole bundle rather than in bundle order. An identical certificate
+        // is a far stronger claim than a shared subject name, and a name match
+        // sitting earlier in the file must not pre-empt it.
+        exact.extend(by_name);
+
+        if exact.is_empty() {
+            // Failing here means not even a candidate existed, which is a real
+            // negative answer rather than missing input.
+            return Ok(Err(Outcome::Invalid(format!(
+                "the chain ends at '{}', which none of the {} supplied trusted root(s) issued",
+                <tav_crypto::Crypto as CertificateBackend>::subject_name(&parsed[top]),
+                roots.len()
+            ))));
+        }
+        return Ok(Ok(exact));
     }
 
     let self_issued = <tav_crypto::Crypto as CertificateBackend>::is_self_issued(&parsed[top])
@@ -334,10 +409,10 @@ fn select_anchor(
         ))));
     }
 
-    Ok(Ok(Selection {
+    Ok(Ok(vec![Selection {
         root_index: None,
         intermediates: (1..top).collect(),
-    }))
+    }]))
 }
 
 /// Report anything on the path this build cannot actually check.
@@ -345,23 +420,57 @@ fn select_anchor(
 /// Returning `Some` means no verdict is available because of a limit in this
 /// tool, so the caller reports [`Outcome::Unsupported`] — not
 /// [`Outcome::Insufficient`], which is for material that was simply absent and
-/// might be supplied next run. Both cases below are real: a production AMD
-/// chain is ECDSA-signed, and a production Microsoft chain marks its
-/// extendedKeyUsage critical. OpenSSL-based verifiers accept both, so calling
-/// either one invalid would contradict the service that issued them.
+/// might be supplied next run. All three cases below are real: a production
+/// AMD chain is ECDSA-signed, a production Microsoft chain marks its
+/// extendedKeyUsage critical, and RSA-PSS is admitted by OID while the pinned
+/// backend accepts only one salt length per digest. OpenSSL-based verifiers
+/// accept all of them, so calling any one invalid would contradict the service
+/// that issued it.
+///
+/// `path` and `path_der` are anchor-first and must describe the same path.
 fn capability_gap(path: &[&Cert], path_der: &[&[u8]]) -> Result<Option<String>> {
-    for der_bytes in path_der {
-        let oid = der::parse_signature_algorithm_oid(der_bytes)?;
-        if !VERIFIABLE_SIGNATURE_OIDS.contains(&oid.as_str()) {
+    // Skips index 0. The backend verifies the anchor's signature over its
+    // first child and each child signature after that; it never verifies the
+    // anchor's own self-signature, so the algorithm that signed the anchor is
+    // never parsed and cannot be a reason this path is uncheckable. Including
+    // it would refuse an entirely supported path because the operator's root
+    // happens to be self-signed with something older.
+    for (cert, der_bytes) in path.iter().zip(path_der).skip(1) {
+        // Asked of the backend itself rather than compared against a list of
+        // OIDs kept here. An allowlist agrees with the backend on the
+        // algorithm and not on its parameters: RSA-PSS carries its digest,
+        // mask function and salt length inside those parameters, and the
+        // pinned backend refuses salt lengths it did not expect. That refusal
+        // is an inability to check, so it has to be recognised here rather
+        // than reaching the caller disguised as a chain that failed to verify.
+        if let Err(e) = cert.signature_algorithm() {
+            let oid = der::parse_signature_algorithm_oid(der_bytes)?;
             return Ok(Some(format!(
-                "a certificate on the path is signed with algorithm {oid}, which this build \
-                 cannot verify; it checks RSA signatures only, so the chain was not validated \
-                 either way"
+                "certificate '{}' is signed with algorithm {oid}, which this build cannot verify \
+                 ({e}); the chain was not validated either way",
+                <tav_crypto::Crypto as CertificateBackend>::subject_name(cert)
             )));
         }
     }
 
     for cert in path {
+        for (oid, reject_non_critical) in SKIPPED_EXTENSION_OIDS {
+            let criticality =
+                <tav_crypto::Crypto as CertificateBackend>::extension_criticality(cert, oid)
+                    .map_err(|e| {
+                        Error::Crypto(format!("could not inspect extension {oid}: {e}"))
+                    })?;
+            let refused =
+                criticality == Some(true) || (*reject_non_critical && criticality.is_some());
+            if refused {
+                return Ok(Some(format!(
+                    "certificate '{}' carries extension {oid}, which the path policy in this \
+                     build declines to evaluate; the chain was not validated either way",
+                    <tav_crypto::Crypto as CertificateBackend>::subject_name(cert)
+                )));
+            }
+        }
+
         let critical = <tav_crypto::Crypto as CertificateBackend>::critical_extension_oids(cert);
         let unhandled: Vec<String> = critical
             .into_iter()
@@ -380,29 +489,18 @@ fn capability_gap(path: &[&Cert], path_der: &[&[u8]]) -> Result<Option<String>> 
     Ok(None)
 }
 
-/// Whether every certificate in the chain was valid at `unix_time`.
+/// The window during which every certificate on a path was simultaneously live.
 ///
-/// Separate from [`validate`] because it answers a different question. Path
-/// validation asks whether these certificates form a chain at all; this asks
-/// whether they were live at one particular moment — normally the receipt's
-/// `iat`, meaning "was this certificate valid when it was actually signed?".
-///
-/// Computed from the encoded validity windows rather than by re-running path
-/// validation, so a caller can have both answers without the stricter one
-/// overwriting the structural verdict.
-pub fn all_valid_at(chain: &[Vec<u8>], unix_time: i64) -> Result<bool> {
-    if chain.is_empty() {
-        return Err(Error::TrustMaterial(
-            "no certificates to check validity for".into(),
-        ));
-    }
-    for der_bytes in chain {
-        let validity = der::parse_validity(der_bytes)?;
-        if unix_time < validity.not_before || unix_time > validity.not_after {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+/// An empty path cannot occur — a path always has an anchor and a leaf — but
+/// the saturating defaults keep this total rather than panicking.
+fn path_window(validities: &[Validity]) -> (i64, i64) {
+    let latest_start = validities.iter().map(|v| v.not_before).max().unwrap_or(0);
+    let earliest_end = validities
+        .iter()
+        .map(|v| v.not_after)
+        .min()
+        .unwrap_or(i64::MAX);
+    (latest_start, earliest_end)
 }
 
 /// Pick the time to validate the path at. See the module comment.
@@ -414,12 +512,7 @@ fn choose_time(validities: &[Validity], options: &Options) -> std::result::Resul
         return Ok(explicit);
     }
 
-    let latest_start = validities.iter().map(|v| v.not_before).max().unwrap_or(0);
-    let earliest_end = validities
-        .iter()
-        .map(|v| v.not_after)
-        .min()
-        .unwrap_or(i64::MAX);
+    let (latest_start, earliest_end) = path_window(validities);
 
     if latest_start > earliest_end {
         return Err(Outcome::Invalid(

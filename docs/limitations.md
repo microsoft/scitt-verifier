@@ -79,22 +79,33 @@ substitute for supplying roots.
 
 ## Not implemented in this release
 
-### ECDSA-signed certificate chains
+### ECDSA-signed certificate chains, and RSA-PSS parameters the backend refuses
 
 *Reported at runtime:* `appraisal.notChecked` code `CertificateChainUnsupported`,
-naming the signature algorithm OID.
+naming the signature algorithm OID and the backend's own reason.
 
 The pinned crypto backend verifies RSA certificate signatures only — PKCS#1 v1.5
 with SHA-256/384/512, and RSA-PSS. A chain whose certificates are signed with
 ECDSA cannot be checked here at all. AMD's hardware bill-of-materials signing
 chain is one real example.
 
+RSA-PSS is admitted by OID and then constrained further: the backend requires
+MGF1 over the same digest and one specific salt length per digest. A legal
+RSA-PSS certificate using a different salt length is reported as unsupported for
+the same reason ECDSA is — the question is whether this build can perform the
+check, not whether the certificate is well formed.
+
+The check is asked of the backend itself rather than of a list of OIDs kept
+alongside it. A list agrees with the backend about the algorithm and not about
+its parameters, and the disagreement surfaces as a chain that "failed to
+verify" — an accusation against the signer for what is a limit of the tool.
+
 *Consequence:* the chain is **unexamined**, not known-good. This is deliberately
 a different code from the gaps above: supplying a root will not fix it, and only
 a newer build can. Everything else about such a statement — the leaf signature,
 the receipt, the payload — is still verified normally.
 
-### Certificates using unhandled critical extensions
+### Certificates using extensions the path policy declines to evaluate
 
 *Reported at runtime:* `appraisal.notChecked` code `CertificateChainUnsupported`,
 naming the extension OID.
@@ -103,9 +114,36 @@ RFC 5280 requires a verifier to refuse a certificate marking an extension
 critical that it does not understand. The path validation here processes
 `basicConstraints` and `keyUsage`; a certificate marking anything else critical —
 extended key usage, for instance — is reported as unsupported rather than
-invalid. Refusing to process an extension says nothing about whether the chain
-is genuine, and reporting it as a failure would accuse a chain that may be
+invalid.
+
+The same applies to four extensions the policy refuses **even when they are not
+critical**: `policyMappings`, `nameConstraints`, `policyConstraints`, and
+`inhibitAnyPolicy`. That is stricter than RFC 5280, which permits a verifier to
+ignore a non-critical extension, so a certificate carrying one is legal and
+simply beyond this build.
+
+Refusing to process an extension says nothing about whether the chain is
+genuine, and reporting it as a failure would accuse a chain that may be
 perfectly well formed.
+
+### `did:x509` resolution against the validated chain
+
+*Reported at runtime:* nothing, because nothing claims it. This is a scope
+boundary rather than a gap in a check that runs.
+
+The `did:x509` parser and resolver exist as a library primitive and are not
+called during verification. The `statementIssuer` assertion compares the CWT
+`iss` claim as a **string**, which is what it has always documented; it is
+covered by the Issuer's signature and by the receipt, and it is not re-derived
+from the certificate chain.
+
+*Consequence:* a validated chain plus a pinned root establishes that the leaf
+was issued under a CA you accept. It does **not** establish that the leaf
+satisfies the EKU or subject predicates named in the DID the statement claims.
+Where the transparency service authenticates `did:x509` at registration —
+Microsoft Signing Transparency does — the receipt already carries that
+guarantee. Against a service that does not, a different certificate holder under
+the same accepted CA could claim the expected DID and obtain a genuine receipt.
 
 ### Certificate revocation
 
@@ -204,6 +242,11 @@ scope.
 * `iat` is read from the receipt's CWT claims and reported as a raw Unix
   timestamp. Time-based policy assertions use the *receipt's* registration time,
   never the statement's own `iat`, because the issuer controls the latter.
+* A trusted-roots bundle holding two roots with the same subject and different
+  keys — a CA mid-rotation — is handled by trying each candidate until one
+  validates, so the answer does not depend on their order in the file. There is
+  no fixture for this case: it needs a second real chain, which the corpus does
+  not have.
 * The CLI surface is unstable before v1.0. Exit codes are the stable contract;
   pin a release tag in pipelines.
 
