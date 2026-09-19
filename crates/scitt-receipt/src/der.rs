@@ -163,6 +163,66 @@ pub fn parse_eku_oids(value: &[u8]) -> Vec<String> {
     oids
 }
 
+/// Extract the OIDs from an ExtendedKeyUsage extension value, strictly.
+///
+/// The counterpart to [`parse_eku_oids`], for the callers that *gate* on the
+/// result. Every difference is deliberate: the whole value must be consumed,
+/// every item must be an OBJECT IDENTIFIER that decodes, and the sequence must
+/// not be empty — RFC 5280 requires at least one `KeyPurposeId`.
+///
+/// The tolerant parser stops at the first byte it cannot read and returns what
+/// it gathered before that point, so `SEQUENCE { OID 1.2.3, <truncated> }`
+/// yields `["1.2.3"]`. For a report that is the right trade; for identity
+/// matching it means an attacker can park a wanted OID in front of garbage the
+/// outer certificate parser never looks at, because the extension value is an
+/// opaque `OCTET STRING` to it. This refuses that input instead of matching on
+/// it.
+pub fn parse_eku_oids_strict(value: &[u8]) -> Result<Vec<String>> {
+    let malformed =
+        |what: &str| Error::TrustMaterial(format!("extendedKeyUsage is malformed: {what}"));
+
+    let inner = match read_tlv(value) {
+        // OCTET STRING wrapper around the real extension value.
+        Some((0x04, contents, remainder)) => {
+            if !remainder.is_empty() {
+                return Err(malformed("trailing bytes after the extension value"));
+            }
+            match read_tlv(contents) {
+                Some((0x30, seq, [])) => seq,
+                _ => return Err(malformed("the value is not a single SEQUENCE")),
+            }
+        }
+        Some((0x30, seq, remainder)) => {
+            if !remainder.is_empty() {
+                return Err(malformed("trailing bytes after the SEQUENCE"));
+            }
+            seq
+        }
+        _ => return Err(malformed("the value is not a SEQUENCE")),
+    };
+
+    let mut oids = Vec::new();
+    let mut rest = inner;
+    while !rest.is_empty() {
+        let Some((tag, contents, remainder)) = read_tlv(rest) else {
+            return Err(malformed("an item is not a well-formed TLV"));
+        };
+        if tag != 0x06 {
+            return Err(malformed("an item is not an OBJECT IDENTIFIER"));
+        }
+        let Some(oid) = decode_oid(contents) else {
+            return Err(malformed("an OBJECT IDENTIFIER does not decode"));
+        };
+        oids.push(oid);
+        rest = remainder;
+    }
+
+    if oids.is_empty() {
+        return Err(malformed("the sequence names no key purpose"));
+    }
+    Ok(oids)
+}
+
 /// The `notBefore` and `notAfter` of a certificate, as Unix seconds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Validity {
@@ -495,6 +555,51 @@ mod eku_tests {
         assert!(parse_eku_oids(&[]).is_empty());
         assert!(parse_eku_oids(&[0x30, 0xFF]).is_empty());
         assert!(parse_eku_oids(&[0x30, 0x02, 0x06, 0x7F]).is_empty());
+    }
+
+    /// The reason the strict parser exists. The tolerant one keeps the OID it
+    /// managed to read and stops quietly at the garbage behind it, so a
+    /// predicate gating on `1.2.3` would match this value. The outer
+    /// certificate parser cannot catch it either: an extension value is an
+    /// opaque OCTET STRING to it.
+    #[test]
+    fn a_wanted_oid_in_front_of_garbage_matches_loosely_and_is_refused_strictly() {
+        // SEQUENCE { OID 1.2.3, <truncated TLV> }
+        let der = &[0x30, 0x05, 0x06, 0x02, 0x2A, 0x03, 0xFF];
+
+        assert_eq!(parse_eku_oids(der), vec!["1.2.3".to_string()]);
+        assert!(
+            parse_eku_oids_strict(der).is_err(),
+            "a value with trailing garbage must not decide an identity predicate"
+        );
+    }
+
+    #[test]
+    fn the_strict_parser_accepts_a_well_formed_sequence() {
+        let der = &[0x30, 0x04, 0x06, 0x02, 0x2A, 0x03];
+        assert_eq!(
+            parse_eku_oids_strict(der).unwrap(),
+            vec!["1.2.3".to_string()]
+        );
+
+        let mut wrapped = vec![0x04, der.len() as u8];
+        wrapped.extend_from_slice(der);
+        assert_eq!(
+            parse_eku_oids_strict(&wrapped).unwrap(),
+            vec!["1.2.3".to_string()]
+        );
+    }
+
+    /// RFC 5280 requires at least one `KeyPurposeId`. An empty sequence would
+    /// otherwise answer "no match" for every predicate, which reads as a
+    /// finding about the certificate rather than a malformed extension.
+    #[test]
+    fn the_strict_parser_refuses_an_empty_sequence_and_stray_items() {
+        assert!(parse_eku_oids_strict(&[0x30, 0x00]).is_err());
+        // SEQUENCE { INTEGER 1 } — an item that is not an OID at all.
+        assert!(parse_eku_oids_strict(&[0x30, 0x03, 0x02, 0x01, 0x01]).is_err());
+        // Trailing bytes after a well-formed SEQUENCE.
+        assert!(parse_eku_oids_strict(&[0x30, 0x04, 0x06, 0x02, 0x2A, 0x03, 0x00]).is_err());
     }
 
     #[test]

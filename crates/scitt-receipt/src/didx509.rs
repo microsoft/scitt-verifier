@@ -29,6 +29,25 @@
 //! every production Microsoft statement. The reference implementation
 //! (`didx509cpp.h`, vendored in CCF) scans `for (size_t i = 1; i < chain.size();
 //! i++)`, and this module does the same.
+//!
+//! ## Scope: this is a library primitive, not a check the CLI runs
+//!
+//! Nothing in [`crate::verify_statement_with`] calls [`resolve`]. The
+//! `statementIssuer` policy assertion compares the CWT `iss` claim as a string
+//! and deliberately continues to do so, because that claim is covered by the
+//! Issuer's signature and by the receipt, whereas a locally re-derived identity
+//! is covered by neither.
+//!
+//! The consequence is worth stating plainly: a validated chain and a pinned
+//! root establish that the leaf was issued under a CA you trust, and *not* that
+//! the leaf satisfies the EKU or subject predicates of the DID the statement
+//! claims. Against a service that authenticates `did:x509` at registration —
+//! Microsoft Signing Transparency does — the receipt already carries that
+//! guarantee. Against one that does not, another certificate holder under the
+//! same accepted CA could claim the expected DID.
+//!
+//! Wiring this into a chain-backed identity fact, so a policy can assert on a
+//! resolved rather than a claimed identity, is tracked separately.
 
 use crate::der;
 use crate::error::{Error, Result};
@@ -239,7 +258,19 @@ fn check_eku(value: &str, leaf_der: &[u8]) -> Result<Resolution> {
         ));
     };
 
-    let oids = der::parse_eku_oids(&extension);
+    let oids = match der::parse_eku_oids_strict(&extension) {
+        Ok(oids) => oids,
+        // A predicate cannot be decided against an extension that does not
+        // decode, and "does not decode" is not "does not match": the caller
+        // needs to know the question went unanswered rather than read a
+        // mismatch as evidence about this signer.
+        Err(e) => {
+            return Ok(Resolution::Mismatch(format!(
+                "did:x509 requires extendedKeyUsage {value}, but the leaf certificate's \
+                 extendedKeyUsage could not be read: {e}"
+            )))
+        }
+    };
     if oids.iter().any(|oid| oid == value) {
         Ok(Resolution::Matched { ca_index: 0 })
     } else {
