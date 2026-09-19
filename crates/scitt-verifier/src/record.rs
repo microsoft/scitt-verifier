@@ -199,7 +199,62 @@ fn inputs_json(args: &VerifyArgs) -> Value {
         },
         "policy": args.policy.display().to_string(),
         "artifact": args.artifact.as_ref().map(|p| p.display().to_string()),
+        // Named separately from the ledger key material above because the two
+        // are different trust decisions: these roots say who may have signed
+        // the statement, the key set says which ledger may have registered it.
+        // A record that mentioned only one would leave half the operator's
+        // configuration invisible to an auditor.
+        "trustedRoots": args.trusted_roots.as_ref().map(|p| p.display().to_string()),
     })
+}
+
+/// What chain validation established, projected verbatim.
+///
+/// Success used to be legible only as the *absence* of a warning, which asks a
+/// downstream consumer to infer a positive from a negative — and leaves
+/// `--facts`, which carries no policy messages or gaps at all, with nothing
+/// about the chain whatsoever. The anchor digest and whether it came from
+/// outside are the two values a later audit actually needs: together they say
+/// which CA this statement leads to and whether anyone but its author vouched
+/// for it.
+fn chain_json(facts: &scitt_receipt::StatementFacts) -> Value {
+    use scitt_receipt::chain::Outcome;
+
+    let Some(outcome) = &facts.chain_outcome else {
+        return json!({ "status": NOT_EVALUATED });
+    };
+
+    match outcome {
+        Outcome::Valid(details) => json!({
+            "status": EVALUATED,
+            "outcome": "valid",
+            "rootSha256": hex(&details.root_sha256),
+            "anchoredExternally": details.anchored_externally,
+            "validatedAt": details.validated_at,
+            "pathLength": details.path_len,
+            "pathNotBefore": details.path_not_before,
+            "pathNotAfter": details.path_not_after,
+        }),
+        Outcome::Invalid(reason) => json!({
+            "status": EVALUATED,
+            "outcome": "invalid",
+            "reason": reason,
+        }),
+        Outcome::Insufficient(reason) => json!({
+            "status": EVALUATED,
+            "outcome": "insufficient",
+            "reason": reason,
+        }),
+        Outcome::Unsupported(reason) => json!({
+            "status": EVALUATED,
+            "outcome": "unsupported",
+            "reason": reason,
+        }),
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// What online mode asked for, what it got, and what it could not get.
@@ -295,6 +350,13 @@ fn statement_json(assessment: &Assessment) -> Value {
         "algorithm": facts.alg.map(scitt_receipt::labels::alg::name),
         "signatureValid": facts.signature_valid,
         "certificateChainLength": facts.certificate_chain_len,
+        "certificateChain": chain_json(facts),
+        // Named for registration rather than signing: the time is the ledger's
+        // countersigned `iat`, which witnesses when the statement was
+        // registered and is the closest independently attested instant there
+        // is. Null when the chain did not validate or no verified receipt
+        // carried a time.
+        "certificatesValidAtRegistration": facts.certificates_valid_at_signing_time,
         "signerSubject": facts.leaf_subject,
         "signerIssuer": facts.leaf_issuer,
         "cwt": {
