@@ -2045,6 +2045,99 @@ fn inspect_does_not_list_payload_claims_for_a_payload_declared_another_type() {
     assert!(!r.stdout.contains("\n  json\n"), "{}", r.stdout);
 }
 
+/// A malformed `--decode` command line is a usage error, not a verdict.
+///
+/// The two exit codes mean different things to a pipeline: 4 says the operator
+/// mistyped something and nothing was examined, 3 says the tool looked and
+/// could not answer. Collapsing a typo into 3 would make a broken command line
+/// indistinguishable from a statement that genuinely lacks the claim, and the
+/// operator would go looking at the artifact instead of at their own script.
+#[test]
+fn a_decode_command_line_that_cannot_be_understood_exits_as_a_usage_error() {
+    let statement = corpus(&["fixtures", "cbor-header.cose"]);
+
+    // An encoding, but nothing to apply it to.
+    let r = run(&[
+        "inspect",
+        "--statement",
+        &statement,
+        "--decode-as",
+        "base64",
+    ]);
+    assert_eq!(r.code, 4, "{}", r.stderr);
+    assert!(r.stderr.contains("no --decode"), "{}", r.stderr);
+
+    // An output file, but nothing to write to it.
+    let r = run(&[
+        "inspect",
+        "--statement",
+        &statement,
+        "--decode-out",
+        "x.bin",
+    ]);
+    assert_eq!(r.code, 4, "{}", r.stderr);
+
+    // A path that is not a path.
+    let r = run(&["inspect", "--statement", &statement, "--decode", "[bad"]);
+    assert_eq!(r.code, 4, "{}", r.stderr);
+}
+
+/// A claim that cannot be decoded must say which claim, and why.
+///
+/// `inspect` prints the statement whatever happens, because the reader asked
+/// to see it; the decode failure rides alongside on stderr. The failure mode
+/// this guards is a bare non-zero exit that leaves an operator unable to tell
+/// a misspelled path from a producer who stopped emitting the field.
+#[test]
+fn a_claim_that_cannot_be_decoded_is_named_and_explained() {
+    let statement = corpus(&["fixtures", "cbor-header.cose"]);
+
+    // No such claim. The report is still printed.
+    let r = run(&["inspect", "--statement", &statement, "--decode", "['nope']"]);
+    assert_eq!(r.code, 3, "{}", r.stderr);
+    assert!(r.stderr.contains("['nope']"), "{}", r.stderr);
+    assert!(r.stderr.contains("no such claim"), "{}", r.stderr);
+    assert!(r.stdout.contains("Payload"), "{}", r.stdout);
+
+    // A real claim carrying characters that are not in the alphabet at all.
+    let r = run(&[
+        "inspect",
+        "--statement",
+        &statement,
+        "--decode",
+        "['digest']",
+    ]);
+    assert_eq!(r.code, 3, "{}", r.stderr);
+    assert!(r.stderr.contains("['digest']"), "{}", r.stderr);
+
+    // A real claim whose characters are all legal but whose length is not.
+    // Refusing this is the point: a decoder that padded it would invent bytes
+    // and then publish a digest over them.
+    let r = run(&[
+        "inspect",
+        "--statement",
+        &statement,
+        "--decode",
+        "['artifact']",
+        "--decode-as",
+        "base64url",
+    ]);
+    assert_eq!(r.code, 3, "{}", r.stderr);
+}
+
+/// Only a payload the statement declares to be JSON has claims to address.
+///
+/// This is the same rule `payloadJson` follows. Reading claims out of a
+/// payload whose content type says it is something else would let a decode
+/// succeed against bytes the producer never described that way.
+#[test]
+fn decode_refuses_a_payload_the_statement_did_not_declare_as_json() {
+    let statement = corpus(&["fixtures", "transparent-statement.cose"]);
+    let r = run(&["inspect", "--statement", &statement, "--decode", "['x']"]);
+    assert_eq!(r.code, 3, "{}", r.stderr);
+    assert!(r.stderr.contains("not JSON"), "{}", r.stderr);
+}
+
 /// `--trusted-roots` must be answerable "no".
 ///
 /// The failure this defends against is silent: before the chain was actually

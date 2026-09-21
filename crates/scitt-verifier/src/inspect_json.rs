@@ -25,7 +25,11 @@ const TEXT_LIMIT: usize = 128;
 const BYTES_LIMIT: usize = 64;
 
 /// Build the inspect document for a statement.
-pub fn document(statement: &Sign1, verbose: bool) -> Value {
+pub fn document(
+    statement: &Sign1,
+    verbose: bool,
+    decoded: Option<&crate::decode::Decoded>,
+) -> Value {
     let mut root = Map::new();
 
     root.insert("format".into(), json!("scitt-verifier/inspect/v1"));
@@ -49,6 +53,9 @@ pub fn document(statement: &Sign1, verbose: bool) -> Value {
         header_bucket(&statement.unprotected, verbose),
     );
     root.insert("payload".into(), payload(statement, verbose));
+    if let Some(decoded) = decoded {
+        root.insert("decoded".into(), decoded_json(decoded));
+    }
     root.insert(
         "signature".into(),
         blob(&statement.signature, verbose, "signature"),
@@ -433,6 +440,30 @@ fn payload(statement: &Sign1, verbose: bool) -> Value {
         out.insert("elided".into(), json!(true));
     }
     Value::Object(out)
+}
+
+/// The result of an explicitly requested `--decode`, kept beside the payload.
+///
+/// A sibling of `payload` rather than a field inside it, because it is a
+/// derived view and the original must stay exactly as it arrived. A consumer
+/// comparing this digest against one a producer published needs to be able to
+/// see which bytes it covers, and merging the two would blur that.
+///
+/// `authenticated` restates what `verified` says at the top of the document.
+/// The repetition is deliberate: a digest is the field most likely to be
+/// lifted out of this document on its own, and it must not travel without the
+/// fact that nothing here was checked.
+fn decoded_json(decoded: &crate::decode::Decoded) -> Value {
+    json!({
+        "path": decoded.path,
+        "encoding": decoded.encoding,
+        "bytes": decoded.bytes.len(),
+        "sha256": decoded.sha256,
+        "utf8": decoded.utf8,
+        "preview": decoded.preview,
+        "previewTruncated": decoded.preview_truncated,
+        "authenticated": false,
+    })
 }
 
 /// Summarise a byte string, or render it in full when asked.

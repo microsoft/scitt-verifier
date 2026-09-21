@@ -6,6 +6,7 @@
 //! identically on an air-gapped build agent three months later.
 
 mod cli;
+mod decode;
 mod inspect_json;
 mod online;
 mod outcome;
@@ -84,9 +85,49 @@ fn run_inspect(args: &cli::InspectArgs) -> u8 {
         }
     };
 
+    // Decoded before either renderer runs, so text and JSON report the same
+    // outcome, and so a failure to decode is reported as a failure rather
+    // than as a section quietly missing from the output.
+    let decoded = match &args.decode {
+        Some(request) => match decode::decode(&statement, request, args.verbose) {
+            Ok(decoded) => Some(decoded),
+            Err(why) => {
+                // The rest of the inspection is still printed: the statement
+                // was readable, and a reader who asked for one field should
+                // not lose the report that would tell them why it is not
+                // there. The exit code carries the failure instead.
+                match args.format {
+                    Format::Json => {
+                        let document = inspect_json::document(&statement, args.verbose, None);
+                        if let Ok(text) = serde_json::to_string_pretty(&document) {
+                            println!("{text}");
+                        }
+                    }
+                    Format::Text => {
+                        let _ = report::inspect(&statement, args.verbose, None);
+                    }
+                }
+                eprintln!("error: {why}");
+                return Verdict::CannotEvaluate.exit_code();
+            }
+        },
+        None => None,
+    };
+
+    if let (Some(decoded), Some(out)) = (&decoded, &args.decode_out) {
+        // The exact bytes, with nothing added or normalised on the way out.
+        // A failed write is fatal: the caller asked for these bytes in order
+        // to do something with them, and an exit code of 0 beside a file that
+        // is absent or half-written would be believed.
+        if let Err(e) = std::fs::write(out, &decoded.bytes) {
+            eprintln!("error: could not write {}: {e}", out.display());
+            return Verdict::CannotEvaluate.exit_code();
+        }
+    }
+
     match args.format {
         Format::Json => {
-            let document = inspect_json::document(&statement, args.verbose);
+            let document = inspect_json::document(&statement, args.verbose, decoded.as_ref());
             match serde_json::to_string_pretty(&document) {
                 Ok(text) => {
                     println!("{text}");
@@ -98,7 +139,7 @@ fn run_inspect(args: &cli::InspectArgs) -> u8 {
                 }
             }
         }
-        Format::Text => match report::inspect(&statement, args.verbose) {
+        Format::Text => match report::inspect(&statement, args.verbose, decoded.as_ref()) {
             Ok(()) => 0,
             Err(e) => {
                 eprintln!("error: {e}");

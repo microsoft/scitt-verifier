@@ -237,6 +237,21 @@ scope.
 
 ## Known rough edges
 
+* `--decode` reads claims from the payload only, and only when the statement
+  declares that payload to be JSON. Encoded values in protected headers are not
+  addressable, and neither is a detached payload, since there are no bytes to
+  read. Both are refused by name rather than returning an empty result.
+* `--decode` reports a digest; it does not compare one. Gating a deployment on
+  "the decoded policy is the one I approved" still means reading `sha256` out
+  of the JSON and comparing it yourself. A policy assertion that does the
+  comparison in-process, and so cannot be skipped by a pipeline that ignores a
+  field, is not yet implemented.
+* There is no escape convention for an apostrophe inside a claim name on the
+  command line, so such a claim can only be addressed from a policy file.
+* `--decode`'s success path has unit coverage and is exercised end-to-end by
+  hand, but no acceptance test drives it through the binary: no corpus fixture
+  carries a base64-bearing claim, and minting one is a full corpus
+  regeneration. The refusal paths are covered.
 * Only the first inclusion proof in a receipt is evaluated.
   `receipts.entries[].problems` says so when there is more than one.
 * `iat` is read from the receipt's CWT claims and reported as a raw Unix
