@@ -434,6 +434,40 @@ impl std::fmt::Display for PathSegment {
 /// key containing an apostrophe is refused here rather than given a syntax to
 /// get wrong. Such a key remains addressable from a policy file, where it is
 /// an ordinary JSON string; only this command-line spelling cannot reach it.
+/// Split a path body on the commas that separate segments, ignoring those
+/// inside a quoted key.
+///
+/// A naive `split(',')` breaks the round trip this notation exists for: a
+/// claim genuinely named `policy,base64` prints as `['policy,base64']` and
+/// would then parse as two malformed segments, so a path `inspect` printed
+/// could not be pasted back. The apostrophe is the only quoting character
+/// here and it has no escape, so tracking whether one is open is the whole
+/// rule.
+fn split_segments(inner: &str) -> Result<Vec<&str>, String> {
+    let mut pieces = Vec::new();
+    let mut quoted = false;
+    let mut start = 0;
+    for (at, c) in inner.char_indices() {
+        match c {
+            '\'' => quoted = !quoted,
+            ',' if !quoted => {
+                pieces.push(&inner[start..at]);
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    if quoted {
+        return Err(
+            "the path has an apostrophe that is never closed; paste it exactly as inspect \
+             printed it"
+                .into(),
+        );
+    }
+    pieces.push(&inner[start..]);
+    Ok(pieces)
+}
+
 pub fn parse_path(text: &str) -> Result<Vec<PathSegment>, String> {
     let trimmed = text.trim();
     let inner = match trimmed.strip_prefix('[') {
@@ -459,7 +493,7 @@ pub fn parse_path(text: &str) -> Result<Vec<PathSegment>, String> {
     }
 
     let mut segments = Vec::new();
-    for raw in inner.split(',') {
+    for raw in split_segments(inner)? {
         let piece = raw.trim();
         if piece.is_empty() {
             return Err("the path has an empty segment between two commas".into());
@@ -1033,7 +1067,12 @@ fn resolve_path<'a>(
 ///
 /// Duplicate detection needs a visitor because `serde_json::Map` has already
 /// discarded the collision by the time a `Value` exists.
-fn parse_payload_json(bytes: &[u8]) -> Result<serde_json::Value, String> {
+/// Parse a JSON payload, refusing duplicate object keys.
+///
+/// Public because `inspect --decode` must read a payload the same way an
+/// evaluated rule does. A document this rejects as ambiguous must not become
+/// a digest reported as fact by the extraction path.
+pub fn parse_payload_json(bytes: &[u8]) -> Result<serde_json::Value, String> {
     serde_json::from_slice::<StrictJson>(bytes)
         .map(|v| v.0)
         .map_err(|e| e.to_string())
@@ -3373,6 +3412,37 @@ mod tests {
 
         let parsed = parse_path(&printed).unwrap();
         assert_eq!(describe_path(&parsed), printed);
+    }
+
+    #[test]
+    fn a_printed_key_containing_a_comma_still_parses_back() {
+        // Splitting on every comma broke this: `['policy,base64']` became two
+        // malformed segments, so a path `inspect` printed could not be pasted
+        // back. The comma is legal in a JSON key, so the notation has to carry
+        // it rather than the reader having to notice it cannot.
+        for key in ["policy,base64", "a,b,c", "trailing,"] {
+            let original = vec![PathSegment::Text(key.into())];
+            let printed = describe_path(&original);
+            let parsed = parse_path(&printed)
+                .unwrap_or_else(|e| panic!("{printed} must round-trip, got {e}"));
+            assert_eq!(describe_path(&parsed), printed);
+        }
+
+        // Nested, so the separating commas and the embedded one are both in play.
+        let original = vec![
+            PathSegment::Text("a,b".into()),
+            PathSegment::Int(2),
+            PathSegment::Text("c".into()),
+        ];
+        let printed = describe_path(&original);
+        assert_eq!(printed, "['a,b', 2, 'c']");
+        assert_eq!(describe_path(&parse_path(&printed).unwrap()), printed);
+    }
+
+    #[test]
+    fn an_unclosed_apostrophe_is_refused_rather_than_swallowing_the_rest() {
+        let err = parse_path("['a, 0]").unwrap_err();
+        assert!(err.contains("never closed"), "{err}");
     }
 
     #[test]
