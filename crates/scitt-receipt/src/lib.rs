@@ -40,6 +40,7 @@
 //! receipt that verifies perfectly against the ledger but commits to a
 //! different statement is evidence about a different artifact.
 
+pub mod base64;
 pub mod binding;
 pub mod cbor;
 pub mod chain;
