@@ -2,21 +2,31 @@
 //!
 //! A payload field like a build policy is often a base64 string, and what a
 //! consumer needs from it is the digest of the *exact* decoded bytes. That
-//! makes the decoder a security boundary rather than a convenience: any
-//! tolerance here — whitespace skipped, missing padding invented, an alphabet
-//! guessed — changes which bytes get hashed, and a digest computed over
-//! repaired input identifies something nobody signed.
+//! makes the decoder part of a security boundary rather than a convenience.
+//!
+//! The reason to be strict is not that tolerance would return wrong bytes —
+//! usually it would return exactly the same bytes. It is that a digest
+//! published against this claim attests to one spelling of it, and every
+//! tolerance widens the set of inputs that produce that digest: a value with a
+//! trailing newline, or with its padding dropped, or with spare bits set in
+//! its final character, all become things the published digest vouches for.
+//! Refusing keeps that set as small as the encoding allows, and a caller who
+//! genuinely has a wrapped or unpadded value is better served by being told so
+//! than by a silent success.
 //!
 //! So nothing is repaired. Input that is not exactly a well-formed encoding
 //! under the alphabet the caller named is refused with a reason. The one
 //! accommodation is unpadded base64url, because unpadded *is* the defined form
 //! of that alphabet: reconstructing its padding is reading the encoding as
-//! specified, not guessing at a malformed one.
+//! specified, not guessing at a malformed one. Padding that is present but
+//! inconsistent is refused, because that is a repair rather than a reading.
 //!
 //! Which alphabet applies is always the caller's explicit choice. Sniffing it
 //! from the value would mean a string of pure letters and digits decoded under
 //! whichever alphabet was tried first, and the two disagree for exactly the
 //! characters a sniffing rule cannot see.
+
+use std::borrow::Cow;
 
 /// Which base64 alphabet a value is written in.
 ///
@@ -60,26 +70,49 @@ impl Alphabet {
     }
 }
 
+/// The largest encoded value this will decode.
+///
+/// A claim is a span inside a payload that is already in memory, so this does
+/// not defend the process against a large file. It bounds the *additional*
+/// allocation a single `--decode` causes — the translated copy and the decoded
+/// bytes — so that a payload which parsed cannot then multiply itself. The
+/// limit is generous enough for the documents that appear in practice, a
+/// policy or an SBOM, and a value beyond it is reported against the claim
+/// rather than by an allocator failure with nothing to point at.
+pub const MAX_ENCODED_LEN: usize = 32 * 1024 * 1024;
+
 /// Decode `encoded` under `alphabet`, or say precisely why it is not decodable.
 ///
-/// Whitespace is rejected rather than stripped, including a trailing newline.
-/// A value that arrived with one was either wrapped in transit or read from a
-/// file that added it, and in both cases the bytes the caller is about to hash
-/// are not the bytes the producer encoded. Saying so is more useful than
-/// quietly hashing something different.
+/// Whitespace is rejected rather than stripped, and padding that is present
+/// but wrong is rejected rather than completed. Neither is a claim that a
+/// tolerant decoder would return different bytes: stripping a trailing newline
+/// or completing absent padding usually yields exactly the same bytes. The
+/// reason to refuse is narrower. A digest published against this claim
+/// identifies one spelling of it, and a decoder that accepts several spellings
+/// quietly widens what that digest attests to. Refusing keeps the set of
+/// inputs that produce a given digest as small as the encoding allows.
 pub fn decode(alphabet: Alphabet, encoded: &str) -> Result<Vec<u8>, String> {
     if encoded.is_empty() {
         return Err("the value is an empty string, so there is nothing to decode".into());
     }
 
-    if let Some(what) = first_whitespace(encoded) {
+    if encoded.len() > MAX_ENCODED_LEN {
         return Err(format!(
-            "the value contains {what}, which is not part of a base64 value; it is refused rather \
-             than stripped, because the digest of a repaired value identifies bytes nobody encoded"
+            "the value is {} bytes of base64, above the {MAX_ENCODED_LEN} byte limit for a single \
+             claim; decoding it is refused rather than attempted",
+            encoded.len()
         ));
     }
 
-    match alphabet {
+    if let Some(what) = first_whitespace(encoded) {
+        return Err(format!(
+            "the value contains {what}, which is not part of a base64 value; it is refused rather \
+             than stripped, so that a value wrapped or newline-terminated in transit cannot pass \
+             for the one the producer encoded"
+        ));
+    }
+
+    let standard = match alphabet {
         Alphabet::Standard => {
             if let Some(c) = encoded.chars().find(|c| matches!(c, '-' | '_')) {
                 return Err(format!(
@@ -87,7 +120,7 @@ pub fn decode(alphabet: Alphabet, encoded: &str) -> Result<Vec<u8>, String> {
                      base64; decode it as base64url"
                 ));
             }
-            tav_crypto::base64::base64_standard_decode(encoded)
+            Cow::Borrowed(encoded)
         }
         Alphabet::UrlSafe => {
             if let Some(c) = encoded.chars().find(|c| matches!(c, '+' | '/')) {
@@ -96,34 +129,91 @@ pub fn decode(alphabet: Alphabet, encoded: &str) -> Result<Vec<u8>, String> {
                      base64url; decode it as base64"
                 ));
             }
-            // Translate into the standard alphabet and let one decoder own
-            // every remaining rule. A second implementation would be a second
-            // place for the padding and alphabet checks to disagree.
-            let mut translated: String = encoded
-                .chars()
-                .map(|c| match c {
-                    '-' => '+',
-                    '_' => '/',
-                    other => other,
-                })
-                .collect();
-            match translated.len() % 4 {
-                0 => {}
-                2 => translated.push_str("=="),
-                3 => translated.push('='),
-                // One leftover character cannot be the tail of any base64
-                // value: the shortest encoded unit is two characters.
-                _ => {
-                    return Err(
-                        "the value has one character more than a whole base64url unit, so it is \
-                         truncated rather than unpadded"
-                            .into(),
-                    )
-                }
-            }
-            tav_crypto::base64::base64_standard_decode(&translated)
+            Cow::Owned(to_standard(encoded)?)
+        }
+    };
+
+    let bytes = tav_crypto::base64::base64_standard_decode(&standard)?;
+    reject_non_canonical(&standard, &bytes)?;
+    Ok(bytes)
+}
+
+/// Translate base64url into the standard alphabet, supplying padding only when
+/// there is none.
+///
+/// Unpadded is the defined form of base64url, so reconstructing padding for a
+/// value that carries none is reading the encoding rather than repairing the
+/// value. Padding that is *present but wrong* is a different thing: the
+/// producer said where the value ends and was inconsistent about it. Topping
+/// that up would be the repair this module refuses to perform, so it is an
+/// error instead.
+fn to_standard(encoded: &str) -> Result<String, String> {
+    let mut translated: String = encoded
+        .chars()
+        .map(|c| match c {
+            '-' => '+',
+            '_' => '/',
+            other => other,
+        })
+        .collect();
+
+    let pad = translated.chars().rev().take_while(|&c| c == '=').count();
+    if pad > 0 {
+        if translated.len() % 4 != 0 {
+            return Err(format!(
+                "the value ends with {pad} padding character(s) but its length is not a multiple \
+                 of four, so its padding is wrong rather than absent; it is refused rather than \
+                 completed"
+            ));
+        }
+        // Well-formed padding, or padding the decoder itself will reject for
+        // being misplaced. Either way it is not this function's to complete.
+        return Ok(translated);
+    }
+
+    match translated.len() % 4 {
+        0 => {}
+        2 => translated.push_str("=="),
+        3 => translated.push('='),
+        // One leftover character cannot be the tail of any base64 value: the
+        // shortest encoded unit is two characters.
+        _ => {
+            return Err(
+                "the value has one character more than a whole base64url unit, so it is \
+                 truncated rather than unpadded"
+                    .into(),
+            )
         }
     }
+    Ok(translated)
+}
+
+/// Refuse a value whose final character sets bits beyond the bytes it decodes to.
+///
+/// The decoder ignores those bits, so `Zh==` and `Zg==` both yield `f`. That
+/// makes several spellings of one value decode identically, and a digest
+/// published against one of them would be attested by all of them. Comparing
+/// against a re-encoding is cheaper to trust than reasoning about which bits
+/// are spare in each tail length, and it reuses the encoder already present.
+fn reject_non_canonical(standard: &str, bytes: &[u8]) -> Result<(), String> {
+    let reencoded = tav_crypto::base64::base64_encode_no_padding(bytes);
+    let normalised: String = standard
+        .trim_end_matches('=')
+        .chars()
+        .map(|c| match c {
+            '+' => '-',
+            '/' => '_',
+            other => other,
+        })
+        .collect();
+    if reencoded != normalised {
+        return Err(format!(
+            "the value is not canonical: its final character sets bits that lie beyond the {} \
+             byte(s) it decodes to, so it is one of several spellings of those bytes",
+            bytes.len()
+        ));
+    }
+    Ok(())
 }
 
 /// Name the first whitespace character, for a message that says what to fix.
@@ -201,6 +291,45 @@ mod tests {
         // base64url may omit padding; standard base64 may not. Accepting it
         // here would erase the only structural difference between the two.
         assert!(decode(Alphabet::Standard, "cGFja2FnZSBwb2xpY3k").is_err());
+    }
+
+    #[test]
+    fn padding_that_is_present_but_wrong_is_refused_rather_than_completed() {
+        // `Zg=` is neither the unpadded form base64url defines nor the padded
+        // form it permits. Topping it up to `Zg==` would be exactly the repair
+        // this module refuses elsewhere, and it silently accepted this before.
+        for wrong in ["Zg=", "Zm9vYg=", "Zg=====", "Z="] {
+            let err =
+                decode(Alphabet::UrlSafe, wrong).expect_err(&format!("{wrong} must be refused"));
+            assert!(
+                err.contains("padding") || err.contains("canonical"),
+                "{wrong}: {err}"
+            );
+        }
+        // The correctly padded and correctly unpadded spellings still work.
+        assert_eq!(decode(Alphabet::UrlSafe, "Zg==").unwrap(), b"f");
+        assert_eq!(decode(Alphabet::UrlSafe, "Zg").unwrap(), b"f");
+    }
+
+    #[test]
+    fn a_value_with_spare_bits_set_in_its_tail_is_refused() {
+        // `Zg==` and `Zh==` both decode to `f`, because the decoder ignores
+        // the four bits past the end. Accepting both would mean a digest
+        // published against one spelling is attested by the other.
+        assert_eq!(decode(Alphabet::Standard, "Zg==").unwrap(), b"f");
+        let err = decode(Alphabet::Standard, "Zh==").unwrap_err();
+        assert!(err.contains("canonical"), "{err}");
+
+        // Same at the two-byte tail, where two bits are spare.
+        assert_eq!(decode(Alphabet::Standard, "Zm8=").unwrap(), b"fo");
+        assert!(decode(Alphabet::Standard, "Zm9=").is_err());
+    }
+
+    #[test]
+    fn a_value_beyond_the_size_limit_is_refused_before_it_is_decoded() {
+        let oversized = "A".repeat(MAX_ENCODED_LEN + 4);
+        let err = decode(Alphabet::Standard, &oversized).unwrap_err();
+        assert!(err.contains("limit"), "{err}");
     }
 
     #[test]
