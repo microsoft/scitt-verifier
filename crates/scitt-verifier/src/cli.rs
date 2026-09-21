@@ -51,6 +51,10 @@ VERIFY OPTIONS:
                              and a provenance manifest here, for audit and for
                              replay with --scitt-keys.               [--online only]
     --policy <FILE>          Relying-party policy document (JSON).         [required]
+    --trusted-roots <FILE>   PEM file of CA certificates the signing chain must
+                             lead to. Without it the chain is still validated,
+                             but only against the root the statement carries —
+                             internally consistent, not externally trusted.
     --artifact <FILE>        The artifact the statement should describe.
     --binding-mode <MODE>    none | payload-bytes | payload-digest         [default: none]
     --format <FORMAT>        text | json                                   [default: text]
@@ -174,6 +178,15 @@ pub struct VerifyArgs {
     /// keys themselves, and accepting the flag anyway would imply this run
     /// produced something it did not.
     pub save_trust: Option<PathBuf>,
+    /// PEM file of roots the signing certificate chain must lead to.
+    ///
+    /// The chain is validated either way. What this changes is the anchor:
+    /// with it, the path must terminate at a certificate from this file, and
+    /// failing to do so is a verdict rather than a caveat. Without it the
+    /// anchor is the root the statement itself carried, which establishes
+    /// internal consistency and is reported as a gap rather than as trust —
+    /// a self-signed forgery is internally consistent too.
+    pub trusted_roots: Option<PathBuf>,
     pub now: Option<i64>,
 }
 
@@ -206,6 +219,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     let mut format = Format::Text;
     let mut result = None;
     let mut facts = None;
+    let mut trusted_roots = None;
     let mut now = None;
 
     while let Some(flag) = it.next() {
@@ -219,6 +233,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             "--artifact" => artifact = Some(PathBuf::from(value(&mut it, flag)?)),
             "--result" => result = Some(PathBuf::from(value(&mut it, flag)?)),
             "--facts" => facts = Some(PathBuf::from(value(&mut it, flag)?)),
+            "--trusted-roots" => trusted_roots = Some(PathBuf::from(value(&mut it, flag)?)),
             "--binding-mode" => {
                 let raw = value(&mut it, flag)?;
                 binding_mode = Some(match raw.as_str() {
@@ -333,6 +348,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         result,
         facts,
         save_trust,
+        trusted_roots,
         now,
     })))
 }

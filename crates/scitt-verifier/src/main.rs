@@ -21,7 +21,10 @@ use scitt_policy::{Outcome as AssertionOutcome, Policy, PolicyDecision};
 use scitt_receipt::binding::{
     Binding as CoreBinding, BindingMode as CoreBindingMode, BindingReason as CoreBindingReason,
 };
-use scitt_receipt::{verify_statement, LedgerKeySet, Sign1, StatementFacts};
+use scitt_receipt::{
+    chain::Outcome as ChainOutcome, verify_statement_with, LedgerKeySet, Sign1, StatementFacts,
+    VerifyOptions,
+};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -184,11 +187,22 @@ fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
         }
     };
 
+    // Chain validation always runs; `--trusted-roots` only decides whether the
+    // anchor is one the operator chose or the one the statement brought with
+    // it. Making the check itself conditional would mean the common case
+    // reports nothing at all about a chain that is sitting right there.
+    let options = match verify_options(args) {
+        Ok(o) => o,
+        Err(d) => {
+            return Assessment::incomplete(Verdict::UsageError, trust, d, gaps(args, None, None))
+        }
+    };
+
     // Trust material is resolved after the policy because the policy is what
     // decides where it may come from. Reading it earlier would mean the online
     // path had to either re-order itself or fetch before knowing what is
     // allowed, and only one of those is safe.
-    let resolved = match resolve_trust(args, &policy, &statement_bytes) {
+    let resolved = match resolve_trust(args, &policy, &statement_bytes, &options) {
         Ok(r) => r,
         Err(a) => return *a,
     };
@@ -238,13 +252,24 @@ fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
         policy: policy_state(&decision),
     };
 
-    let verdict = decide(&facts, &binding, &decision, args.binding_mode);
+    let verdict = decide(
+        &facts,
+        &binding,
+        &decision,
+        args.binding_mode,
+        args.trusted_roots.is_some(),
+    );
     // Acquisition diagnostics come first because they explain absences the
     // later ones only describe. "The key could not be fetched" is the cause;
     // "no receipt verified" is the consequence, and a reader handed the
     // consequence alone will go looking in the wrong place.
     let mut diagnostics = acquisition_diagnostics;
-    diagnostics.extend(diagnose(&facts, &binding, &decision));
+    diagnostics.extend(diagnose(
+        &facts,
+        &binding,
+        &decision,
+        args.trusted_roots.is_some(),
+    ));
     if verdict == Verdict::StatementTransparent {
         // A pass, but a narrower one than most readers assume. Recorded as a
         // diagnostic so a pipeline can gate on it without parsing prose.
@@ -294,19 +319,51 @@ fn resolve_trust(
     args: &VerifyArgs,
     policy: &Policy,
     statement_bytes: &[u8],
+    options: &VerifyOptions,
 ) -> Result<Resolved, Box<Assessment>> {
     match &args.trust {
-        TrustSource::Local(path) => resolve_local(args, path, statement_bytes),
+        TrustSource::Local(path) => resolve_local(args, path, statement_bytes, options),
         TrustSource::Online { ledger } => {
-            resolve_online(args, policy, statement_bytes, ledger.as_deref())
+            resolve_online(args, policy, statement_bytes, ledger.as_deref(), options)
         }
     }
+}
+
+/// Build the core verifier's options from the command line.
+///
+/// Errors here are usage errors, not verdicts: a roots file the operator
+/// pointed at and this tool cannot read is a broken invocation, and quietly
+/// continuing without it would run the weaker check under the stronger flag.
+fn verify_options(args: &VerifyArgs) -> Result<VerifyOptions, Diagnostic> {
+    let mut chain = scitt_receipt::chain::Options::default();
+
+    if let Some(path) = &args.trusted_roots {
+        let text = std::fs::read_to_string(path).map_err(|e| {
+            Diagnostic::error(
+                "TrustedRootsUnreadable",
+                Category::Input,
+                format!("could not read {}: {e}", path.display()),
+                "Check the --trusted-roots path. It must be a PEM file of CA certificates.",
+            )
+        })?;
+        chain.trusted_roots = scitt_receipt::chain::parse_pem_certificates(&text).map_err(|e| {
+            Diagnostic::error(
+                "TrustedRootsUnusable",
+                Category::Input,
+                format!("could not parse {}: {e}", path.display()),
+                "Supply a PEM file containing only CERTIFICATE blocks.",
+            )
+        })?;
+    }
+
+    Ok(VerifyOptions { chain: Some(chain) })
 }
 
 fn resolve_local(
     args: &VerifyArgs,
     path: &Path,
     statement_bytes: &[u8],
+    options: &VerifyOptions,
 ) -> Result<Resolved, Box<Assessment>> {
     let trust = Trust::unsigned_key_set();
 
@@ -345,7 +402,7 @@ fn resolve_local(
         }
     };
 
-    match verify_statement(statement_bytes, &key_set) {
+    match verify_statement_with(statement_bytes, &key_set, options) {
         Ok(facts) => Ok(Resolved {
             facts,
             trust,
@@ -369,6 +426,7 @@ fn resolve_online(
     policy: &Policy,
     statement_bytes: &[u8],
     ledger: Option<&str>,
+    options: &VerifyOptions,
 ) -> Result<Resolved, Box<Assessment>> {
     // Parsed before anything is selected, so a statement this tool cannot read
     // never causes a request. Without this the failure is silent: discovery
@@ -409,7 +467,7 @@ fn resolve_online(
             // verdict path turns that into cannot-evaluate, which is what it is.
             online::Selection::Nothing(why) => {
                 let trust = Trust::no_key_set();
-                let facts = verify_or_fail(args, statement_bytes, &[], trust.clone())?;
+                let facts = verify_or_fail(args, statement_bytes, &[], trust.clone(), options)?;
                 return Ok(Resolved {
                     facts,
                     trust,
@@ -497,11 +555,17 @@ fn resolve_online(
     // would leave a record that does not mention the network activity this run
     // performed, and would leave --save-trust with nothing to write after a
     // successful fetch.
-    let facts = verify_or_fail(args, statement_bytes, &acquisition.acquired, trust.clone())
-        .map_err(|mut a| {
-            a.acquisition = Some(acquisition.clone());
-            a
-        })?;
+    let facts = verify_or_fail(
+        args,
+        statement_bytes,
+        &acquisition.acquired,
+        trust.clone(),
+        options,
+    )
+    .map_err(|mut a| {
+        a.acquisition = Some(acquisition.clone());
+        a
+    })?;
 
     Ok(Resolved {
         facts,
@@ -539,8 +603,9 @@ fn verify_or_fail(
     statement_bytes: &[u8],
     acquired: &[scitt_acquire::Acquired],
     trust: Trust,
+    options: &VerifyOptions,
 ) -> Result<StatementFacts, Box<Assessment>> {
-    online::verify_scoped(statement_bytes, acquired).map_err(|e| {
+    online::verify_scoped(statement_bytes, acquired, options).map_err(|e| {
         let (verdict, diagnostic) = classify_core_error(&e);
         Box::new(Assessment::incomplete(
             verdict,
@@ -841,9 +906,33 @@ fn decide(
     binding: &BindingResult,
     decision: &PolicyDecision,
     mode: BindingMode,
+    anchoring_requested: bool,
 ) -> Verdict {
     if facts.signature_valid == Some(false) || binding.outcome == Binding::Mismatch {
         return Verdict::Untrusted;
+    }
+
+    // A chain that does not hold indicts the bytes in front of us, so it lands
+    // with the signature rather than with the gaps. `x5chain` is a protected
+    // header the Issuer signed: certificates that do not actually chain, or
+    // that do not lead to a root the operator supplied, are a claim about
+    // identity the statement made and cannot support. Exiting 0 here would let
+    // `--trusted-roots` be answered "no" in silence.
+    if matches!(facts.chain_outcome, Some(ChainOutcome::Invalid(_))) {
+        return Verdict::Untrusted;
+    }
+
+    // Asked but unanswerable. An operator who passed `--trusted-roots` posed a
+    // question; a build that cannot check ECDSA, or a chain missing its root,
+    // leaves it unanswered, and an unanswered question must not exit 0.
+    //
+    // Deliberately conditional on `anchoring_requested`. Chain validation runs
+    // on every statement, so treating every unsupported chain as fatal would
+    // turn a check nobody asked for into a new way for existing pipelines to
+    // break — and "I did not look" is still not evidence of compromise.
+    // Without the flag this stays a declared gap; with it, it is exit 3.
+    if anchoring_requested && !matches!(facts.chain_outcome, Some(ChainOutcome::Valid(_))) {
+        return Verdict::CannotEvaluate;
     }
 
     // No verified receipt means the statement is, at best, merely signed.
@@ -894,6 +983,7 @@ fn diagnose(
     facts: &StatementFacts,
     binding: &BindingResult,
     decision: &PolicyDecision,
+    anchoring_requested: bool,
 ) -> Vec<Diagnostic> {
     let mut out = Vec::new();
 
@@ -911,6 +1001,29 @@ fn diagnose(
             Category::Unsupported,
             "the statement signature could not be evaluated",
             "Check the algorithm and certificate chain with `scitt-verifier inspect`.",
+        ));
+    }
+    if let Some(ChainOutcome::Invalid(reason)) = &facts.chain_outcome {
+        out.push(Diagnostic::error(
+            "CertificateChainInvalid",
+            Category::SignerIdentity,
+            format!("the signing certificate chain did not validate: {reason}"),
+            "Treat this artifact as untrusted. If you passed --trusted-roots, confirm the statement really was signed under one of them.",
+        ));
+    }
+    // Only when the operator asked. Without `--trusted-roots` an unexaminable
+    // chain is a declared gap, not a failure, and raising it to an error here
+    // would put a red diagnostic on runs that legitimately pass.
+    if anchoring_requested && !matches!(facts.chain_outcome, Some(ChainOutcome::Valid(_))) {
+        let reason = match &facts.chain_outcome {
+            Some(ChainOutcome::Unsupported(r)) | Some(ChainOutcome::Insufficient(r)) => r.clone(),
+            _ => "the chain was not evaluated".to_string(),
+        };
+        out.push(Diagnostic::error(
+            "CertificateChainNotAnchored",
+            Category::Unsupported,
+            format!("--trusted-roots was supplied, but the chain could not be anchored: {reason}"),
+            "This run cannot tell you whether the signer is one you trust. Do not read the result as if it could.",
         ));
     }
 
@@ -1043,7 +1156,11 @@ fn choose_primary(verdict: Verdict, diagnostics: &[Diagnostic]) -> Option<Diagno
         return None;
     }
     let wanted: &[Category] = match verdict {
-        Verdict::Untrusted => &[Category::Crypto, Category::Binding],
+        Verdict::Untrusted => &[
+            Category::Crypto,
+            Category::Binding,
+            Category::SignerIdentity,
+        ],
         Verdict::PolicyFailed => &[Category::Policy],
         Verdict::CannotEvaluate => &[Category::Trust, Category::Unsupported, Category::Policy],
         _ => &[Category::Input, Category::Internal],
@@ -1154,23 +1271,53 @@ fn gaps(
     }
 
     // The statement signature is checked against the key in its own certificate.
-    // Chain validation to a trusted root is a separate question this release
-    // does not answer, and saying so is the whole point of this section.
-    match facts.map(|f| f.certificate_chain_len) {
-        Some(0) => gaps.push(Gap::new(
+    // Whether the chain around it was validated — and to whose root — decides
+    // which of these gaps applies; reporting the same caveat regardless would
+    // erase the difference between a checked chain and an unchecked one.
+    match (
+        facts.map(|f| f.certificate_chain_len),
+        facts.and_then(|f| f.chain_outcome.as_ref()),
+    ) {
+        (Some(0), _) => gaps.push(Gap::new(
             "NoCertificateChain",
             Category::SignerIdentity,
             "The statement carried no certificate chain.",
             "the signer's identity rests entirely on policy assertions about CWT claims",
         )),
-        Some(_) => gaps.push(Gap::new(
+        // Anchored in a root the operator supplied: nothing left to caveat.
+        (Some(_), Some(ChainOutcome::Valid(details))) if details.anchored_externally => {}
+        // Anchored in the chain's own root. The path is internally consistent,
+        // which is not the same as trusted, and collapsing the two would invite
+        // the reader to believe a self-signed forgery.
+        (Some(_), Some(ChainOutcome::Valid(_))) => gaps.push(Gap::new(
+            "CertificateChainNotAnchoredExternally",
+            Category::SignerIdentity,
+            "The signing certificate chain validated only against the root carried inside the \
+             statement itself, because no trusted roots were supplied.",
+            "an attacker who mints their own root would produce an equally consistent chain",
+        )),
+        // An invalid chain is a finding, not a gap; it is reported as a problem.
+        (Some(_), Some(ChainOutcome::Invalid(_))) => {}
+        (Some(_), Some(ChainOutcome::Insufficient(reason))) => gaps.push(Gap::new(
+            "CertificateChainNotValidated",
+            Category::SignerIdentity,
+            format!("The signing certificate chain was not validated: {reason}"),
+            "signature validity does not establish CA trust",
+        )),
+        (Some(_), Some(ChainOutcome::Unsupported(reason))) => gaps.push(Gap::new(
+            "CertificateChainUnsupported",
+            Category::Unsupported,
+            format!("This build cannot validate the signing certificate chain: {reason}"),
+            "the chain is unexamined, not known-good; a newer build may be able to check it",
+        )),
+        (Some(_), None) => gaps.push(Gap::new(
             "CertificateChainNotValidated",
             Category::SignerIdentity,
             "The signing certificate chain was not validated to a trusted root; the statement \
              signature was checked against the leaf certificate embedded in the statement itself.",
             "signature validity does not establish CA trust",
         )),
-        None => {}
+        (None, _) => {}
     }
 
     gaps.push(Gap::new(

@@ -448,9 +448,20 @@ fn the_record_says_what_was_not_checked() {
             .any(|g| g["code"] == "ArtifactBindingNotRequested"),
         "unbound runs must say so: {gaps:?}"
     );
+    // Which chain gap applies depends on what the run could establish; that a
+    // chain caveat is declared at all does not. Asserting the family rather
+    // than one member keeps this test about the commitment — a green run still
+    // says what it did not establish — instead of about today's wording.
     assert!(
-        gaps.iter()
-            .any(|g| g["code"] == "CertificateChainNotValidated"),
+        gaps.iter().any(|g| matches!(
+            g["code"].as_str(),
+            Some(
+                "NoCertificateChain"
+                    | "CertificateChainNotValidated"
+                    | "CertificateChainNotAnchoredExternally"
+                    | "CertificateChainUnsupported"
+            )
+        )),
         "chain validation gap must be declared: {gaps:?}"
     );
 
@@ -2032,4 +2043,109 @@ fn inspect_does_not_list_payload_claims_for_a_payload_declared_another_type() {
     assert_eq!(r.code, 0, "{}", r.stderr);
     assert!(r.stdout.contains("Payload"), "{}", r.stdout);
     assert!(!r.stdout.contains("\n  json\n"), "{}", r.stdout);
+}
+
+/// `--trusted-roots` must be answerable "no".
+///
+/// The failure this defends against is silent: before the chain was actually
+/// anchored, supplying roots the statement does not lead to still exited 0.
+/// An operator who names the CAs they accept has asked a question, and a
+/// pipeline that green-lights the answer "not one of yours" is worse than one
+/// that never asked.
+#[test]
+fn trusted_roots_that_the_chain_does_not_reach_make_the_run_untrusted() {
+    let dir = std::env::temp_dir().join("scitt-verifier-trusted-roots");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let chain = fixture_chain();
+
+    // The chain's own root, which must be accepted.
+    let real = dir.join("real-root.pem");
+    std::fs::write(&real, pem(chain.last().unwrap())).unwrap();
+
+    // A certificate from the same chain that is not its root. Real bytes, and
+    // genuinely the wrong anchor.
+    let wrong = dir.join("wrong-root.pem");
+    std::fs::write(&wrong, pem(&chain[0])).unwrap();
+
+    let accepted = verify(&["--trusted-roots", &real.display().to_string()]);
+    assert_eq!(
+        accepted.code, 0,
+        "the chain's own root must anchor it:\n{}",
+        accepted.stdout
+    );
+    assert!(
+        !accepted
+            .stdout
+            .contains("CertificateChainNotAnchoredExternally"),
+        "a supplied root must retire the not-anchored gap:\n{}",
+        accepted.stdout
+    );
+
+    let refused = verify(&["--trusted-roots", &wrong.display().to_string()]);
+    assert_eq!(
+        refused.code, 1,
+        "a chain that reaches none of the supplied roots is untrusted, not a gap:\n{}",
+        refused.stdout
+    );
+    assert!(
+        refused.stdout.contains("CertificateChainInvalid"),
+        "the refusal must say why:\n{}",
+        refused.stdout
+    );
+
+    // A block that base64-decodes to something that is not a certificate. This
+    // exited 0 before the roots file was parsed rather than merely decoded:
+    // the strong flag was accepted and the weak check silently run.
+    let garbage = dir.join("not-a-certificate.pem");
+    std::fs::write(
+        &garbage,
+        "-----BEGIN CERTIFICATE-----\nAQIDBAUGBwgJCgsMDQ4PEA==\n-----END CERTIFICATE-----\n",
+    )
+    .unwrap();
+    let broken = verify(&["--trusted-roots", &garbage.display().to_string()]);
+    assert_eq!(
+        broken.code, 4,
+        "an unusable roots file is a broken invocation, never a quiet downgrade:\n{}",
+        broken.stdout
+    );
+}
+
+/// The certificates the corpus statement actually carries, leaf first.
+fn fixture_chain() -> Vec<Vec<u8>> {
+    let bytes = std::fs::read(corpus(&["fixtures", "transparent-statement.cose"])).unwrap();
+    let statement = scitt_receipt::Sign1::parse(&bytes).expect("fixture must parse");
+    let chain = statement.x5chain();
+    assert!(chain.len() > 1, "fixture must carry a chain to anchor");
+    chain
+}
+
+fn pem(der: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::new();
+    for block in der.chunks(3) {
+        let b = [
+            block[0],
+            *block.get(1).unwrap_or(&0),
+            *block.get(2).unwrap_or(&0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        for i in 0..4 {
+            if i <= block.len() {
+                encoded.push(ALPHABET[(n >> (18 - 6 * i)) as usize & 0x3f] as char);
+            } else {
+                encoded.push('=');
+            }
+        }
+    }
+    let wrapped: Vec<String> = encoded
+        .as_bytes()
+        .chunks(64)
+        .map(|c| String::from_utf8_lossy(c).into_owned())
+        .collect();
+    format!(
+        "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+        wrapped.join("\n")
+    )
 }

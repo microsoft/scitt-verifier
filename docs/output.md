@@ -397,6 +397,42 @@ later by an auditor holding RFC 9943, bare `policy` would read as the
 transparency service's Registration Policy, which is a different document
 enforced by a different party at a different time.
 
+### `signedStatement.certificateChain`
+
+What path validation established, and the auditable identity of the anchor it
+reached. Present in the facts document too, which carries no gaps and no policy
+messages — so without this block a consumer reading `--facts` would have to
+infer chain success from the *absence* of a warning.
+
+| `outcome` | Meaning |
+|---|---|
+| `valid` | A path from the leaf to the anchor verified |
+| `invalid` | A path was attempted and did not hold |
+| `insufficient` | The material needed was not present — supply it and re-run |
+| `unsupported` | The material was present and this build cannot check it |
+
+`status: not-evaluated` means chain validation did not run at all.
+
+On `valid`, two fields carry the weight. `rootSha256` names the anchor the path
+actually reached, which is the value `requireChainToRootSha256` pins.
+`anchoredExternally` says whether that anchor came from `--trusted-roots` or
+from inside the statement itself: a chain anchored in its own embedded root is
+internally consistent and vouched for by nobody. `pathNotBefore` and
+`pathNotAfter` bound the window during which every certificate on the *selected*
+path was simultaneously live — the path including an externally supplied anchor,
+not the `x5chain` as transported.
+
+### `signedStatement.certificatesValidAtRegistration`
+
+Whether that window covered every registration time the receipts attest. The
+times come from the `iat` of each receipt that verified completely, never from
+the statement's own CWT: a signer holding an expired key controls the latter and
+can set it to any convenient instant. It witnesses registration rather than the
+signing moment, which is the closest independently attested time that exists.
+
+`null` when the chain did not validate, or when no fully verified receipt
+carried a time. As everywhere else in this document, `null` is not a failure.
+
 ### `artifactBinding.bound`
 
 Three-valued, and the third value matters:
