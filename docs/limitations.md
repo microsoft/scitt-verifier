@@ -252,10 +252,10 @@ scope.
   field, is not yet implemented.
 * There is no escape convention for an apostrophe inside a claim name on the
   command line, so such a claim can only be addressed from a policy file.
-* `--decode`'s success path has unit coverage and is exercised end-to-end by
-  hand, but no acceptance test drives it through the binary: no corpus fixture
-  carries a base64-bearing claim, and minting one is a full corpus
-  regeneration. The refusal paths are covered.
+* `--decode-out` refuses to write over the file named by `--statement`,
+  resolving both paths so a symlink or a differently-spelled route to the same
+  file is caught. Hard links are not detected: they are two equally real
+  directory entries, and resolving a path cannot collapse them.
 * Only the first inclusion proof in a receipt is evaluated.
   `receipts.entries[].problems` says so when there is more than one.
 * `iat` is read from the receipt's CWT claims and reported as a raw Unix

@@ -783,6 +783,17 @@ fn save_trust(dir: &Path, assessment: &Assessment) -> Result<Vec<PathBuf>, Diagn
 /// on Windows, which collapses it lexically, and does not on Unix, where the
 /// kernel walks it.
 fn same_file(a: &Path, b: &Path) -> bool {
+    // When both paths already exist, resolve them completely first. This is
+    // what catches an output that is a *symlink* to the input: the two names
+    // differ and only the target is shared, so comparing directory and file
+    // name cannot see it, and the write would destroy the statement despite
+    // the guard. Hard links are still not detected — two directory entries
+    // that were always equals, which canonicalising cannot collapse — so this
+    // narrows the hole rather than closing it.
+    if let (Ok(a), Ok(b)) = (a.canonicalize(), b.canonicalize()) {
+        return a == b;
+    }
+
     fn key(p: &Path) -> Option<(PathBuf, std::ffi::OsString)> {
         let parent = p.parent().filter(|d| !d.as_os_str().is_empty());
         let parent = parent.unwrap_or_else(|| Path::new("."));
