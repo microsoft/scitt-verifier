@@ -227,7 +227,11 @@ fn policy_detail(decision: &PolicyDecision) {
 /// inspect exactly as cleanly as a genuine one. The purpose is to let someone
 /// see what a statement contains *before* they have the trust material to
 /// judge it, which is where most people start.
-pub fn inspect(statement: &Sign1, verbose: bool) -> scitt_receipt::Result<()> {
+pub fn inspect(
+    statement: &Sign1,
+    verbose: bool,
+    decoded: Option<&crate::decode::Decoded>,
+) -> scitt_receipt::Result<()> {
     println!("COSE_Sign1");
     println!("  {:<19} {}", "tagged", statement.was_tagged);
     println!(
@@ -297,9 +301,50 @@ pub fn inspect(statement: &Sign1, verbose: bool) -> scitt_receipt::Result<()> {
 
     inspect_receipts(statement, verbose);
 
+    if let Some(decoded) = decoded {
+        print_decoded(decoded);
+    }
+
     println!();
     println!("inspect does not verify anything. Use `verify` to make a decision.");
     Ok(())
+}
+
+/// Print an explicitly requested decoded claim.
+///
+/// The digest leads, because it is the reason to run this: a producer that
+/// embeds an encoded document usually publishes the digest of its decoded
+/// bytes in a neighbouring field, and the point of the section is to put the
+/// two side by side. The preview is last and bounded, so a 19 KB policy cannot
+/// push the digest off the screen.
+fn print_decoded(decoded: &crate::decode::Decoded) {
+    println!();
+    println!("Decoded claim");
+    println!("  {:<19} {}", "path", decoded.path);
+    println!("  {:<19} {}", "encoding", decoded.encoding);
+    println!("  {:<19} {}", "decoded bytes", decoded.bytes.len());
+    println!("  {:<19} {}", "sha-256", decoded.sha256);
+    if !decoded.utf8 {
+        println!(
+            "  {:<19} the decoded bytes are not valid UTF-8, so they are shown as hex",
+            "not text"
+        );
+    }
+    // Restated here and not only at the foot of the report: this section is
+    // the one a reader is most likely to screenshot or paste on its own.
+    println!(
+        "  {:<19} not verified — inspect authenticates nothing",
+        "authentication"
+    );
+
+    println!();
+    println!("  preview");
+    for line in decoded.preview.lines() {
+        println!("    {line}");
+    }
+    if decoded.preview_truncated {
+        println!("    … truncated; --verbose prints it all, --decode-out writes the exact bytes");
+    }
 }
 
 /// Print one COSE header bucket.

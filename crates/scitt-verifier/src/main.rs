@@ -6,6 +6,7 @@
 //! identically on an air-gapped build agent three months later.
 
 mod cli;
+mod decode;
 mod inspect_json;
 mod online;
 mod outcome;
@@ -66,6 +67,22 @@ fn main() -> ExitCode {
 /// not decode (exit 3, a real finding about the file).
 fn run_inspect(args: &cli::InspectArgs) -> u8 {
     let path = &args.statement;
+
+    // Checked before the file is even read. Writing the decoded bytes over
+    // the statement would destroy the evidence in order to report on it, and
+    // because the read happens first it would not fail — it would exit 0
+    // beside a COSE file replaced by the policy that was inside it. The same
+    // guard protects the record and facts documents elsewhere in this file.
+    if let Some(out) = &args.decode_out {
+        if same_file(out, path) {
+            eprintln!(
+                "error: --decode-out would overwrite the statement at {}; name a different file",
+                path.display()
+            );
+            return Verdict::UsageError.exit_code();
+        }
+    }
+
     let bytes = match read(path) {
         Ok(b) => b,
         Err(e) => {
@@ -84,9 +101,49 @@ fn run_inspect(args: &cli::InspectArgs) -> u8 {
         }
     };
 
+    // Decoded before either renderer runs, so text and JSON report the same
+    // outcome, and so a failure to decode is reported as a failure rather
+    // than as a section quietly missing from the output.
+    let decoded = match &args.decode {
+        Some(request) => match decode::decode(&statement, request, args.verbose) {
+            Ok(decoded) => Some(decoded),
+            Err(why) => {
+                // The rest of the inspection is still printed: the statement
+                // was readable, and a reader who asked for one field should
+                // not lose the report that would tell them why it is not
+                // there. The exit code carries the failure instead.
+                match args.format {
+                    Format::Json => {
+                        let document = inspect_json::document(&statement, args.verbose, None);
+                        if let Ok(text) = serde_json::to_string_pretty(&document) {
+                            println!("{text}");
+                        }
+                    }
+                    Format::Text => {
+                        let _ = report::inspect(&statement, args.verbose, None);
+                    }
+                }
+                eprintln!("error: {why}");
+                return Verdict::CannotEvaluate.exit_code();
+            }
+        },
+        None => None,
+    };
+
+    if let (Some(decoded), Some(out)) = (&decoded, &args.decode_out) {
+        // The exact bytes, with nothing added or normalised on the way out.
+        // A failed write is fatal: the caller asked for these bytes in order
+        // to do something with them, and an exit code of 0 beside a file that
+        // is absent or half-written would be believed.
+        if let Err(e) = std::fs::write(out, &decoded.bytes) {
+            eprintln!("error: could not write {}: {e}", out.display());
+            return Verdict::CannotEvaluate.exit_code();
+        }
+    }
+
     match args.format {
         Format::Json => {
-            let document = inspect_json::document(&statement, args.verbose);
+            let document = inspect_json::document(&statement, args.verbose, decoded.as_ref());
             match serde_json::to_string_pretty(&document) {
                 Ok(text) => {
                     println!("{text}");
@@ -98,7 +155,7 @@ fn run_inspect(args: &cli::InspectArgs) -> u8 {
                 }
             }
         }
-        Format::Text => match report::inspect(&statement, args.verbose) {
+        Format::Text => match report::inspect(&statement, args.verbose, decoded.as_ref()) {
             Ok(()) => 0,
             Err(e) => {
                 eprintln!("error: {e}");
@@ -726,6 +783,17 @@ fn save_trust(dir: &Path, assessment: &Assessment) -> Result<Vec<PathBuf>, Diagn
 /// on Windows, which collapses it lexically, and does not on Unix, where the
 /// kernel walks it.
 fn same_file(a: &Path, b: &Path) -> bool {
+    // When both paths already exist, resolve them completely first. This is
+    // what catches an output that is a *symlink* to the input: the two names
+    // differ and only the target is shared, so comparing directory and file
+    // name cannot see it, and the write would destroy the statement despite
+    // the guard. Hard links are still not detected — two directory entries
+    // that were always equals, which canonicalising cannot collapse — so this
+    // narrows the hole rather than closing it.
+    if let (Ok(a), Ok(b)) = (a.canonicalize(), b.canonicalize()) {
+        return a == b;
+    }
+
     fn key(p: &Path) -> Option<(PathBuf, std::ffi::OsString)> {
         let parent = p.parent().filter(|d| !d.as_os_str().is_empty());
         let parent = parent.unwrap_or_else(|| Path::new("."));

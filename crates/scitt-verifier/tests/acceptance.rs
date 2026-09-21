@@ -2045,6 +2045,344 @@ fn inspect_does_not_list_payload_claims_for_a_payload_declared_another_type() {
     assert!(!r.stdout.contains("\n  json\n"), "{}", r.stdout);
 }
 
+/// A malformed `--decode` command line is a usage error, not a verdict.
+///
+/// The two exit codes mean different things to a pipeline: 4 says the operator
+/// mistyped something and nothing was examined, 3 says the tool looked and
+/// could not answer. Collapsing a typo into 3 would make a broken command line
+/// indistinguishable from a statement that genuinely lacks the claim, and the
+/// operator would go looking at the artifact instead of at their own script.
+#[test]
+fn a_decode_command_line_that_cannot_be_understood_exits_as_a_usage_error() {
+    let statement = corpus(&["fixtures", "cbor-header.cose"]);
+
+    // An encoding, but nothing to apply it to.
+    let r = run(&[
+        "inspect",
+        "--statement",
+        &statement,
+        "--decode-as",
+        "base64",
+    ]);
+    assert_eq!(r.code, 4, "{}", r.stderr);
+    assert!(r.stderr.contains("no --decode"), "{}", r.stderr);
+
+    // An output file, but nothing to write to it.
+    let r = run(&[
+        "inspect",
+        "--statement",
+        &statement,
+        "--decode-out",
+        "x.bin",
+    ]);
+    assert_eq!(r.code, 4, "{}", r.stderr);
+
+    // A path that is not a path.
+    let r = run(&["inspect", "--statement", &statement, "--decode", "[bad"]);
+    assert_eq!(r.code, 4, "{}", r.stderr);
+}
+
+/// A claim that cannot be decoded must say which claim, and why.
+///
+/// `inspect` prints the statement whatever happens, because the reader asked
+/// to see it; the decode failure rides alongside on stderr. The failure mode
+/// this guards is a bare non-zero exit that leaves an operator unable to tell
+/// a misspelled path from a producer who stopped emitting the field.
+#[test]
+fn a_claim_that_cannot_be_decoded_is_named_and_explained() {
+    let statement = corpus(&["fixtures", "cbor-header.cose"]);
+
+    // No such claim. The report is still printed.
+    let r = run(&["inspect", "--statement", &statement, "--decode", "['nope']"]);
+    assert_eq!(r.code, 3, "{}", r.stderr);
+    assert!(r.stderr.contains("['nope']"), "{}", r.stderr);
+    assert!(r.stderr.contains("no such claim"), "{}", r.stderr);
+    assert!(r.stdout.contains("Payload"), "{}", r.stdout);
+
+    // A real claim carrying characters that are not in the alphabet at all.
+    let r = run(&[
+        "inspect",
+        "--statement",
+        &statement,
+        "--decode",
+        "['digest']",
+    ]);
+    assert_eq!(r.code, 3, "{}", r.stderr);
+    assert!(r.stderr.contains("['digest']"), "{}", r.stderr);
+
+    // A real claim whose characters are all legal but whose length is not.
+    // Refusing this is the point: a decoder that padded it would invent bytes
+    // and then publish a digest over them.
+    let r = run(&[
+        "inspect",
+        "--statement",
+        &statement,
+        "--decode",
+        "['artifact']",
+        "--decode-as",
+        "base64url",
+    ]);
+    assert_eq!(r.code, 3, "{}", r.stderr);
+}
+
+/// `--decode-out` must never be allowed to consume the statement.
+///
+/// The statement is read into memory before the write, so overwriting it would
+/// not fail — it would exit 0, having replaced the evidence with the document
+/// that was inside it. An operator who typed the same filename twice would be
+/// left with no statement and a report saying everything was fine.
+#[test]
+fn decode_out_refuses_to_overwrite_the_statement_it_read() {
+    let dir = std::env::temp_dir().join("scitt-verifier-decode-out");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let statement = dir.join("s.cose");
+    let original = std::fs::read(corpus(&["fixtures", "cbor-header.cose"])).unwrap();
+    std::fs::write(&statement, &original).unwrap();
+
+    let path = statement.display().to_string();
+    let r = run(&[
+        "inspect",
+        "--statement",
+        &path,
+        "--decode",
+        "['artifact']",
+        "--decode-out",
+        &path,
+    ]);
+
+    assert_eq!(r.code, 4, "{}", r.stderr);
+    assert!(r.stderr.contains("overwrite"), "{}", r.stderr);
+    assert_eq!(
+        std::fs::read(&statement).unwrap(),
+        original,
+        "the statement must be byte-identical after a refused write"
+    );
+}
+
+/// The success path, driven through the binary.
+///
+/// Unit tests cover the decoder and the renderer separately, so both can pass
+/// while the argument plumbing between them is broken: a flag parsed into the
+/// wrong field, `Decoded` never reaching a renderer, `--decode-out` writing
+/// the preview instead of the bytes. Only running the binary catches that.
+///
+/// No corpus fixture carries a base64-bearing claim, and minting one is a full
+/// corpus regeneration. So the statement is built here instead. That is sound
+/// precisely because `inspect` authenticates nothing — it parses and describes,
+/// and a well-formed COSE_Sign1 with a dummy signature is a legitimate input to
+/// it. Nothing in it refers to anything that exists.
+///
+/// The payload publishes the digest of its own decoded claim, in the shape
+/// real producers use, so the assertion is the document's own answer rather
+/// than a constant invented here.
+#[test]
+fn decode_reports_the_digest_the_payload_publishes_for_itself() {
+    const DECODED: &[u8] = b"package policy\n";
+    const SHA256: &str = "89d09cb5c2f579afa733a1f68ae0dd5ff13e59efa75b870c64ca9fd62e9ec139";
+    let payload =
+        format!("{{\"policy-base64\":\"cGFja2FnZSBwb2xpY3kK\",\"policy-sha256\":\"{SHA256}\"}}");
+
+    let dir = std::env::temp_dir().join("scitt-verifier-decode-success");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let statement = dir.join("s.cose");
+    std::fs::write(&statement, json_payload_sign1(payload.as_bytes())).unwrap();
+
+    let path = statement.display().to_string();
+    let out = dir.join("policy.rego");
+    let out_arg = out.display().to_string();
+
+    // JSON: the decoded object must be a root-level sibling of the payload,
+    // and must agree with the digest the payload itself carries.
+    let r = run(&[
+        "inspect",
+        "--statement",
+        &path,
+        "--format",
+        "json",
+        "--verbose",
+        "--decode",
+        "['policy-base64']",
+        "--decode-out",
+        &out_arg,
+    ]);
+    assert_eq!(r.code, 0, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
+
+    let doc: serde_json::Value = serde_json::from_str(&r.stdout).expect("valid JSON");
+    let decoded = doc.get("decoded").expect("a root-level decoded object");
+    let published = doc
+        .pointer("/payload/json/policy-sha256")
+        .and_then(|v| v.as_str())
+        .expect("the payload publishes its own digest");
+
+    assert_eq!(decoded["sha256"].as_str(), Some(published));
+    assert_eq!(decoded["sha256"].as_str(), Some(SHA256));
+    assert_eq!(decoded["bytes"].as_u64(), Some(DECODED.len() as u64));
+    assert_eq!(decoded["encoding"].as_str(), Some("base64"));
+    assert_eq!(decoded["path"].as_str(), Some("['policy-base64']"));
+    assert_eq!(decoded["utf8"].as_bool(), Some(true));
+    assert_eq!(decoded["previewTruncated"].as_bool(), Some(false));
+    // Decoding is not verification, and the field that says so must survive
+    // into the document a consumer reads.
+    assert_eq!(decoded["authenticated"].as_bool(), Some(false));
+    assert!(doc
+        .get("payload")
+        .is_some_and(|p| p.get("decoded").is_none()));
+
+    // --decode-out writes the exact bytes, not the rendering.
+    assert_eq!(std::fs::read(&out).unwrap(), DECODED);
+
+    // Text: the same digest reaches the other renderer.
+    let r = run(&[
+        "inspect",
+        "--statement",
+        &path,
+        "--decode",
+        "['policy-base64']",
+    ]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(r.stdout.contains(SHA256), "{}", r.stdout);
+    assert!(r.stdout.contains("package policy"), "{}", r.stdout);
+    assert!(r.stdout.contains("not verified"), "{}", r.stdout);
+}
+
+/// Build a tagged COSE_Sign1 carrying `payload` as declared JSON.
+///
+/// Written by hand rather than with a CBOR library so the test suite does not
+/// gain a dependency in order to describe twenty bytes of header. The
+/// signature is zeroes: `inspect` never checks one, and a real signature here
+/// would imply this fixture says something about provenance, which it does not.
+fn json_payload_sign1(payload: &[u8]) -> Vec<u8> {
+    // {1: -7, 3: "application/json"} — alg ES256, content type.
+    let mut protected = vec![0xa2, 0x01, 0x26, 0x03, 0x70];
+    protected.extend_from_slice(b"application/json");
+
+    let mut out = vec![0xd2, 0x84];
+    push_bstr(&mut out, &protected);
+    out.push(0xa0); // no unprotected headers
+    push_bstr(&mut out, payload);
+    push_bstr(&mut out, &[0u8; 64]);
+    out
+}
+
+/// Append a CBOR byte string, choosing the shortest length encoding.
+fn push_bstr(out: &mut Vec<u8>, bytes: &[u8]) {
+    let n = bytes.len();
+    match n {
+        0..=23 => out.push(0x40 | n as u8),
+        24..=255 => out.extend_from_slice(&[0x58, n as u8]),
+        256..=65535 => {
+            out.push(0x59);
+            out.extend_from_slice(&(n as u16).to_be_bytes());
+        }
+        _ => panic!("fixture payload is larger than this helper encodes"),
+    }
+    out.extend_from_slice(bytes);
+}
+
+/// The refusal must survive an output that only *aliases* the statement.
+///
+/// Comparing directory and file name cannot see a symlink: the two names
+/// differ and only the target is shared, so the write would land on the
+/// statement despite the guard. Resolving both paths when they exist is what
+/// closes that, and this is the case that proves it.
+#[test]
+fn decode_out_refuses_an_output_that_is_a_symlink_to_the_statement() {
+    let dir = std::env::temp_dir().join("scitt-verifier-decode-symlink");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let statement = dir.join("s.cose");
+    let original = std::fs::read(corpus(&["fixtures", "cbor-header.cose"])).unwrap();
+    std::fs::write(&statement, &original).unwrap();
+
+    let alias = dir.join("alias.bin");
+    #[cfg(windows)]
+    let made = std::os::windows::fs::symlink_file(&statement, &alias).is_ok();
+    #[cfg(unix)]
+    let made = std::os::unix::fs::symlink(&statement, &alias).is_ok();
+    if !made {
+        // Creating a symlink needs a privilege this runner may not hold. The
+        // guard is still exercised by the plain-path and case-alias tests, so
+        // skipping is better than asserting on a link that was never created.
+        return;
+    }
+
+    let r = run(&[
+        "inspect",
+        "--statement",
+        &statement.display().to_string(),
+        "--decode",
+        "['artifact']",
+        "--decode-out",
+        &alias.display().to_string(),
+    ]);
+
+    assert_eq!(r.code, 4, "{}", r.stderr);
+    assert!(r.stderr.contains("overwrite"), "{}", r.stderr);
+    assert_eq!(
+        std::fs::read(&statement).unwrap(),
+        original,
+        "the statement must survive a write aimed at a symlink to it"
+    );
+}
+
+/// The same guard, against an alias that needs no special privilege.
+///
+/// The symlink case above is skipped on a Windows runner without the
+/// privilege to create one, which would leave the resolving path untested on
+/// the platform where it is hardest to reason about. A differently-cased name
+/// is the same file there, and comparing file names as strings does not see
+/// it, so this exercises the same fix and always runs.
+#[cfg(windows)]
+#[test]
+fn decode_out_refuses_an_output_that_differs_from_the_statement_only_by_case() {
+    let dir = std::env::temp_dir().join("scitt-verifier-decode-case");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let statement = dir.join("s.cose");
+    let original = std::fs::read(corpus(&["fixtures", "cbor-header.cose"])).unwrap();
+    std::fs::write(&statement, &original).unwrap();
+
+    let r = run(&[
+        "inspect",
+        "--statement",
+        &statement.display().to_string(),
+        "--decode",
+        "['artifact']",
+        "--decode-out",
+        &dir.join("S.COSE").display().to_string(),
+    ]);
+
+    assert_eq!(r.code, 4, "{}", r.stderr);
+    assert!(r.stderr.contains("overwrite"), "{}", r.stderr);
+    assert_eq!(std::fs::read(&statement).unwrap(), original);
+}
+
+/// A payload offering two values for one claim has no answer to report.
+///
+/// `payloadJson` already refuses a document with duplicate keys as ambiguous,
+/// and `--decode` now shares that parser rather than `serde_json::from_slice`,
+/// which silently takes the last value. There is no acceptance test here
+/// because no fixture carries a duplicate key and minting one is a corpus
+/// regeneration; the shared parser's own tests cover the refusal.
+///
+/// Only a payload the statement declares to be JSON has claims to address.
+///
+/// This is the same rule `payloadJson` follows. Reading claims out of a
+/// payload whose content type says it is something else would let a decode
+/// succeed against bytes the producer never described that way.
+#[test]
+fn decode_refuses_a_payload_the_statement_did_not_declare_as_json() {
+    let statement = corpus(&["fixtures", "transparent-statement.cose"]);
+    let r = run(&["inspect", "--statement", &statement, "--decode", "['x']"]);
+    assert_eq!(r.code, 3, "{}", r.stderr);
+    assert!(r.stderr.contains("not JSON"), "{}", r.stderr);
+}
+
 /// `--trusted-roots` must be answerable "no".
 ///
 /// The failure this defends against is silent: before the chain was actually

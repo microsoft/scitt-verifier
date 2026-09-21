@@ -25,6 +25,20 @@ INSPECT OPTIONS:
                              marks each one "elided": true so a consumer can
                              tell a summary from the real thing.
     --format <FORMAT>        text | json                                   [default: text]
+    --decode <PATH>          Decode one encoded payload claim, named by the
+                             path inspect prints beside it, e.g.
+                             --decode "['security-policy-base64']".
+                             Reports the byte count and the SHA-256 of the
+                             exact decoded bytes, plus a bounded preview.
+                             Producers publish that digest alongside the
+                             field, so the two are directly comparable.
+    --decode-as <ENCODING>   base64 | base64url                          [default: base64]
+                             Never inferred from the value: the two alphabets
+                             disagree over four characters, and a guess would
+                             hash bytes nobody asked for.
+    --decode-out <FILE>      Write the exact decoded bytes to FILE. Nothing is
+                             normalised on the way out; this is the byte-for-byte
+                             extraction a digest comparison needs.
 
 inspect reports what the file says. It verifies nothing — use `verify` to
 make a decision. Its JSON carries "verified": false for the same reason.
@@ -135,6 +149,14 @@ pub struct InspectArgs {
     /// relying on the reader remembering which command produced it. A file on
     /// disk has no command line attached to it.
     pub format: Format,
+    /// Which payload claim to decode, if the caller named one.
+    ///
+    /// `None` is the ordinary case. Nothing is decoded unless it was asked
+    /// for, because scanning a payload for values that look encoded would
+    /// decode fields the producer never said were encoded.
+    pub decode: Option<crate::decode::Request>,
+    /// Where to write the exact decoded bytes, if anywhere.
+    pub decode_out: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -357,6 +379,9 @@ fn parse_inspect<'a>(mut it: impl Iterator<Item = &'a String>) -> Result<Command
     let mut statement = None;
     let mut verbose = false;
     let mut format = Format::Text;
+    let mut decode_path = None;
+    let mut decode_as = None;
+    let mut decode_out = None;
     while let Some(flag) = it.next() {
         match flag.as_str() {
             "--statement" => {
@@ -374,14 +399,44 @@ fn parse_inspect<'a>(mut it: impl Iterator<Item = &'a String>) -> Result<Command
                 }
             }
             "--verbose" | "-v" => verbose = true,
+            "--decode" => {
+                let raw = value(&mut it, flag)?;
+                decode_path =
+                    Some(scitt_policy::parse_path(&raw).map_err(|why| format!("--decode: {why}"))?);
+            }
+            "--decode-as" => {
+                decode_as = Some(scitt_receipt::base64::Alphabet::parse(
+                    value(&mut it, flag)?.as_str(),
+                )?);
+            }
+            "--decode-out" => decode_out = Some(PathBuf::from(value(&mut it, flag)?)),
             "--help" | "-h" => return Ok(Command::Help),
             other => return Err(format!("unknown option '{other}' for inspect")),
         }
     }
+
+    // Refused rather than ignored. An encoding or an output file with nothing
+    // to decode is almost always a `--decode` that was dropped from the
+    // command line, and silently proceeding would report a successful
+    // inspection for an extraction that never happened.
+    if decode_path.is_none() {
+        if decode_as.is_some() {
+            return Err("--decode-as names an encoding, but no --decode selected a claim".into());
+        }
+        if decode_out.is_some() {
+            return Err("--decode-out names a file, but no --decode selected a claim".into());
+        }
+    }
+
     Ok(Command::Inspect(InspectArgs {
         statement: statement.ok_or("--statement is required")?,
         verbose,
         format,
+        decode: decode_path.map(|path| crate::decode::Request {
+            path,
+            alphabet: decode_as.unwrap_or(scitt_receipt::base64::Alphabet::Standard),
+        }),
+        decode_out,
     }))
 }
 

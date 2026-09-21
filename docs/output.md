@@ -295,6 +295,77 @@ it is parsed and re-serialised, so key order and whitespace are the
 serialiser's, not the signer's. Anything hashing the payload must use
 `.payload.hex`.
 
+## `--decode`: an encoded claim, and its digest
+
+Producers routinely carry a whole document — a policy, an SBOM, a manifest —
+base64-encoded inside a single JSON claim, alongside a sibling claim holding
+its digest. `--decode` names one such claim and reports the SHA-256 of the
+**exact decoded bytes**, so that digest can be compared against whatever the
+producer published, or against the artifact the document is supposed to
+describe.
+
+```bash
+scitt-verifier inspect --statement s.cose \
+  --decode "['security-policy-base64']" \
+  --decode-out policy.rego
+```
+
+The path is the same notation `inspect` prints beside each claim and the same
+one `payloadJson` policy rules take, so a path can be pasted between them
+without translation. `--decode-as` selects the alphabet (`base64`, the default,
+or `base64url`); `--decode-out` writes the decoded bytes to a file, byte-exact
+and unescaped.
+
+Under `--format json` the result is a root-level `decoded` object, a sibling of
+`payload` rather than a member of it, because it is a derived view and not part
+of what was signed:
+
+```json
+{
+  "decoded": {
+    "path": "['security-policy-base64']",
+    "encoding": "base64",
+    "bytes": 18808,
+    "sha256": "0dc96f…",
+    "utf8": true,
+    "preview": "package policy\n\nimport future.keywords.every…",
+    "previewTruncated": true,
+    "authenticated": false
+  }
+}
+```
+
+`sha256` is over the decoded bytes, never over the base64 text and never over
+the preview. The preview is bounded, and control characters in it are escaped
+so a decoded document cannot repaint the report printed above it; `utf8: false`
+means the bytes are shown as hex rather than lossily converted. Use
+`--decode-out` when the bytes themselves matter.
+
+`authenticated` is always `false`. It restates the document's own
+`verified: false`, because a digest is the field most likely to be lifted out
+of the report on its own — and decoding a claim proves nothing about whether
+the statement carrying it was signed by anyone you trust. To gate on this, run
+`verify` first and treat its exit code as the decision.
+
+Nothing is inferred: the alphabet is never guessed from the value, whitespace
+is refused rather than stripped, padding that is present but inconsistent is
+refused rather than completed, and a value whose final character sets bits
+beyond the bytes it decodes to is refused as non-canonical. None of these are
+claims that a tolerant decoder would return *different* bytes — usually it
+returns the same ones. The point is narrower: a digest published against a
+claim attests to one spelling of it, and each tolerance widens the set of
+inputs that would satisfy that digest.
+
+Decoding a single claim is capped at 32 MiB of encoded input, reported against
+the claim rather than left to an allocator. `--decode-out` refuses to write
+over the file named by `--statement`: the statement is read before the write,
+so overwriting it would succeed and leave you with no evidence and a report
+saying everything was fine.
+
+The payload is parsed by the same strict parser policy evaluation uses, so a
+document with duplicate object keys is refused as ambiguous rather than having
+its last value silently chosen.
+
 ## Where the failure boundaries sit
 
 Four kinds of failure that must not look alike:
@@ -335,7 +406,14 @@ nothing that a diagnostic `code` does not.
 |---|---|
 | Described the statement | 0 |
 | Could read the file, could not decode it | 3 |
+| Described the statement, but `--decode` found no such claim or could not decode it | 3 |
 | Could not read the file | 4 |
+| `--decode-as` or `--decode-out` given without `--decode`, or an unparseable path | 4 |
+
+A failed `--decode` still prints the full report on stdout and explains itself
+on stderr. The reader asked to see the statement, and the likeliest cause is a
+misspelled path or a producer who stopped emitting the field — both of which
+are easier to diagnose with the claim listing in front of you.
 
 ## Determinism
 
