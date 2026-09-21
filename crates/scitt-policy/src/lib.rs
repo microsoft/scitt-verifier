@@ -416,6 +416,98 @@ impl std::fmt::Display for PathSegment {
     }
 }
 
+/// Read a path written the way `inspect` prints one: `['source', 'commit']`.
+///
+/// `inspect` prints that form beside every claim precisely so it can be pasted
+/// into a policy. This is its inverse, so it can be pasted onto a command line
+/// too. The parser lives beside the `Display` it undoes because two notations
+/// that drifted would fail in the quietest possible way: a path that parses
+/// but resolves to nothing reports "no such claim", which reads as a fact
+/// about the payload rather than a typo in the path.
+///
+/// Segments are comma-separated; a quoted segment is an object key and a bare
+/// integer an array index, exactly as in a policy's `path` array. Surrounding
+/// brackets are optional, so both the pasted `['a', 0]` and a bare `'a', 0`
+/// are accepted.
+///
+/// There is no escape convention, matching the note on `PayloadAssertion`: a
+/// key containing an apostrophe is refused here rather than given a syntax to
+/// get wrong. Such a key remains addressable from a policy file, where it is
+/// an ordinary JSON string; only this command-line spelling cannot reach it.
+pub fn parse_path(text: &str) -> Result<Vec<PathSegment>, String> {
+    let trimmed = text.trim();
+    let inner = match trimmed.strip_prefix('[') {
+        Some(rest) => rest.strip_suffix(']').ok_or_else(|| {
+            "the path opens with '[' but does not close with ']'; paste it exactly as inspect \
+             printed it"
+                .to_string()
+        })?,
+        None => {
+            if trimmed.ends_with(']') {
+                return Err("the path closes with ']' but does not open with '['".into());
+            }
+            trimmed
+        }
+    };
+
+    if inner.trim().is_empty() {
+        return Err(
+            "the path has no segments, so it addresses the whole payload rather than a claim \
+             inside it"
+                .into(),
+        );
+    }
+
+    let mut segments = Vec::new();
+    for raw in inner.split(',') {
+        let piece = raw.trim();
+        if piece.is_empty() {
+            return Err("the path has an empty segment between two commas".into());
+        }
+        if let Some(rest) = piece.strip_prefix('\'') {
+            let key = rest.strip_suffix('\'').ok_or_else(|| {
+                format!("path segment {piece} opens with an apostrophe but does not close with one")
+            })?;
+            if key.contains('\'') {
+                return Err(format!(
+                    "path segment {piece} contains an apostrophe, and there is no escape \
+                     convention for one here; address this claim from a policy file instead, \
+                     where the key is an ordinary JSON string"
+                ));
+            }
+            segments.push(PathSegment::Text(key.to_string()));
+        } else if piece.starts_with('"') {
+            return Err(format!(
+                "path segment {piece} is quoted with \" but this notation uses ', as inspect \
+                 prints it"
+            ));
+        } else {
+            let index = piece.parse::<i64>().map_err(|_| {
+                format!(
+                    "path segment {piece} is neither a quoted key nor an array index; quote an \
+                     object key as '{piece}'"
+                )
+            })?;
+            segments.push(PathSegment::Int(index));
+        }
+    }
+
+    if segments.len() > MAX_HEADER_PATH_DEPTH {
+        return Err(format!(
+            "the path is {} segments deep, and a policy path stops at {MAX_HEADER_PATH_DEPTH}",
+            segments.len()
+        ));
+    }
+
+    Ok(segments)
+}
+
+/// Render a path the way `inspect` prints it, for echoing one back.
+pub fn describe_path(path: &[PathSegment]) -> String {
+    let parts: Vec<String> = path.iter().map(ToString::to_string).collect();
+    format!("[{}]", parts.join(", "))
+}
+
 /// How a policy matches an algorithm-valued header.
 ///
 /// `{"alg": {"oneOf": ["ES256", "ES384"]}}` accepts what
@@ -1031,7 +1123,12 @@ impl<'de> serde::de::Visitor<'de> for StrictJsonVisitor {
 /// index. Unlike the CBOR walk, the node's type is not consulted to decide
 /// what a segment meant — JSON leaves no room for the question, since keys are
 /// always strings and indices always integers.
-fn resolve_json_path<'a>(
+///
+/// Public so `inspect --decode` reaches a claim by exactly the walk a
+/// `payloadJson` rule uses. A second walk would be a second set of answers to
+/// "no such claim", and the two disagreeing would be invisible: the listing
+/// would show a field a rule could not reach, or refuse one it could.
+pub fn resolve_json_path<'a>(
     root: &'a serde_json::Value,
     path: &[PathSegment],
 ) -> Result<Option<&'a serde_json::Value>, String> {
@@ -3256,6 +3353,87 @@ mod tests {
         let json = br#"{"policyId":"p","policyVersion":"1","assertions":{"payloadJson":[
             {"path":["*"],"text":{"equals":"x"}}]}}"#;
         assert!(Policy::from_json(json).is_err());
+    }
+
+    // ----- parse_path --------------------------------------------------
+
+    #[test]
+    fn a_printed_path_parses_back_to_the_segments_it_came_from() {
+        // The drift guard. `inspect` prints `describe_path` beside every
+        // claim and tells the reader to paste it; if these two ever disagree
+        // the failure is silent, because a path that parses but resolves to
+        // nothing reports "no such claim" and reads as a payload problem.
+        let original = vec![
+            PathSegment::Text("source".into()),
+            PathSegment::Int(0),
+            PathSegment::Text("commit".into()),
+        ];
+        let printed = describe_path(&original);
+        assert_eq!(printed, "['source', 0, 'commit']");
+
+        let parsed = parse_path(&printed).unwrap();
+        assert_eq!(describe_path(&parsed), printed);
+    }
+
+    #[test]
+    fn brackets_are_optional_but_must_be_balanced() {
+        assert_eq!(describe_path(&parse_path("'a'").unwrap()), "['a']");
+        assert_eq!(describe_path(&parse_path("['a']").unwrap()), "['a']");
+        assert!(parse_path("['a'").is_err());
+        assert!(parse_path("'a']").is_err());
+    }
+
+    #[test]
+    fn a_numeric_key_is_addressed_as_a_string_and_an_index_bare() {
+        // `{"2024": ...}` and `[..]` are different lookups, and the quotes are
+        // the only thing that says which was meant.
+        assert!(matches!(
+            parse_path("['2024']").unwrap().as_slice(),
+            [PathSegment::Text(k)] if k == "2024"
+        ));
+        assert!(matches!(
+            parse_path("[2024]").unwrap().as_slice(),
+            [PathSegment::Int(2024)]
+        ));
+    }
+
+    #[test]
+    fn a_double_quoted_segment_names_the_notation_rather_than_guessing() {
+        let err = parse_path(r#"["a"]"#).unwrap_err();
+        assert!(err.contains("inspect prints it"), "{err}");
+    }
+
+    #[test]
+    fn an_unquoted_word_is_refused_with_the_quoting_it_needed() {
+        let err = parse_path("[a]").unwrap_err();
+        assert!(err.contains("quote an object key"), "{err}");
+    }
+
+    #[test]
+    fn an_apostrophe_in_a_key_is_refused_rather_than_escaped() {
+        // The `PayloadAssertion` docs promise there is no escape convention to
+        // get wrong. Inventing one here would break that promise on the one
+        // surface where a reader is most likely to be typing by hand.
+        let err = parse_path("['it''s']").unwrap_err();
+        assert!(err.contains("no escape convention"), "{err}");
+    }
+
+    #[test]
+    fn an_empty_path_says_it_addresses_the_whole_payload() {
+        assert!(parse_path("[]").unwrap_err().contains("whole payload"));
+        assert!(parse_path("").unwrap_err().contains("whole payload"));
+    }
+
+    #[test]
+    fn a_path_deeper_than_a_policy_can_address_is_refused_here_too() {
+        // Accepting it would let `--decode` reach a claim no rule could be
+        // written against, which is the dead end `MAX_HEADER_PATH_DEPTH` and
+        // the bracketed listing exist to remove.
+        let deep: Vec<String> = (0..=MAX_HEADER_PATH_DEPTH)
+            .map(|i| format!("'{i}'"))
+            .collect();
+        let err = parse_path(&format!("[{}]", deep.join(", "))).unwrap_err();
+        assert!(err.contains("stops at"), "{err}");
     }
 
     #[test]
