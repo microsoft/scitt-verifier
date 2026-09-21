@@ -67,6 +67,22 @@ fn main() -> ExitCode {
 /// not decode (exit 3, a real finding about the file).
 fn run_inspect(args: &cli::InspectArgs) -> u8 {
     let path = &args.statement;
+
+    // Checked before the file is even read. Writing the decoded bytes over
+    // the statement would destroy the evidence in order to report on it, and
+    // because the read happens first it would not fail — it would exit 0
+    // beside a COSE file replaced by the policy that was inside it. The same
+    // guard protects the record and facts documents elsewhere in this file.
+    if let Some(out) = &args.decode_out {
+        if same_file(out, path) {
+            eprintln!(
+                "error: --decode-out would overwrite the statement at {}; name a different file",
+                path.display()
+            );
+            return Verdict::UsageError.exit_code();
+        }
+    }
+
     let bytes = match read(path) {
         Ok(b) => b,
         Err(e) => {

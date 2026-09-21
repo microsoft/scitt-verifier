@@ -2125,6 +2125,50 @@ fn a_claim_that_cannot_be_decoded_is_named_and_explained() {
     assert_eq!(r.code, 3, "{}", r.stderr);
 }
 
+/// `--decode-out` must never be allowed to consume the statement.
+///
+/// The statement is read into memory before the write, so overwriting it would
+/// not fail — it would exit 0, having replaced the evidence with the document
+/// that was inside it. An operator who typed the same filename twice would be
+/// left with no statement and a report saying everything was fine.
+#[test]
+fn decode_out_refuses_to_overwrite_the_statement_it_read() {
+    let dir = std::env::temp_dir().join("scitt-verifier-decode-out");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let statement = dir.join("s.cose");
+    let original = std::fs::read(corpus(&["fixtures", "cbor-header.cose"])).unwrap();
+    std::fs::write(&statement, &original).unwrap();
+
+    let path = statement.display().to_string();
+    let r = run(&[
+        "inspect",
+        "--statement",
+        &path,
+        "--decode",
+        "['artifact']",
+        "--decode-out",
+        &path,
+    ]);
+
+    assert_eq!(r.code, 4, "{}", r.stderr);
+    assert!(r.stderr.contains("overwrite"), "{}", r.stderr);
+    assert_eq!(
+        std::fs::read(&statement).unwrap(),
+        original,
+        "the statement must be byte-identical after a refused write"
+    );
+}
+
+/// A payload offering two values for one claim has no answer to report.
+///
+/// `payloadJson` already refuses a document with duplicate keys as ambiguous,
+/// and `--decode` now shares that parser rather than `serde_json::from_slice`,
+/// which silently takes the last value. There is no acceptance test here
+/// because no fixture carries a duplicate key and minting one is a corpus
+/// regeneration; the shared parser's own tests cover the refusal.
+///
 /// Only a payload the statement declares to be JSON has claims to address.
 ///
 /// This is the same rule `payloadJson` follows. Reading claims out of a

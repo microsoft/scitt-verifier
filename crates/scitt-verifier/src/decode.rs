@@ -92,7 +92,15 @@ pub fn decode(statement: &Sign1, request: &Request, verbose: bool) -> Result<Dec
         ));
     }
 
-    let document: serde_json::Value = serde_json::from_slice(payload).map_err(|why| {
+    // The strict parser, not `serde_json::from_slice`. It refuses duplicate
+    // object keys, which matters here more than anywhere: a payload carrying
+    // `{"policy":"YQ==","policy":"Yg=="}` has two answers for one path, and a
+    // permissive parser silently takes the last. This would then publish a
+    // digest for one of two values the producer offered, while a `payloadJson`
+    // rule over the same document refused it as ambiguous. Extraction and
+    // evaluation must agree about what a document says, not just about how a
+    // path walks it.
+    let document = scitt_policy::parse_payload_json(payload).map_err(|why| {
         format!("{at}: the payload is not valid JSON, despite the declared content type: {why}")
     })?;
 
@@ -237,14 +245,51 @@ mod tests {
 
     #[test]
     fn a_preview_is_never_what_gets_hashed() {
-        // The property the whole feature rests on: truncating the rendering
-        // must not touch the bytes the digest is taken over.
-        let long = vec![b'a'; PREVIEW_CHARS * 3];
-        let (_, truncated, _) = decoded(&long, false);
-        assert!(truncated);
-        assert_eq!(
-            scitt_receipt::sha256_hex(&long),
-            scitt_receipt::sha256_hex(&vec![b'a'; PREVIEW_CHARS * 3])
+        // The property the whole feature rests on, as a known-answer test.
+        //
+        // An earlier version of this compared the digest of two identically
+        // constructed arrays, which holds whatever the implementation does and
+        // so could not have caught the bug it was named for. This one drives
+        // the real decoder and pins the answer independently: the digest below
+        // is of `package policy\n` repeated forty times, computed outside this
+        // crate.
+        const UNIT: &str = "package policy\n";
+        const ENCODED_UNIT: &str = "cGFja2FnZSBwb2xpY3kK";
+        const SHA256: &str = "5a93eee6a0cb26619532886a23d960bd20fc3e8c73c9f3f4e6867a7576e49580";
+
+        let document = UNIT.repeat(40);
+        let encoded = ENCODED_UNIT.repeat(40);
+
+        let bytes =
+            scitt_receipt::base64::decode(scitt_receipt::base64::Alphabet::UrlSafe, &encoded)
+                .expect("a well-formed value must decode");
+
+        // Exact bytes, exact count, exact digest.
+        assert_eq!(bytes, document.as_bytes());
+        assert_eq!(bytes.len(), 600);
+        assert_eq!(scitt_receipt::sha256_hex(&bytes), SHA256);
+
+        // The rendering is cut, and the digest is not of the cut rendering.
+        let (preview, truncated, utf8) = decoded(&bytes, false);
+        assert!(
+            truncated,
+            "600 bytes must exceed the {PREVIEW_CHARS} char preview"
         );
+        assert!(utf8);
+        assert!(
+            preview.len() < document.len(),
+            "the preview must be a prefix"
+        );
+        assert_ne!(
+            scitt_receipt::sha256_hex(preview.as_bytes()),
+            SHA256,
+            "hashing the preview must not be able to produce the reported digest"
+        );
+
+        // Verbose renders it all, and still does not change the digest.
+        let (full, truncated, _) = decoded(&bytes, true);
+        assert!(!truncated);
+        assert_eq!(full, document);
+        assert_eq!(scitt_receipt::sha256_hex(&bytes), SHA256);
     }
 }

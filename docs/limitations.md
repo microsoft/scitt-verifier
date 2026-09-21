@@ -241,6 +241,10 @@ scope.
   declares that payload to be JSON. Encoded values in protected headers are not
   addressable, and neither is a detached payload, since there are no bytes to
   read. Both are refused by name rather than returning an empty result.
+* `--decode` bounds its own allocation at 32 MiB of encoded input, but the
+  statement itself is read into memory with no size cap, as every other mode
+  does. A claim cannot multiply a payload that parsed; an enormous input file
+  is still an enormous input file.
 * `--decode` reports a digest; it does not compare one. Gating a deployment on
   "the decoded policy is the one I approved" still means reading `sha256` out
   of the JSON and comparing it yourself. A policy assertion that does the

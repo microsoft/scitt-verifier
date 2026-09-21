@@ -348,8 +348,23 @@ the statement carrying it was signed by anyone you trust. To gate on this, run
 `verify` first and treat its exit code as the decision.
 
 Nothing is inferred: the alphabet is never guessed from the value, whitespace
-is refused rather than stripped, and missing standard padding is an error
-rather than a repair. Each of those would change which bytes get hashed.
+is refused rather than stripped, padding that is present but inconsistent is
+refused rather than completed, and a value whose final character sets bits
+beyond the bytes it decodes to is refused as non-canonical. None of these are
+claims that a tolerant decoder would return *different* bytes — usually it
+returns the same ones. The point is narrower: a digest published against a
+claim attests to one spelling of it, and each tolerance widens the set of
+inputs that would satisfy that digest.
+
+Decoding a single claim is capped at 32 MiB of encoded input, reported against
+the claim rather than left to an allocator. `--decode-out` refuses to write
+over the file named by `--statement`: the statement is read before the write,
+so overwriting it would succeed and leave you with no evidence and a report
+saying everything was fine.
+
+The payload is parsed by the same strict parser policy evaluation uses, so a
+document with duplicate object keys is refused as ambiguous rather than having
+its last value silently chosen.
 
 ## Where the failure boundaries sit
 
