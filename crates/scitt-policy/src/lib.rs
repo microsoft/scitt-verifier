@@ -22,6 +22,8 @@
 //! The crate takes no clock. `now` is passed in, so evaluation is reproducible
 //! and testable.
 
+pub mod claim;
+
 use scitt_receipt::cbor;
 use scitt_receipt::chain::Outcome as ChainOutcome;
 use scitt_receipt::external::{self, DetachedSigner};

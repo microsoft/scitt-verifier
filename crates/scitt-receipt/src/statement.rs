@@ -526,8 +526,20 @@ fn hex_prefix(bytes: &[u8]) -> String {
 }
 
 /// Digest of an artifact, for binding a statement to the thing it describes.
+///
+/// Returned as bytes rather than hex because a caller comparing this against
+/// a value that is itself bytes — an attestation report field, say — should
+/// compare the digests, not two renderings of them. Hex is a display concern,
+/// and formatting both sides just to compare them invites a comparison that
+/// succeeds or fails on case or padding rather than on content.
+pub fn sha256(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
+}
+
+/// Hex rendering of [`sha256`], for output and for policy values written as
+/// text. Delegates so the two can never disagree about what was hashed.
 pub fn sha256_hex(bytes: &[u8]) -> String {
-    hex(&Sha256::digest(bytes))
+    hex(&sha256(bytes))
 }
 
 /// SPKI of a DER-encoded X.509 certificate.
