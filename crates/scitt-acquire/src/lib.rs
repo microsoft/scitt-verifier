@@ -111,6 +111,134 @@ fn unrouted(issuer: &str, now: i64, error: &AcquireError) -> Provenance {
     }
 }
 
+/// A ledger's authenticated identity, established without fetching anything
+/// from the ledger itself.
+///
+/// The first half of every acquisition, separated because two different
+/// questions need it. Receipt-key acquisition uses it to decide which key set
+/// to trust; evidence acquisition uses it to decide which node reports to
+/// trust. Fusing the two would make the receipt issuer's trust stand in for
+/// the target resource's, and those are routinely different services — a
+/// production transparency service notarises builds for many deployments.
+#[derive(Debug, Clone)]
+pub struct LedgerIdentity {
+    pub issuer: String,
+    pub provider: &'static str,
+    pub identity_url: String,
+    /// The certificate the identity service says this ledger presents.
+    ///
+    /// The only thing that may authenticate a connection to the ledger. A
+    /// certificate the ledger itself served would authenticate nothing:
+    /// anything answering at that address can present one.
+    pub service_cert: Certificate<'static>,
+    pub service_cert_der: Vec<u8>,
+    /// The `kid` the service certificate's public key binds to.
+    pub service_key_kid: String,
+}
+
+/// A failed bootstrap, carrying whatever was established before it failed.
+///
+/// The certificate digest is kept separately because it may be known when the
+/// bootstrap still fails: a served certificate whose key cannot be read is a
+/// different fact from no certificate at all, and the record should be able to
+/// tell them apart.
+#[derive(Debug, Clone)]
+pub struct BootstrapFailure {
+    pub service_cert_sha256: Option<String>,
+    pub error: AcquireError,
+}
+
+impl From<AcquireError> for BootstrapFailure {
+    fn from(error: AcquireError) -> Self {
+        Self {
+            service_cert_sha256: None,
+            error,
+        }
+    }
+}
+
+/// Establish which certificate a ledger must present, fetching nothing from it.
+///
+/// Public so that a caller needing an authenticated connection to a ledger for
+/// some purpose other than receipt keys — appraising its node evidence, say —
+/// can obtain one without also acquiring a key set it has no use for, and
+/// without that key set's acceptance rules deciding whether the connection may
+/// be made.
+///
+/// As with [`acquire`], the caller is responsible for having checked the host
+/// against whatever policy authorises contacting it.
+pub fn bootstrap(issuer: &str, deadline: Instant) -> Result<LedgerIdentity, BootstrapFailure> {
+    let route = route_for(issuer)?;
+    bootstrap_route(&route, deadline)
+}
+
+/// The bootstrap steps, once a route is known.
+fn bootstrap_route(route: &Route, deadline: Instant) -> Result<LedgerIdentity, BootstrapFailure> {
+    // Before the first TLS handshake, because the bundled crypto aborts the
+    // process rather than returning an error on a host it cannot run on, and
+    // an aborted process leaves no record at all.
+    http::check_platform()?;
+
+    // Step 1: ask the identity service, over the public web PKI, which
+    // certificate this ledger presents.
+    let identity_bytes = http::get_bounded(
+        &http::public_roots_agent(budget(deadline, &route.issuer)?),
+        &route.identity_url,
+        limits::MAX_IDENTITY_BYTES,
+    )?;
+
+    let service_cert = parse_identity_document(&identity_bytes)?;
+    let service_cert_der = service_cert.der().to_vec();
+    let service_cert_sha256 = sha256_hex(&service_cert_der);
+
+    // The identifier the ledger's own key would carry if the key set is
+    // honest. Derived here from the certificate the identity service published,
+    // so it is a statement about the ledger's identity rather than about
+    // anything the ledger later chose to send.
+    let service_key_kid = match spki_from_certificate_der(&service_cert_der) {
+        Ok(spki) => sha256_hex(&spki),
+        Err(e) => {
+            return Err(BootstrapFailure {
+                service_cert_sha256: Some(service_cert_sha256),
+                error: AcquireError::new(
+                    Diagnostic::MalformedIdentity,
+                    format!("identity service certificate for {}: {e}", route.issuer),
+                ),
+            })
+        }
+    };
+
+    Ok(LedgerIdentity {
+        issuer: route.issuer.clone(),
+        provider: route.provider,
+        identity_url: route.identity_url.clone(),
+        service_cert,
+        service_cert_der,
+        service_key_kid,
+    })
+}
+
+/// What is left of the overall deadline, capped at the per-request timeout.
+///
+/// Recomputed before each request so a later one cannot spend a budget an
+/// earlier one already consumed. Public because a caller making its own
+/// requests on a bootstrapped connection must share the same deadline; a
+/// second, independent budget would let one run spend twice the time an
+/// operator was told it could.
+pub fn budget(deadline: Instant, issuer: &str) -> Result<std::time::Duration, AcquireError> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(AcquireError::new(
+            Diagnostic::DeadlineExceeded,
+            format!(
+                "the {}s acquisition deadline passed while contacting {issuer}",
+                limits::TOTAL_DEADLINE.as_secs()
+            ),
+        ));
+    }
+    Ok(remaining.min(limits::REQUEST_TIMEOUT))
+}
+
 /// Acquire trust material for one already-authorised issuer.
 ///
 /// The caller is responsible for having checked the issuer against the policy
@@ -158,69 +286,27 @@ fn acquire_before(issuer: &str, now: i64, deadline: Instant) -> Outcome {
         }};
     }
 
-    // Before the first TLS handshake, because the bundled crypto aborts the
-    // process rather than returning an error on a host it cannot run on, and
-    // an aborted process leaves no record at all.
-    if let Err(e) = http::check_platform() {
-        fail!(e);
-    }
-
-    // What is left of the overall deadline, capped at the per-request timeout.
-    // Recomputed before each request so the second one cannot spend a budget
-    // the first already consumed.
-    macro_rules! budget {
-        () => {{
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                fail!(AcquireError::new(
-                    Diagnostic::DeadlineExceeded,
-                    format!(
-                        "the {}s acquisition deadline passed while contacting {issuer}",
-                        limits::TOTAL_DEADLINE.as_secs()
-                    ),
-                ));
-            }
-            remaining.min(limits::REQUEST_TIMEOUT)
-        }};
-    }
-
-    // Step 1: ask the identity service, over the public web PKI, which
-    // certificate this ledger presents.
-    let identity_bytes = match http::get_bounded(
-        &http::public_roots_agent(budget!()),
-        &route.identity_url,
-        limits::MAX_IDENTITY_BYTES,
-    ) {
-        Ok(b) => b,
-        Err(e) => fail!(e),
+    // Step 1: establish the ledger's identity through the public web PKI.
+    // Shared with evidence acquisition, which needs an authenticated
+    // connection but no key set.
+    let identity = match bootstrap_route(&route, deadline) {
+        Ok(i) => i,
+        Err(f) => {
+            provenance.service_cert_sha256 = f.service_cert_sha256;
+            fail!(f.error)
+        }
     };
-
-    let service_cert = match parse_identity_document(&identity_bytes) {
-        Ok(c) => c,
-        Err(e) => fail!(e),
-    };
-    let service_cert_der = service_cert.der().to_vec();
-    provenance.service_cert_sha256 = Some(sha256_hex(&service_cert_der));
-
-    // The identifier the ledger's own key would carry if the key set is
-    // honest. Derived here from the certificate the identity service published,
-    // so it is a statement about the ledger's identity rather than about
-    // anything the ledger later chose to send.
-    let service_key_kid = match spki_from_certificate_der(&service_cert_der) {
-        Ok(spki) => sha256_hex(&spki),
-        Err(e) => fail!(AcquireError::new(
-            Diagnostic::MalformedIdentity,
-            format!("identity service certificate for {}: {e}", route.issuer),
-        )),
-    };
-    provenance.service_key_kid = Some(service_key_kid.clone());
+    provenance.service_cert_sha256 = Some(sha256_hex(&identity.service_cert_der));
+    provenance.service_key_kid = Some(identity.service_key_kid.clone());
 
     // Step 2: fetch the key set from the ledger, trusting only that certificate.
-    let keyset_bytes = match http::get_bounded(
-        &http::pinned_agent(&service_cert, budget!()),
-        &route.keyset_url,
-        limits::MAX_KEYSET_BYTES,
-    ) {
+    let keyset_bytes = match budget(deadline, &route.issuer).and_then(|b| {
+        http::get_bounded(
+            &http::pinned_agent(&identity.service_cert, b),
+            &route.keyset_url,
+            limits::MAX_KEYSET_BYTES,
+        )
+    }) {
         Ok(b) => b,
         Err(e) => fail!(e),
     };
@@ -234,7 +320,7 @@ fn acquire_before(issuer: &str, now: i64, deadline: Instant) -> Outcome {
         )),
     };
 
-    if let Err(e) = check_service_key_present(&keys, &service_key_kid, &route.issuer) {
+    if let Err(e) = check_service_key_present(&keys, &identity.service_key_kid, &route.issuer) {
         fail!(e);
     }
 
@@ -244,7 +330,7 @@ fn acquire_before(issuer: &str, now: i64, deadline: Instant) -> Outcome {
         issuer: route.issuer.clone(),
         keyset_bytes,
         keys,
-        service_cert_der,
+        service_cert_der: identity.service_cert_der,
         provenance,
     })
 }
