@@ -195,6 +195,31 @@ impl Appraisal {
             && self.cce_policy_host_data.state.is_pass()
             && self.node_coverage.state.is_pass()
     }
+
+    /// The checks that `scoped_pass` consults and that did not pass.
+    ///
+    /// Exists so a caller can say *why* there was no pass without re-deriving
+    /// the rule. Listing every non-passing check instead would name
+    /// `freshness` and `connection_binding`, which are excluded above and had
+    /// no bearing on the outcome — telling an operator to go investigate two
+    /// things that were never going to change the answer.
+    ///
+    /// Empty exactly when [`Appraisal::scoped_pass`] is true.
+    pub fn blocking(&self) -> Vec<(&'static str, &'static str)> {
+        // Written out rather than sliced from `checks()`, so that reordering
+        // the report cannot silently change which checks are decisive. This
+        // list and `scoped_pass` must always name the same four.
+        [
+            (CHECK_NAMES[0], &self.ledger_identity_binding),
+            (CHECK_NAMES[1], &self.snp_uvm_validation),
+            (CHECK_NAMES[2], &self.cce_policy_host_data),
+            (CHECK_NAMES[3], &self.node_coverage),
+        ]
+        .into_iter()
+        .filter(|(_, check)| !check.state.is_pass())
+        .map(|((name, label), _)| (name, label))
+        .collect()
+    }
 }
 
 /// What one node's evidence established.
@@ -526,6 +551,50 @@ mod tests {
             assert!(!check.detail.is_empty(), "{name} must carry a reason");
         }
         assert!(!a.scoped_pass());
+    }
+
+    /// `blocking` and `scoped_pass` must always agree.
+    ///
+    /// They are two readings of one rule, and the reason for the second is to
+    /// explain the first. If they ever diverge, a run reports no pass while
+    /// naming nothing that stopped it, or names a blocker on a run that
+    /// passed — both of which send an operator somewhere useless.
+    ///
+    /// Exhaustive over all 16 assignments of the four decisive checks, with
+    /// the two excluded checks held at `CannotEvaluate`, which is what they
+    /// are in every real run.
+    #[test]
+    fn blocking_is_empty_exactly_when_the_appraisal_scoped_passes() {
+        for bits in 0u8..16 {
+            let st = |i: u8| {
+                if bits & (1 << i) != 0 {
+                    CheckState::Pass
+                } else {
+                    CheckState::Fail
+                }
+            };
+            let mut a = Appraisal::unevaluated("start");
+            a.ledger_identity_binding = Check::new(st(0), "d");
+            a.snp_uvm_validation = Check::new(st(1), "d");
+            a.cce_policy_host_data = Check::new(st(2), "d");
+            a.node_coverage = Check::new(st(3), "d");
+
+            let blocking = a.blocking();
+            assert_eq!(
+                blocking.is_empty(),
+                a.scoped_pass(),
+                "bits {bits:04b}: scoped_pass={} but blocking={blocking:?}",
+                a.scoped_pass()
+            );
+            assert_eq!(blocking.len(), (bits.count_zeros() as usize) - 4);
+            // The two checks that can never pass must never be named: they are
+            // excluded from the rule, and naming them would send an operator
+            // to investigate something that was never going to change.
+            for (name, _) in &blocking {
+                assert_ne!(*name, "freshness");
+                assert_ne!(*name, "connection-binding");
+            }
+        }
     }
 
     /// An empty bundle must be refused, not appraised.

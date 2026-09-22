@@ -442,6 +442,12 @@ fn binding_json(args: &VerifyArgs, assessment: &Assessment) -> Value {
         BindingMode::None => "none",
         BindingMode::PayloadBytes => "payload-bytes",
         BindingMode::PayloadDigest => "payload-digest",
+        // Recorded in the artifact-binding block as `none`, because that is
+        // exactly what it is here: this mode binds the statement to a service,
+        // not to a file, and the artifact block must not imply an artifact
+        // comparison happened. The resource appraisal is recorded separately,
+        // under the adapter checks.
+        BindingMode::SavedEvidence => "none",
     };
 
     // Derived from the outcome, not from whether `--artifact` was passed.
@@ -463,6 +469,14 @@ fn binding_json(args: &VerifyArgs, assessment: &Assessment) -> Value {
              define a relationship between a statement and a deployed file",
         ),
         "mode": mode,
+        // Which adapter, if any, was asked to appraise a resource. Recorded
+        // beside the binding mode because that is what selected it, and
+        // because the adapter's identity is part of what a future reader needs
+        // in order to know what the adapter checks below actually mean.
+        "adapter": match args.adapter {
+            Some(a) => Value::String(a.as_str().to_string()),
+            None => Value::Null,
+        },
         "declared": args.artifact.is_some(),
         "bound": assessment.binding.as_json_bool(),
         "detail": assessment.binding.detail,
@@ -577,6 +591,8 @@ mod tests {
             policy: PathBuf::from("p.json"),
             artifact: None,
             binding_mode: BindingMode::None,
+            adapter: None,
+            evidence: None,
             format: Format::Text,
             result: None,
             facts: None,

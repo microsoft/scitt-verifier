@@ -60,7 +60,12 @@ fn headline(a: &Assessment) {
     // the lines above, and the detail sits underneath rather than inline,
     // because an adapter's reason is usually a sentence and not a word.
     for check in &a.checks.adapter {
-        println!("{:<21}{}", format!("{}:", check.label), check.state.label());
+        // Padded to the same column as the four above, but with the space
+        // written explicitly rather than left to the padding. Adapter labels
+        // are longer than the core ones and several overflow the column; with
+        // padding alone the label and its state ran together into one word.
+        let head = format!("{}:", check.label);
+        println!("{head:<20} {}", check.state.label());
         if !check.detail.is_empty() {
             println!("  {}", check.detail);
         }
@@ -72,6 +77,23 @@ fn headline(a: &Assessment) {
         println!();
         println!("NOTICE: artifact binding was not requested. This run says the statement is");
         println!("        transparent; it does not say which artifact it describes.");
+    }
+
+    // A resource pass is always bounded, and the bound is not a footnote: it
+    // names the nodes the claim covers and says the evidence was recorded
+    // rather than observed. Printed in the headline, beside the verdict,
+    // because this is the sentence most likely to be dropped when the result
+    // is quoted to someone else.
+    if a.verdict == Verdict::ResourceTransparent {
+        if let Some(scope) = a
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "ResourceAppraisalScoped")
+        {
+            println!();
+            println!("NOTICE: this pass is scoped.");
+            println!("        {}", scope.message);
+        }
     }
 
     if let Some(d) = &a.primary {

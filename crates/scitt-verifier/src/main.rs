@@ -7,11 +7,14 @@
 
 mod cli;
 mod decode;
+#[cfg(feature = "adapter-mst-ledger")]
+mod evidence;
 mod inspect_json;
 mod online;
 mod outcome;
 mod record;
 mod report;
+mod resource;
 
 use cli::{BindingMode, Command, Format, TrustSource, VerifyArgs};
 use outcome::{
@@ -39,14 +42,14 @@ fn main() -> ExitCode {
         // parse, so there is no format to honour. Documented in docs/output.md.
         Err(message) => {
             eprintln!("error: {message}\n");
-            eprintln!("{}", cli::USAGE);
+            eprintln!("{}{}", cli::USAGE, cli::ADAPTER_USAGE);
             return ExitCode::from(Verdict::UsageError.exit_code());
         }
     };
 
     match command {
         Command::Help => {
-            println!("{}", cli::USAGE);
+            println!("{}{}", cli::USAGE, cli::ADAPTER_USAGE);
             ExitCode::SUCCESS
         }
         Command::Version => {
@@ -302,12 +305,20 @@ fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
 
     let decision = policy.evaluate(&facts, now);
 
+    // The adapter runs only after the statement has been accepted and the
+    // policy has ruled on it. Appraising node evidence against a statement
+    // nobody has authenticated would compare a number to another number.
+    let resource = run_adapter(args, &policy, &statement_bytes, &facts, &decision);
+
     let checks = Checks {
         statement_signature: signature_state(&facts),
         receipt_inclusion: receipt_state(&facts),
         artifact_binding: binding.state(),
         policy: policy_state(&decision),
-        adapter: Vec::new(),
+        adapter: resource
+            .as_ref()
+            .map(|r| r.checks.clone())
+            .unwrap_or_default(),
     };
 
     let verdict = decide(
@@ -317,6 +328,11 @@ fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
         args.binding_mode,
         args.trusted_roots.is_some(),
     );
+    // The adapter can only ever narrow. It is handed a verdict that has
+    // already been decided and may replace a pass with a weaker outcome; there
+    // is no path by which an adapter turns a failure into a success, which is
+    // what keeps a third-party adapter from being able to authorise anything.
+    let verdict = narrow_for_resource(verdict, resource.as_ref());
     // Acquisition diagnostics come first because they explain absences the
     // later ones only describe. "The key could not be fetched" is the cause;
     // "no receipt verified" is the consequence, and a reader handed the
@@ -328,7 +344,7 @@ fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
         &decision,
         args.trusted_roots.is_some(),
     ));
-    if verdict == Verdict::StatementTransparent {
+    if verdict == Verdict::StatementTransparent && args.binding_mode != BindingMode::SavedEvidence {
         // A pass, but a narrower one than most readers assume. Recorded as a
         // diagnostic so a pipeline can gate on it without parsing prose.
         diagnostics.push(Diagnostic::warning(
@@ -339,6 +355,7 @@ fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
             "Pass --artifact and --binding-mode payload-bytes to make a claim about the deployed bytes.",
         ));
     }
+    diagnostics.extend(diagnose_resource(verdict, resource.as_ref()));
     let primary = choose_primary(verdict, &diagnostics);
 
     Assessment {
@@ -1452,6 +1469,11 @@ fn check_binding(args: &VerifyArgs, statement_bytes: &[u8]) -> Result<BindingRes
     // comparison and receive a pass for one nobody performed.
     let mode = match args.binding_mode {
         BindingMode::None => return Ok(BindingResult::not_requested()),
+        // Not an artifact binding at all. `saved-evidence` binds the statement
+        // to what a service enforces, which is a different subject and a
+        // different claim; it is appraised separately and must never reach the
+        // core, which would have to invent an artifact to compare against.
+        BindingMode::SavedEvidence => return Ok(BindingResult::not_requested()),
         BindingMode::PayloadBytes => CoreBindingMode::PayloadBytes,
         BindingMode::PayloadDigest => CoreBindingMode::PayloadDigest,
     };
@@ -1490,8 +1512,321 @@ fn check_binding(args: &VerifyArgs, statement_bytes: &[u8]) -> Result<BindingRes
     })
 }
 
+/// Run the configured resource adapter, if one was asked for.
+///
+/// Returns `None` when no adapter was requested — which is not the same as an
+/// adapter that ran and established nothing. The distinction survives into the
+/// checks: `None` contributes no adapter checks at all, while a run that could
+/// not conclude contributes `cannot-evaluate` ones that are visible in the
+/// report and the record.
+fn run_adapter(
+    args: &VerifyArgs,
+    policy: &Policy,
+    statement_bytes: &[u8],
+    facts: &StatementFacts,
+    decision: &PolicyDecision,
+) -> Option<resource::ResourceAppraisal> {
+    let adapter = args.adapter?;
+    let evidence_dir = args.evidence.as_ref()?;
+
+    // Acceptance first, and not as a formality. The adapter's whole output is
+    // a claim about a policy taken *from this statement*; if the statement was
+    // not accepted then those bytes are unattributed, and comparing them to
+    // what a node enforces would produce a confident-looking match that
+    // establishes nothing about who asked for that policy.
+    if facts.signature_valid != Some(true) || !decision.satisfied() {
+        return Some(resource::ResourceAppraisal::not_attempted(
+            "the statement was not accepted, so its embedded execution policy is not \
+             attributable to anyone; node evidence was not appraised",
+        ));
+    }
+
+    let (Some(bind), Some(trust_inputs)) = (
+        policy.assertions.bind_ledger_policy.as_ref(),
+        policy.trust.as_ref(),
+    ) else {
+        return Some(resource::ResourceAppraisal::not_attempted(
+            "an adapter was requested, but the policy has no bindLedgerPolicy assertion \
+             and no trust section, so there is nothing to hold the evidence to",
+        ));
+    };
+
+    let statement = match Sign1::parse(statement_bytes) {
+        Ok(s) => s,
+        Err(e) => {
+            return Some(resource::ResourceAppraisal::not_attempted(format!(
+                "the accepted statement could not be re-parsed for the adapter: {e}"
+            )))
+        }
+    };
+
+    Some(resource::appraise_saved_evidence(
+        adapter,
+        evidence_dir,
+        &statement,
+        bind,
+        trust_inputs,
+    ))
+}
+
+/// Let an adapter narrow a verdict, never widen one.
+///
+/// The direction is the security property. `decide` has already ruled on the
+/// statement using checks this binary owns; an adapter may take that pass away
+/// or qualify it, and has no expressible way to grant one. An adapter that
+/// returned nothing but successes could still not rescue a failed signature.
+fn narrow_for_resource(
+    verdict: Verdict,
+    resource: Option<&resource::ResourceAppraisal>,
+) -> Verdict {
+    let Some(resource) = resource else {
+        return verdict;
+    };
+    if !verdict.is_pass() {
+        return verdict;
+    }
+    if resource.scoped_pass {
+        // A distinct success, not the artifact one: this run established what
+        // a service enforces, not which file is being shipped.
+        Verdict::ResourceTransparent
+    } else if resource.checks.iter().any(|c| c.state == CheckState::Fail) {
+        // The relying party's own requirement about the ledger was not met.
+        // Deliberately the same exit code as any other policy failure: to a
+        // pipeline, "the ledger does not enforce the policy you demanded" and
+        // "the signer is not the one you demanded" call for the same stop.
+        Verdict::PolicyFailed
+    } else {
+        // Asked and could not find out. Not a failure of the ledger and not a
+        // pass either: exiting 0 here would let a gate succeed on a check that
+        // never completed.
+        Verdict::CannotEvaluate
+    }
+}
+
+/// Turn adapter findings into diagnostics a reader can act on.
+fn diagnose_resource(
+    verdict: Verdict,
+    resource: Option<&resource::ResourceAppraisal>,
+) -> Vec<Diagnostic> {
+    let Some(resource) = resource else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+
+    if verdict == Verdict::ResourceTransparent {
+        // The scope is published as a diagnostic rather than left to prose,
+        // because it is the part of this result most likely to be dropped when
+        // someone quotes it. A pass over three recorded nodes is not a pass
+        // over a live ledger, and the difference has to survive a copy-paste.
+        out.push(Diagnostic::warning(
+            "ResourceAppraisalScoped",
+            Category::Binding,
+            format!("this result is scoped: {}", resource.scope),
+            "Treat this as an appraisal of the evidence named above, not as a live \
+             observation of the ledger.",
+        ));
+    }
+
+    for check in &resource.checks {
+        if check.state == CheckState::Fail {
+            out.push(Diagnostic::error(
+                "ResourceCheckFailed",
+                Category::Binding,
+                format!("{}: {}", check.label, check.detail),
+                "The appraised nodes do not satisfy this requirement. Do not deploy against \
+                 this ledger until it is understood.",
+            ));
+        }
+    }
+
+    // A resource appraisal that could not conclude has to say which question
+    // it could not answer. Without this the run reports `cannot-evaluate` with
+    // nothing naming a cause, and the reader is told only that something went
+    // wrong — which is the one outcome this tool exists to avoid.
+    if verdict == Verdict::CannotEvaluate && !resource.blocking.is_empty() {
+        out.push(Diagnostic::error(
+            "ResourceAppraisalIncomplete",
+            Category::Binding,
+            format!(
+                "the statement was accepted, but the ledger appraisal could not be \
+                 completed: {} did not pass. This is not a finding about the ledger.",
+                resource.blocking.join(", ")
+            ),
+            "Read the per-check detail above. A check this build cannot perform is a \
+             limitation of the tool, not evidence about the service.",
+        ));
+    }
+
+    for note in &resource.notes {
+        out.push(Diagnostic::warning(
+            "ResourceAppraisalNote",
+            Category::Binding,
+            note.clone(),
+            "Read this alongside the adapter checks above.",
+        ));
+    }
+
+    out
+}
+
 fn read(path: &Path) -> Result<Vec<u8>, String> {
     std::fs::read(path).map_err(|e| format!("could not read {}: {e}", path.display()))
+}
+
+#[cfg(test)]
+mod resource_tests {
+    use super::*;
+    use crate::outcome::AdapterCheck;
+
+    fn appraisal(states: &[CheckState], scoped_pass: bool) -> resource::ResourceAppraisal {
+        resource::ResourceAppraisal {
+            checks: states
+                .iter()
+                .enumerate()
+                .map(|(i, s)| AdapterCheck {
+                    name: format!("c{i}"),
+                    label: format!("Check {i}"),
+                    state: *s,
+                    detail: "detail".into(),
+                })
+                .collect(),
+            scoped_pass,
+            scope: "scope".into(),
+            blocking: if scoped_pass {
+                Vec::new()
+            } else {
+                vec!["Check 0".into()]
+            },
+            notes: Vec::new(),
+        }
+    }
+
+    /// The security property the whole adapter design rests on.
+    ///
+    /// An adapter is third-party code contributing findings about a service it
+    /// chose how to talk to. It may take a pass away; it must have no way to
+    /// grant one. If this ever stops holding, an adapter that simply reported
+    /// success could rescue a statement whose signature did not verify.
+    #[test]
+    fn no_adapter_result_can_turn_a_failure_into_a_pass() {
+        let failures = [
+            Verdict::Untrusted,
+            Verdict::PolicyFailed,
+            Verdict::CannotEvaluate,
+            Verdict::UsageError,
+        ];
+        let results = [
+            appraisal(&[CheckState::Pass; 6], true),
+            appraisal(&[CheckState::Pass; 6], false),
+            appraisal(&[CheckState::Fail; 6], false),
+            appraisal(&[CheckState::CannotEvaluate; 6], false),
+        ];
+        for verdict in failures {
+            for result in &results {
+                let after = narrow_for_resource(verdict, Some(result));
+                assert_eq!(
+                    after, verdict,
+                    "adapter changed a failing verdict {verdict:?} into {after:?}"
+                );
+                assert!(!after.is_pass());
+            }
+        }
+    }
+
+    /// A pass the adapter could not confirm must not stay a pass.
+    ///
+    /// The dangerous case is not a failing check — that is loud. It is an
+    /// appraisal that established nothing, which would otherwise leave the
+    /// statement-level pass standing and exit 0, letting a gate succeed on a
+    /// check that never ran.
+    #[test]
+    fn an_inconclusive_appraisal_removes_the_pass() {
+        for verdict in [Verdict::ArtifactTransparent, Verdict::StatementTransparent] {
+            let after = narrow_for_resource(
+                verdict,
+                Some(&appraisal(&[CheckState::CannotEvaluate; 6], false)),
+            );
+            assert_eq!(after, Verdict::CannotEvaluate);
+            assert!(!after.is_pass());
+        }
+    }
+
+    /// A failing check is a statement about the ledger, and stops the same way
+    /// any other unmet relying-party requirement does.
+    #[test]
+    fn a_failing_adapter_check_fails_the_run() {
+        let mut states = [CheckState::Pass; 6];
+        states[2] = CheckState::Fail;
+        let after = narrow_for_resource(
+            Verdict::StatementTransparent,
+            Some(&appraisal(&states, false)),
+        );
+        assert_eq!(after, Verdict::PolicyFailed);
+        assert_eq!(after.exit_code(), 2);
+    }
+
+    /// A scoped pass is its own verdict, not the artifact one.
+    ///
+    /// Collapsing them would let a gate that meant "this is the file I built"
+    /// be satisfied by "this ledger enforces a policy", which is a different
+    /// claim about a different subject.
+    #[test]
+    fn a_scoped_pass_is_reported_as_a_resource_pass_and_not_an_artifact_one() {
+        let after = narrow_for_resource(
+            Verdict::StatementTransparent,
+            Some(&appraisal(&[CheckState::Pass; 6], true)),
+        );
+        assert_eq!(after, Verdict::ResourceTransparent);
+        assert_eq!(after.exit_code(), 0);
+        assert_ne!(after, Verdict::ArtifactTransparent);
+    }
+
+    /// No adapter, no change. A run that asked for nothing must read exactly
+    /// as it did before adapters existed.
+    #[test]
+    fn a_run_with_no_adapter_is_left_alone() {
+        for verdict in [
+            Verdict::ArtifactTransparent,
+            Verdict::StatementTransparent,
+            Verdict::Untrusted,
+            Verdict::CannotEvaluate,
+        ] {
+            assert_eq!(narrow_for_resource(verdict, None), verdict);
+        }
+    }
+
+    /// A scoped pass must never be printed without its scope.
+    ///
+    /// The scope is the difference between "three recorded nodes agreed" and
+    /// "the ledger is fine", and it is the part most likely to be lost when
+    /// the result is quoted onward.
+    #[test]
+    fn a_resource_pass_always_carries_its_scope() {
+        let result = appraisal(&[CheckState::Pass; 6], true);
+        let diagnostics = diagnose_resource(Verdict::ResourceTransparent, Some(&result));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.code == "ResourceAppraisalScoped" && d.message.contains("scope")),
+            "a resource pass was reported without its scope: {diagnostics:?}"
+        );
+    }
+
+    /// An inconclusive run must name what stopped it.
+    ///
+    /// Reporting `cannot-evaluate` with no diagnostic tells the reader only
+    /// that something went wrong, which is the outcome this tool exists to
+    /// avoid.
+    #[test]
+    fn an_inconclusive_appraisal_names_what_blocked_it() {
+        let result = appraisal(&[CheckState::CannotEvaluate; 6], false);
+        let diagnostics = diagnose_resource(Verdict::CannotEvaluate, Some(&result));
+        let named = diagnostics
+            .iter()
+            .find(|d| d.code == "ResourceAppraisalIncomplete")
+            .expect("an inconclusive appraisal named no cause");
+        assert!(named.message.contains("Check 0"), "{}", named.message);
+    }
 }
 
 #[cfg(test)]

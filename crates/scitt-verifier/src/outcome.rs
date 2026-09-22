@@ -25,6 +25,18 @@ use scitt_receipt::StatementFacts;
 pub enum Verdict {
     /// The statement is transparent *and* it describes the artifact supplied.
     ArtifactTransparent,
+    /// The statement is transparent, and the appraised ledger nodes enforce
+    /// the execution policy it embeds.
+    ///
+    /// A third success rather than a reuse of `ArtifactTransparent` because it
+    /// is a different claim about a different subject: one is about a file on
+    /// disk, this is about what a service is running. A gate that accepted
+    /// either without distinguishing them could be satisfied by the wrong one.
+    ///
+    /// Always scoped. It is a statement about the node set that was assessed,
+    /// and — for saved evidence — about a recording, not a live observation.
+    /// The caller is responsible for saying so; see `report.rs`.
+    ResourceTransparent,
     /// The statement is transparent, but no artifact binding was requested,
     /// so this run says nothing about what is being deployed.
     StatementTransparent,
@@ -38,6 +50,7 @@ impl Verdict {
     pub fn as_str(self) -> &'static str {
         match self {
             Verdict::ArtifactTransparent => "artifact-transparent",
+            Verdict::ResourceTransparent => "resource-transparent",
             Verdict::StatementTransparent => "statement-transparent",
             Verdict::Untrusted => "untrusted",
             Verdict::PolicyFailed => "policy-failed",
@@ -49,6 +62,7 @@ impl Verdict {
     pub fn exit_code(self) -> u8 {
         match self {
             Verdict::ArtifactTransparent | Verdict::StatementTransparent => 0,
+            Verdict::ResourceTransparent => 0,
             Verdict::Untrusted => 1,
             Verdict::PolicyFailed => 2,
             Verdict::CannotEvaluate => 3,
@@ -59,7 +73,9 @@ impl Verdict {
     pub fn is_pass(self) -> bool {
         matches!(
             self,
-            Verdict::ArtifactTransparent | Verdict::StatementTransparent
+            Verdict::ArtifactTransparent
+                | Verdict::ResourceTransparent
+                | Verdict::StatementTransparent
         )
     }
 

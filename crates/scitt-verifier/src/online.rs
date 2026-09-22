@@ -321,6 +321,8 @@ mod tests {
             policy_id: "test".into(),
             policy_version: "1".into(),
             description: None,
+            ledger: None,
+            trust: None,
             assertions: Default::default(),
         };
         p.assertions.issuer = issuers.map(|v| v.into_iter().map(String::from).collect());

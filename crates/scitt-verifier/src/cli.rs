@@ -108,6 +108,43 @@ VERDICTS (exit 0 is two different claims — see docs/output.md):
 Exit 3 is not a pass. It means the tool could not answer the question.
 "#;
 
+/// Help for the ledger-evidence binding mode, when this build has it.
+///
+/// Gated so an adapter-less build never advertises a mode it cannot run.
+/// Printing it unconditionally would send an operator to write a policy
+/// section and capture a bundle for a binary that would then refuse both.
+#[cfg(feature = "adapter-mst-ledger")]
+pub const ADAPTER_USAGE: &str = r#"
+LEDGER EVIDENCE (mst-ledger adapter):
+    --binding-mode saved-evidence
+                             Appraise saved ledger attestation evidence rather
+                             than an artifact. Requires --adapter and --evidence.
+    --adapter <NAME>         mst-ledger
+    --evidence <DIR>         A bundle captured from the ledger, containing
+                             snapshot.json and the per-node evidence it names.
+
+Answers one question: does the execution policy embedded in this statement
+equal the policy the ledger's attested nodes are enforcing?
+
+The target ledger, its trust inputs and the acceptance requirements come from
+the policy document — never from the command line. A flag can be edited in a
+pipeline definition to point at a ledger that would happily attest to its own
+policy; a committed policy file gets reviewed.
+
+This appraises recorded evidence. It makes no network request, and it is not an
+observation of the live ledger: the verdict says so, and says when the evidence
+was collected. Freshness and connection binding are reported NOT EVALUATED and
+will stay that way — CCF offers no challenge-response attestation, and the
+endpoint load-balances per connection.
+
+    resource-transparent   the statement is transparent, and the appraised
+                           nodes enforce the policy it embeds
+"#;
+
+/// Nothing to add: this build has no adapter.
+#[cfg(not(feature = "adapter-mst-ledger"))]
+pub const ADAPTER_USAGE: &str = "";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BindingMode {
     /// No claim is made about which artifact the statement describes.
@@ -118,6 +155,34 @@ pub enum BindingMode {
     /// digest of the artifact, produced with the algorithm named in the
     /// protected header.
     PayloadDigest,
+    /// Appraise saved attestation evidence against the statement.
+    ///
+    /// A separate mode rather than a flag on the others, so the weaker claim
+    /// cannot be reached by accident. Replaying a recorded bundle is an
+    /// appraisal of evidence, not an observation of a live service, and the
+    /// two must not share a spelling: a pipeline that meant to check a running
+    /// ledger would otherwise pass while checking a file that was captured
+    /// months ago.
+    SavedEvidence,
+}
+
+/// Which adapter supplies the resource appraisal.
+///
+/// Named on the command line even though there is one of them, because the
+/// adapter decides what the evidence *means*, and a run's record has to say
+/// which set of rules produced its result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Adapter {
+    /// Azure Confidential Ledger nodes attested with SEV-SNP.
+    MstLedger,
+}
+
+impl Adapter {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Adapter::MstLedger => "mst-ledger",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,6 +250,10 @@ pub struct VerifyArgs {
     pub policy: PathBuf,
     pub artifact: Option<PathBuf>,
     pub binding_mode: BindingMode,
+    /// The adapter to appraise resource evidence with, if any.
+    pub adapter: Option<Adapter>,
+    /// The saved evidence bundle to appraise.
+    pub evidence: Option<PathBuf>,
     pub format: Format,
     pub result: Option<PathBuf>,
     /// Where to write the observations-only projection, if asked for.
@@ -238,6 +307,8 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     let mut policy = None;
     let mut artifact = None;
     let mut binding_mode = None;
+    let mut adapter = None;
+    let mut evidence = None;
     let mut format = Format::Text;
     let mut result = None;
     let mut facts = None;
@@ -262,14 +333,25 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                     "none" => BindingMode::None,
                     "payload-bytes" => BindingMode::PayloadBytes,
                     "payload-digest" => BindingMode::PayloadDigest,
+                    "saved-evidence" => BindingMode::SavedEvidence,
                     other => {
                         return Err(format!(
-                            "unknown binding mode '{other}'; expected 'none', 'payload-bytes' \
-                             or 'payload-digest'"
+                            "unknown binding mode '{other}'; expected 'none', 'payload-bytes', \
+                             'payload-digest' or 'saved-evidence'"
                         ))
                     }
                 });
             }
+            "--adapter" => {
+                let raw = value(&mut it, flag)?;
+                adapter = Some(match raw.as_str() {
+                    "mst-ledger" => Adapter::MstLedger,
+                    other => {
+                        return Err(format!("unknown adapter '{other}'; expected 'mst-ledger'"))
+                    }
+                });
+            }
+            "--evidence" => evidence = Some(PathBuf::from(value(&mut it, flag)?)),
             "--format" => {
                 format = match value(&mut it, flag)?.as_str() {
                     "text" => Format::Text,
@@ -349,6 +431,11 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     )?;
 
     let binding_mode = binding_mode.unwrap_or(BindingMode::None);
+    let artifact_mode = matches!(
+        binding_mode,
+        BindingMode::PayloadBytes | BindingMode::PayloadDigest
+    );
+
     if artifact.is_some() && binding_mode == BindingMode::None {
         return Err(
             "--artifact was supplied but --binding-mode is 'none', so the artifact would be \
@@ -356,8 +443,50 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 .into(),
         );
     }
-    if artifact.is_none() && binding_mode != BindingMode::None {
+    if artifact.is_none() && artifact_mode {
         return Err("--binding-mode requires --artifact".into());
+    }
+    // Refused rather than silently ignoring one of them. The two modes answer
+    // different questions, and a run that quietly dropped the artifact check
+    // would report on the ledger while an operator believed it had also
+    // checked what they were deploying.
+    if artifact.is_some() && binding_mode == BindingMode::SavedEvidence {
+        return Err(
+            "--binding-mode saved-evidence appraises ledger evidence and makes no claim about \
+             an artifact, so --artifact would be ignored. Run the artifact binding as a \
+             separate invocation."
+                .into(),
+        );
+    }
+
+    // Each of the three saved-evidence flags is useless without the others, and
+    // a partial set must not look like a configured run.
+    if binding_mode == BindingMode::SavedEvidence {
+        if adapter.is_none() {
+            return Err(
+                "--binding-mode saved-evidence requires --adapter; the adapter decides what the \
+                 evidence means, and a result has to record which rules produced it"
+                    .into(),
+            );
+        }
+        if evidence.is_none() {
+            return Err("--binding-mode saved-evidence requires --evidence <DIR>".into());
+        }
+    } else {
+        if adapter.is_some() {
+            return Err(
+                "--adapter was supplied but --binding-mode is not 'saved-evidence', so no \
+                 evidence would be appraised"
+                    .into(),
+            );
+        }
+        if evidence.is_some() {
+            return Err(
+                "--evidence was supplied but --binding-mode is not 'saved-evidence', so the \
+                 bundle would be ignored"
+                    .into(),
+            );
+        }
     }
 
     Ok(Command::Verify(Box::new(VerifyArgs {
@@ -366,6 +495,8 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         policy,
         artifact,
         binding_mode,
+        adapter,
+        evidence,
         format,
         result,
         facts,

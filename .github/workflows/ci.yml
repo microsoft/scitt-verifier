@@ -42,6 +42,14 @@ jobs:
       - run: cargo clippy -p scitt-attest --features mst-ledger --all-targets
       - run: cargo test -p scitt-attest --features mst-ledger
 
+      # Same reasoning one level up. `adapter-mst-ledger` is what wires the
+      # adapter into the CLI — the evidence loader, the policy translation, and
+      # the rule that an adapter may only narrow a verdict. None of it is
+      # compiled by the default build, so without these steps the monotonicity
+      # tests could stop being run without anything turning red.
+      - run: cargo clippy -p scitt-verifier --features adapter-mst-ledger --all-targets
+      - run: cargo test -p scitt-verifier --features adapter-mst-ledger
+
   boundary:
     name: Core boundary
     runs-on: ubuntu-latest
@@ -176,6 +184,23 @@ jobs:
           printf 'scitt-verifier: %s bytes (budget %s)\n' "$actual" "$budget"
           if [ "$actual" -gt "$budget" ]; then
             echo "::error::binary exceeded the size budget"
+            exit 1
+          fi
+
+      - run: cargo build --release -p scitt-verifier --features adapter-mst-ledger
+
+      # The adapter build is what an operator gating on a ledger actually
+      # downloads, so it gets a budget too rather than being left unmeasured.
+      # Held to the same 4 MiB: an adapter is a reason to carry more code, not
+      # a reason to stop counting it.
+      - name: Enforce the size budget with the adapter
+        run: |
+          set -euo pipefail
+          budget=$((4 * 1024 * 1024))
+          actual=$(stat -c%s target/release/scitt-verifier)
+          printf 'scitt-verifier + mst-ledger: %s bytes (budget %s)\n' "$actual" "$budget"
+          if [ "$actual" -gt "$budget" ]; then
+            echo "::error::adapter binary exceeded the size budget"
             exit 1
           fi
 

@@ -823,8 +823,10 @@ name = "scitt-verifier"
 version = "0.4.0"
 dependencies = [
  "scitt-acquire",
+ "scitt-attest",
  "scitt-policy",
  "scitt-receipt",
+ "serde",
  "serde_json",
 ]
 
