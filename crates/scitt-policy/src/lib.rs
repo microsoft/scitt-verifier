@@ -23,6 +23,11 @@
 //! and testable.
 
 pub mod claim;
+pub mod ledger;
+
+pub use ledger::{
+    BindLedgerPolicy, Encoding, LedgerTarget, NodeCoverage, TcbFloorEntry, TrustInputs,
+};
 
 use scitt_receipt::cbor;
 use scitt_receipt::chain::Outcome as ChainOutcome;
@@ -42,6 +47,17 @@ pub struct Policy {
     pub policy_version: String,
     #[serde(default)]
     pub description: Option<String>,
+    /// The ledger this policy is about, when it configures ledger appraisal.
+    ///
+    /// Present only for policies that use `assertions.bindLedgerPolicy`, and
+    /// required by those. Kept at the top level rather than inside the
+    /// assertion because it identifies the subject of the whole document, not
+    /// one rule within it.
+    #[serde(default)]
+    pub ledger: Option<LedgerTarget>,
+    /// Trust inputs the consumer supplies independently of the evidence.
+    #[serde(default)]
+    pub trust: Option<TrustInputs>,
     pub assertions: Assertions,
 }
 
@@ -225,6 +241,22 @@ pub struct Assertions {
     /// witnessed the whole thing at registration.
     #[serde(default)]
     pub external_signatures: Option<Vec<ExternalSignature>>,
+    /// Bind the execution policy embedded in the statement to the policy the
+    /// ledger's nodes are actually enforcing.
+    ///
+    /// Unlike every other assertion here, this one cannot be evaluated from
+    /// the statement alone: it needs attestation evidence from the ledger. It
+    /// is therefore not checked by `Policy::evaluate`, which sees only
+    /// statement facts. The orchestrator runs it separately and contributes
+    /// its findings as adapter checks.
+    ///
+    /// It lives in the policy document rather than in adapter-specific
+    /// configuration because it is a relying-party requirement like any other,
+    /// and because keeping the target ledger in a reviewed, committed file is
+    /// what stops a pipeline definition redirecting the check at a ledger that
+    /// would attest to its own policy.
+    #[serde(default)]
+    pub bind_ledger_policy: Option<BindLedgerPolicy>,
 }
 
 /// One detached signature to verify.
@@ -1300,6 +1332,43 @@ impl Policy {
                      A count of 0 would accept a statement with no proof at all."
                 ));
             }
+        }
+        // The ledger section, the trust inputs and the assertion are one
+        // configuration in three places, so they are required to arrive
+        // together. Each is useless alone, and an incomplete set is the shape
+        // most likely to be read as "configured" during review: trust inputs
+        // with no assertion enforce nothing, and an assertion with no trust
+        // inputs cannot be enforced.
+        let bind = policy.assertions.bind_ledger_policy.as_ref();
+        match (bind, &policy.ledger, &policy.trust) {
+            (Some(bind), Some(ledger), Some(trust)) => {
+                ledger.validate()?;
+                trust.validate()?;
+                bind.validate()?;
+            }
+            (Some(_), None, _) => {
+                return Err(
+                    "assertions.bindLedgerPolicy requires a top-level 'ledger' section \
+                            naming the ledger it is about"
+                        .into(),
+                )
+            }
+            (Some(_), _, None) => {
+                return Err(
+                    "assertions.bindLedgerPolicy requires a top-level 'trust' section; \
+                            without independently supplied trust inputs the evidence would be \
+                            checked only against itself"
+                        .into(),
+                )
+            }
+            (None, Some(_), _) | (None, _, Some(_)) => {
+                return Err(
+                    "'ledger' and 'trust' configure assertions.bindLedgerPolicy, which \
+                            this policy does not declare; as written they enforce nothing"
+                        .into(),
+                )
+            }
+            (None, None, None) => {}
         }
         Ok(policy)
     }
