@@ -793,6 +793,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "scitt-attest"
+version = "0.4.0"
+
+[[package]]
 name = "scitt-policy"
 version = "0.4.0"
 dependencies = [

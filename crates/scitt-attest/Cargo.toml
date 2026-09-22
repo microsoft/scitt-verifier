@@ -1,0 +1,22 @@
+[package]
+name = "scitt-attest"
+description = "Appraisal of SNP/UVM evidence against a statement-derived policy commitment"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# Deliberately dependency-free at this stage.
+#
+# This crate appraises evidence someone else gathered: callers hand it bytes
+# and it hands back typed findings. It performs no file I/O, opens no sockets,
+# and reads no clock — the CI `boundary` job enforces all three, for the same
+# reason it does on `scitt-receipt`.
+#
+# It also must never depend on `scitt-verifier`. That is what makes "an adapter
+# reports checks, not a verdict" structural rather than a convention: the
+# `Verdict` type is not in scope here, so no code in this crate can construct
+# one and turn missing evidence into a pass.
+[dependencies]

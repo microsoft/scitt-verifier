@@ -50,7 +50,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          core=crates/scitt-receipt/src
+          # Both crates make the same promise — callers supply bytes, we decide
+          # nothing about time, exit status, or the network — so both are held
+          # to it here. A crate that claims purity and is never scanned drifts.
+          crates="scitt-receipt scitt-attest"
           io_pattern='std::fs|File::open|read_to_string'
 
           # `if grep` cannot tell "found nothing" from "looked at nothing": both
@@ -58,16 +61,19 @@ jobs:
           # `set -e`. Rename or move the crate and every check below reports
           # clean forever — in the one job whose entire purpose is to notice.
           # So establish there is something to scan before trusting silence.
-          test -d "$core" || {
-            echo "::error::$core does not exist; these checks would pass without scanning anything"
-            exit 1
-          }
-          scanned=$(find "$core" -name '*.rs' -type f | wc -l)
-          test "$scanned" -gt 0 || {
-            echo "::error::no .rs files under $core; these checks would pass without scanning anything"
-            exit 1
-          }
-          echo "scanning $scanned .rs file(s) under $core"
+          for name in $crates; do
+            core=crates/$name/src
+            test -d "$core" || {
+              echo "::error::$core does not exist; these checks would pass without scanning anything"
+              exit 1
+            }
+            scanned=$(find "$core" -name '*.rs' -type f | wc -l)
+            test "$scanned" -gt 0 || {
+              echo "::error::no .rs files under $core; these checks would pass without scanning anything"
+              exit 1
+            }
+            echo "scanning $scanned .rs file(s) under $core"
+          done
 
           # And that the detector fires at all, mirroring
           # `the_detectors_actually_detect` in design_commitments.rs: a check
@@ -82,43 +88,67 @@ jobs:
 
           violations=0
           check() {
-            local out status
+            local dir="$1" pattern="$2" message="$3" out status
             # grep: 0 found, 1 clean, 2+ broken. Only 1 is good news, and
             # collapsing 2 into it is how a broken check looks like a passing one.
-            out=$(grep -rn --include='*.rs' -E "$1" "$core") && status=0 || status=$?
+            out=$(grep -rn --include='*.rs' -E "$pattern" "$dir") && status=0 || status=$?
             case $status in
-              0) printf '%s\n' "$out"; echo "::error::$2"; violations=1 ;;
+              0) printf '%s\n' "$out"; echo "::error::$message"; violations=1 ;;
               1) ;;
-              *) echo "::error::grep exited $status while checking: $2"; violations=1 ;;
+              *) echo "::error::grep exited $status while checking: $message"; violations=1 ;;
             esac
           }
-          check "$io_pattern" \
-                'scitt-receipt must not perform file I/O; callers supply bytes.'
-          # \b matters: an unanchored 'chrono' matches tav_cose::synchronous.
-          check 'SystemTime|Instant::now|\bchrono\b' \
-                'scitt-receipt must not read the clock; freshness is a policy question.'
-          check 'std::process::exit|ExitCode' \
-                'scitt-receipt must not decide exit codes.'
-          check 'scitt_policy|scitt_verifier' \
+
+          for name in $crates; do
+            core=crates/$name/src
+            check "$core" "$io_pattern" \
+                  "$name must not perform file I/O; callers supply bytes."
+            # \b matters: an unanchored 'chrono' matches tav_cose::synchronous.
+            check "$core" 'SystemTime|Instant::now|\bchrono\b' \
+                  "$name must not read the clock; freshness is a policy question."
+            check "$core" 'std::process::exit|ExitCode' \
+                  "$name must not decide exit codes."
+            check "$core" 'reqwest|hyper|ureq|TcpStream' \
+                  "$name must not open network connections; verification is offline."
+          done
+
+          check crates/scitt-receipt/src 'scitt_policy|scitt_verifier' \
                 'scitt-receipt must not depend on policy or the CLI.'
-          check 'reqwest|hyper|ureq|TcpStream' \
-                'scitt-receipt must not open network connections; verification is offline.'
+          # This one is the structural half of "an adapter reports checks, not a
+          # verdict". If scitt-attest could see the CLI, it could construct a
+          # Verdict, and an appraisal that gathered no evidence could return a
+          # pass. Keeping the type out of scope is what makes that impossible
+          # rather than merely discouraged.
+          check crates/scitt-attest/src 'scitt_verifier' \
+                'scitt-attest must not depend on the CLI; it reports checks, not verdicts.'
           exit $violations
 
-      - name: Reject dependency drift in the core manifest
+      - name: Reject dependency drift in the core manifests
         run: |
           set -euo pipefail
-          manifest=crates/scitt-receipt/Cargo.toml
-          # Same trap as above: a grep that cannot open its target is not a
-          # grep that found nothing.
-          test -f "$manifest" || {
-            echo "::error::$manifest does not exist; this check would pass without reading anything"
-            exit 1
+          check_manifest() {
+            local manifest="$1" pattern="$2" message="$3"
+            # Same trap as above: a grep that cannot open its target is not a
+            # grep that found nothing.
+            test -f "$manifest" || {
+              echo "::error::$manifest does not exist; this check would pass without reading anything"
+              exit 1
+            }
+            if grep -qE "$pattern" "$manifest"; then
+              echo "::error::$message"
+              exit 1
+            fi
           }
-          if grep -qE '^(scitt-policy|scitt-verifier)' "$manifest"; then
-            echo "::error::scitt-receipt must not depend on scitt-policy or scitt-verifier."
-            exit 1
-          fi
+          check_manifest crates/scitt-receipt/Cargo.toml \
+            '^(scitt-policy|scitt-verifier)' \
+            'scitt-receipt must not depend on scitt-policy or scitt-verifier.'
+          # scitt-acquire is named here as well as scitt-verifier: it is where
+          # networking lives, and a dependency edge to it would let the offline
+          # appraisal reach the ledger it is supposed to be appraising from
+          # evidence someone else collected.
+          check_manifest crates/scitt-attest/Cargo.toml \
+            '^(scitt-verifier|scitt-acquire)' \
+            'scitt-attest must not depend on scitt-verifier or scitt-acquire.'
 
   size:
     name: Binary size budget

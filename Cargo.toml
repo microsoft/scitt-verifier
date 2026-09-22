@@ -4,6 +4,7 @@ members = [
     "crates/scitt-receipt",
     "crates/scitt-policy",
     "crates/scitt-acquire",
+    "crates/scitt-attest",
     "crates/scitt-verifier",
     "crates/scitt-wasm",
 ]
