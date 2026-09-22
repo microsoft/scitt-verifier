@@ -214,12 +214,42 @@ impl CheckState {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+/// A check contributed by an adapter, rather than one of the fixed core four.
+///
+/// Named rather than positional because the set is open: an adapter decides
+/// what it establishes, and the core cannot enumerate that in advance. The
+/// `mst-ledger` adapter alone contributes identity binding, SNP/UVM
+/// validation, policy comparison, node coverage, and two checks it reports as
+/// permanently unevaluated.
+///
+/// There is deliberately no verdict here. An adapter reports what it found;
+/// only the CLI decides what that means, and it may narrow the verdict but
+/// never widen it. An adapter that could hand back a verdict could turn
+/// missing evidence into success.
+#[derive(Debug, Clone)]
+pub struct AdapterCheck {
+    /// Stable machine name for the record, e.g. `ledger-identity-binding`.
+    pub name: String,
+    /// The human label, for the report.
+    pub label: String,
+    pub state: CheckState,
+    /// What was established, or why it could not be.
+    pub detail: String,
+}
+
+/// What this run checked, and what it did not.
+///
+/// The four core checks are fixed fields because every run has an answer for
+/// each of them, even if that answer is `NotChecked`. Adapter checks are a
+/// list because the set is open and only the selected adapter knows it.
+#[derive(Debug, Clone)]
 pub struct Checks {
     pub statement_signature: CheckState,
     pub receipt_inclusion: CheckState,
     pub artifact_binding: CheckState,
     pub policy: CheckState,
+    /// Empty for every run that selected no adapter, which is the default.
+    pub adapter: Vec<AdapterCheck>,
 }
 
 impl Checks {
@@ -231,6 +261,7 @@ impl Checks {
             receipt_inclusion: CheckState::NotChecked,
             artifact_binding: CheckState::NotChecked,
             policy: CheckState::NotChecked,
+            adapter: Vec::new(),
         }
     }
 }
@@ -500,6 +531,10 @@ mod tests {
         );
         assert_eq!(a.checks.statement_signature, CheckState::NotChecked);
         assert_eq!(a.checks.policy, CheckState::NotChecked);
+        // An early stop has established nothing, least of all an adapter
+        // finding. A non-empty list here would be a claim about evidence that
+        // was never gathered.
+        assert!(a.checks.adapter.is_empty());
         assert!(a.primary.is_some());
         assert_eq!(a.diagnostics.len(), 1);
         // A run that stopped early has more gaps than one that finished, so

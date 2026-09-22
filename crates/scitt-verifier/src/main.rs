@@ -307,6 +307,7 @@ fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
         receipt_inclusion: receipt_state(&facts),
         artifact_binding: binding.state(),
         policy: policy_state(&decision),
+        adapter: Vec::new(),
     };
 
     let verdict = decide(

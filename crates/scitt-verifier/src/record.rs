@@ -47,7 +47,9 @@ use scitt_receipt::{KeyLookup, ReceiptFacts};
 use serde_json::{json, Map, Value};
 
 use crate::cli::{BindingMode, TrustSource, VerifyArgs};
-use crate::outcome::{Acquisition, Assessment, Binding, Checks, Diagnostic, Gap, Trust};
+use crate::outcome::{
+    Acquisition, AdapterCheck, Assessment, Binding, Checks, Diagnostic, Gap, Trust,
+};
 
 /// The full record: observations, rules, and decision.
 ///
@@ -518,6 +520,19 @@ fn checks_json(c: &Checks) -> Value {
         "receiptInclusion": c.receipt_inclusion.as_str(),
         "artifactBinding": c.artifact_binding.as_str(),
         "policy": c.policy.as_str(),
+        // Always present, empty when no adapter ran. A consumer must not have
+        // to tell an absent key from an empty list to know whether an adapter
+        // contributed anything.
+        "adapter": Value::Array(c.adapter.iter().map(adapter_check_json).collect()),
+    })
+}
+
+fn adapter_check_json(c: &AdapterCheck) -> Value {
+    json!({
+        "name": c.name,
+        "label": c.label,
+        "state": c.state.as_str(),
+        "detail": c.detail,
     })
 }
 
@@ -620,6 +635,41 @@ mod tests {
         let record = build(&args(), &incomplete(), 0);
         assert_eq!(record["artifactBinding"]["status"], NOT_REQUESTED);
         assert_eq!(record["artifactBinding"]["bound"], Value::Null);
+    }
+
+    /// A consumer must not have to tell a missing key from an empty list to
+    /// know whether an adapter contributed anything. If this key ever becomes
+    /// conditional, "no adapter ran" and "an older verifier wrote this record"
+    /// stop being distinguishable, and the second one is not a claim about the
+    /// deployment at all.
+    #[test]
+    fn adapter_checks_are_always_an_array_even_when_none_ran() {
+        let record = build(&args(), &incomplete(), 0);
+        let adapter = &record["appraisal"]["checks"]["adapter"];
+        assert!(
+            adapter.is_array(),
+            "adapter checks must always be an array, got {adapter:?}"
+        );
+        assert_eq!(adapter.as_array().map(Vec::len), Some(0));
+    }
+
+    /// The four core checks are the compatibility surface. Adding adapter
+    /// checks must not move or rename them.
+    #[test]
+    fn adding_adapter_checks_leaves_the_core_four_in_place() {
+        let record = build(&args(), &incomplete(), 0);
+        let checks = &record["appraisal"]["checks"];
+        for key in [
+            "statementSignature",
+            "receiptInclusion",
+            "artifactBinding",
+            "policy",
+        ] {
+            assert_eq!(
+                checks[key], "not-checked",
+                "core check {key} missing or changed"
+            );
+        }
     }
 
     /// Receipts arrive in the unprotected header. If this block ever claims the

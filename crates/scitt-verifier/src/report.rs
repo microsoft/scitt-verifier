@@ -55,6 +55,17 @@ fn headline(a: &Assessment) {
     println!("Artifact binding:    {}", a.checks.artifact_binding.label());
     println!("Policy decision:     {}", a.checks.policy.label());
 
+    // Adapter checks follow the fixed four, so the core result reads the same
+    // whether or not an adapter ran. Labels are padded to the same column as
+    // the lines above, and the detail sits underneath rather than inline,
+    // because an adapter's reason is usually a sentence and not a word.
+    for check in &a.checks.adapter {
+        println!("{:<21}{}", format!("{}:", check.label), check.state.label());
+        if !check.detail.is_empty() {
+            println!("  {}", check.detail);
+        }
+    }
+
     // The distinction the verdict exists to make. A pass that never looked at
     // an artifact is a pass about a file, not about a deployment.
     if a.verdict == Verdict::StatementTransparent {

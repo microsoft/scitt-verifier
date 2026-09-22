@@ -35,7 +35,7 @@ the verdict, where it can be checked explicitly.
 
 ## Check states
 
-Each of the four checks reports one of four states. They are not
+Every check reports one of four states. They are not
 interchangeable, and the human output spells them out rather than using symbols.
 
 | State | Meaning |
@@ -52,6 +52,32 @@ established by a verified receipt (`pass`) or left open (`cannot-evaluate`).
 
 `not-checked` and `cannot-evaluate` are the pair most worth keeping apart. The
 first is an incomplete invocation; the second is a broken one.
+
+### Adapter checks
+
+Alongside the four core checks, `appraisal.checks.adapter` carries an ordered
+list of checks contributed by a selected adapter. The four core checks are
+fixed fields because every run has an answer for each of them; the adapter list
+is open, because only the selected adapter knows what it establishes.
+
+```json
+"checks": {
+  "statementSignature": "pass",
+  "receiptInclusion": "pass",
+  "artifactBinding": "not-checked",
+  "policy": "pass",
+  "adapter": []
+}
+```
+
+The key is **always present**, and empty when no adapter ran, so a consumer
+never has to tell a missing key from an empty list. Each entry carries a stable
+machine `name`, a human `label`, one of the four `state` values above, and a
+`detail` explaining what was established or why it could not be.
+
+An adapter reports checks; it does not report a verdict. Adapter results may
+narrow the verdict but never widen it, so an adapter cannot turn a failed core
+check, or evidence it could not gather, into a pass.
 
 ## Diagnostics
 
