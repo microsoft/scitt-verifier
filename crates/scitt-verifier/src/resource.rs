@@ -21,7 +21,7 @@
 
 #[cfg(feature = "adapter-mst-ledger")]
 use scitt_policy::ledger::Encoding;
-use scitt_policy::ledger::{BindLedgerPolicy, TrustInputs};
+use scitt_policy::ledger::{BindLedgerPolicy, LedgerTarget, TrustInputs};
 #[cfg(feature = "adapter-mst-ledger")]
 use scitt_receipt::base64::Alphabet;
 use scitt_receipt::Sign1;
@@ -119,6 +119,7 @@ pub fn appraise_saved_evidence(
     _statement: &Sign1,
     _bind: &BindLedgerPolicy,
     _trust: &TrustInputs,
+    _ledger: &LedgerTarget,
 ) -> ResourceAppraisal {
     // Not an error and not a failure: the question was asked and this binary
     // cannot answer it. Reported as `CannotEvaluate` so it exits 3 rather than
@@ -138,6 +139,7 @@ pub fn appraise_saved_evidence(
     statement: &Sign1,
     bind: &BindLedgerPolicy,
     trust: &TrustInputs,
+    ledger: &LedgerTarget,
 ) -> ResourceAppraisal {
     let Adapter::MstLedger = adapter;
 
@@ -207,6 +209,38 @@ pub fn appraise_saved_evidence(
             ))
         }
     };
+
+    // The policy names the ledger it is about. Until this check existed the
+    // name was recorded and never enforced, so a bundle captured from one
+    // service was appraised against a policy written for another and the
+    // report named the wrong subject throughout. A statement's execution
+    // policy is a claim about a particular deployment; comparing it to some
+    // other service's nodes answers a question nobody asked.
+    //
+    // Scope of the guarantee: `snapshot.json`'s `ledger` is collector-asserted
+    // and unsigned, so this catches the wrong bundle, not a forged one. The
+    // check that would survive an adversary is pinning the bundle's service
+    // certificate to the one the public identity service publishes for
+    // `ledger.host` — an online step this build does not take.
+    let expected = normalise_host(&ledger.host);
+    let found = normalise_host(&metadata.ledger);
+    if expected != found {
+        let mut appraisal = ResourceAppraisal::not_attempted(format!(
+            "the policy is about {}, but this evidence was collected from {}. The \
+             statement's execution policy describes one deployment; nothing can be \
+             concluded by holding a different service's nodes to it.",
+            ledger.host, metadata.ledger
+        ));
+        // A finding, not an inability: the comparison ran and disagreed. Named
+        // against identity binding because that is the check that asks which
+        // service the evidence belongs to.
+        for check in &mut appraisal.checks {
+            if check.name == "ledger-identity-binding" {
+                check.state = CheckState::Fail;
+            }
+        }
+        return appraisal;
+    }
 
     // The one requirement that can notice a node left out of the bundle
     // altogether. Coverage is over the nodes the evidence names, so without
@@ -284,6 +318,25 @@ pub fn appraise_saved_evidence(
     }
 }
 
+/// Reduce a hostname to a comparable form.
+///
+/// Hostnames are case-insensitive and may carry a trailing root dot, and a
+/// collector may reasonably have recorded a URL where the policy names a bare
+/// host. Normalising those away avoids refusing a bundle over spelling; it
+/// does not weaken the comparison, because everything it removes is a form
+/// that denotes the same host. Ports are deliberately *not* stripped: a
+/// different port is a different endpoint.
+#[cfg(feature = "adapter-mst-ledger")]
+fn normalise_host(raw: &str) -> String {
+    let host = raw.trim();
+    let host = host
+        .strip_prefix("https://")
+        .or_else(|| host.strip_prefix("http://"))
+        .unwrap_or(host);
+    let host = host.split('/').next().unwrap_or(host);
+    host.trim_end_matches('.').to_ascii_lowercase()
+}
+
 /// Translate policy into the adapter's typed requirements.
 #[cfg(feature = "adapter-mst-ledger")]
 fn requirements(
@@ -349,6 +402,41 @@ mod tests {
             assert!(!check.detail.is_empty());
         }
         assert!(a.checks.iter().any(|c| c.name == "cce-policy-host-data"));
+    }
+
+    /// Hostname spelling must not decide a security check.
+    ///
+    /// Everything normalised away denotes the same host, so removing it
+    /// cannot admit a different service. A port is left alone deliberately: a
+    /// different port is a different endpoint, not a different spelling.
+    #[cfg(feature = "adapter-mst-ledger")]
+    #[test]
+    fn host_comparison_ignores_spelling_but_not_identity() {
+        let canonical = normalise_host("ledger.confidential-ledger.azure.com");
+        for same in [
+            "LEDGER.Confidential-Ledger.Azure.Com",
+            "  ledger.confidential-ledger.azure.com  ",
+            "ledger.confidential-ledger.azure.com.",
+            "https://ledger.confidential-ledger.azure.com",
+            "https://ledger.confidential-ledger.azure.com/",
+        ] {
+            assert_eq!(
+                normalise_host(same),
+                canonical,
+                "{same} should compare equal"
+            );
+        }
+        for different in [
+            "other.confidential-ledger.azure.com",
+            "ledger.confidential-ledger.azure.com.evil.test",
+            "ledger.confidential-ledger.azure.com:8443",
+        ] {
+            assert_ne!(
+                normalise_host(different),
+                canonical,
+                "{different} must not compare equal"
+            );
+        }
     }
 
     /// The names must match the adapter's, in both build configurations.

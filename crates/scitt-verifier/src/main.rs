@@ -1544,13 +1544,16 @@ fn run_adapter(
         ));
     }
 
-    let (Some(bind), Some(trust_inputs)) = (
+    let (Some(bind), Some(trust_inputs), Some(target)) = (
         policy.assertions.bind_ledger_policy.as_ref(),
         policy.trust.as_ref(),
+        policy.ledger.as_ref(),
     ) else {
         return Some(resource::ResourceAppraisal::not_attempted(
-            "an adapter was requested, but the policy has no bindLedgerPolicy assertion \
-             and no trust section, so there is nothing to hold the evidence to",
+            "an adapter was requested, but the policy is missing one of the sections that \
+             hold the evidence to something: bindLedgerPolicy says which claim to compare, \
+             trust says what the nodes must satisfy, and ledger says which service the \
+             evidence must have come from",
         ));
     };
 
@@ -1569,6 +1572,7 @@ fn run_adapter(
         &statement,
         bind,
         trust_inputs,
+        target,
     ))
 }
 

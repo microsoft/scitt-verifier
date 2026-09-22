@@ -126,6 +126,13 @@ LEDGER EVIDENCE (mst-ledger adapter):
 Answers one question: does the execution policy embedded in this statement
 equal the policy the ledger's attested nodes are enforcing?
 
+The ledger under appraisal is the one named by `ledger.host` in the policy —
+which is usually *not* the transparency service that issued the receipt. A
+production transparency service notarises builds for many deployments; the
+statement describes one of them. The evidence bundle must have been collected
+from the ledger the policy names, and a bundle from anywhere else is refused
+rather than appraised.
+
 The target ledger, its trust inputs and the acceptance requirements come from
 the policy document — never from the command line. A flag can be edited in a
 pipeline definition to point at a ledger that would happily attest to its own

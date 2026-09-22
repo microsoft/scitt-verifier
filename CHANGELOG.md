@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+### The evidence must come from the ledger the policy names
+
+`ledger.host` was parsed, validated non-empty, and then never compared against
+anything. A bundle captured from one service was appraised against a policy
+written for another, and the whole report — scope notice included — named the
+subject the operator had asked about rather than the one the evidence came
+from.
+
+This is easy to get wrong in exactly the case the adapter exists for. A
+production transparency service notarises builds for many deployments, so the
+service that issued the receipt is usually *not* the service the statement
+describes. Pointing the adapter at the notary's own evidence produced a
+confident, wrong answer.
+
+The bundle's `ledger` is now compared against `ledger.host` before any node is
+appraised, and a mismatch fails the run. Hostnames are compared case-insensitively
+and tolerate a URL, a trailing root dot, or surrounding whitespace; a differing
+port is a differing endpoint and is not normalised away. A policy with no
+`ledger` section no longer runs the adapter at all.
+
+The comparison is against the collector's unsigned manifest, so it catches the
+wrong bundle, not a forged one. Pinning the bundle's service certificate to the
+one the public identity service publishes for that host is the adversarial
+form, and needs a network request this build does not make.
+
 ### Ledger findings have their own verdicts
 
 Adapter checks report on a service, not on the policy document, and the two

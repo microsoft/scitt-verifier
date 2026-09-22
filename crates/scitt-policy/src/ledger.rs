@@ -32,9 +32,16 @@ use serde::{Deserialize, Serialize};
 pub struct LedgerTarget {
     /// The ledger's hostname.
     ///
-    /// Recorded in the result so a decision can be traced to the service it
-    /// was about. It is not a trust input: nothing is fetched from it in this
-    /// build, and a hostname does not authenticate anything.
+    /// The service whose enforced policy is being appraised — normally *not*
+    /// the transparency service that issued the receipt, which notarises
+    /// builds for many deployments.
+    ///
+    /// Enforced, not merely recorded: an evidence bundle collected from any
+    /// other host is refused. That comparison is against the collector's own
+    /// unsigned manifest, so it catches the wrong bundle rather than a forged
+    /// one; pinning the bundle's service certificate to the one published for
+    /// this host would be the adversarial form, and needs a network request
+    /// this build does not make.
     pub host: String,
 }
 
