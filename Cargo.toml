@@ -28,6 +28,18 @@ authors = ["Microsoft Corporation"]
 # via git, which crates.io forbids. See docs/distribution.md.
 tav-cose = { package = "tee-attestation-verification-cose", git = "https://github.com/microsoft/TEE-Attestation-Verification.git", rev = "a52c499f64aeb5014c94c1faf5ac33c38a195280", default-features = false }
 tav-crypto = { package = "tee-attestation-verification-crypto", git = "https://github.com/microsoft/TEE-Attestation-Verification.git", rev = "a52c499f64aeb5014c94c1faf5ac33c38a195280", default-features = false }
+# SEV-SNP report and UVM endorsement verification, used only by the mst-ledger
+# adapter and only when that feature is on.
+#
+# Pinned to the same revision as the two above, which is not incidental: caci
+# depends on those same crates by path, so a divergent pin would compile two
+# copies of the crypto layer and silently verify against whichever one won.
+#
+# This revision is also the last one that offers `crypto_pure_rust`. Upstream
+# has since dropped it in favour of openssl/webcrypto/windows backends, so
+# advancing the pin means taking on a C toolchain — a cost to weigh
+# deliberately rather than absorb during a routine bump.
+tav-caci = { package = "tee-attestation-verification-caci", git = "https://github.com/microsoft/TEE-Attestation-Verification.git", rev = "a52c499f64aeb5014c94c1faf5ac33c38a195280", default-features = false }
 sha2 = { version = "0.10", default-features = false }
 
 # Size budget: the release binary is a deployment gate that ships in CI images.

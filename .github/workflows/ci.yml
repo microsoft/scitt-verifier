@@ -36,6 +36,12 @@ jobs:
       - run: cargo clippy --all-targets
       - run: cargo test --workspace
 
+      # The adapter is off by default, so the two steps above never compile a
+      # line of it. Without this, its code could stop building — or start
+      # failing its tests — and every job here would stay green.
+      - run: cargo clippy -p scitt-attest --features mst-ledger --all-targets
+      - run: cargo test -p scitt-attest --features mst-ledger
+
   boundary:
     name: Core boundary
     runs-on: ubuntu-latest

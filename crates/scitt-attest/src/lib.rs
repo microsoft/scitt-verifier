@@ -16,6 +16,8 @@
 
 pub mod bundle;
 pub mod error;
+#[cfg(feature = "mst-ledger")]
+mod snp;
 
 pub use bundle::{EvidenceBundle, NodeEvidence};
 pub use error::AppraisalError;
@@ -257,18 +259,174 @@ pub struct TcbFloor {
 /// the bytes that were accepted.
 ///
 /// Returns findings, never a verdict.
+#[cfg(not(feature = "mst-ledger"))]
 pub fn appraise(
     _bundle: &EvidenceBundle,
     _policy_digest: &[u8; 32],
     _requirements: &Requirements,
 ) -> Result<Appraisal, AppraisalError> {
-    // Not yet implemented. Reporting `CannotEvaluate` for every check is the
-    // correct answer while that is true, and is why `unevaluated` is the only
-    // constructor: there is no state of this crate in which unimplemented work
-    // reports a pass.
+    // Reporting `CannotEvaluate` for every check is the correct answer for a
+    // build that cannot appraise attestation, and is why `unevaluated` is the
+    // only constructor: there is no state of this crate in which absent
+    // functionality reports a pass.
     Ok(Appraisal::unevaluated(
-        "evidence appraisal is not implemented in this build",
+        "this build was compiled without the mst-ledger adapter, so no attestation \
+         evidence can be appraised",
     ))
+}
+
+/// Appraise a bundle of node evidence against a statement-derived digest.
+///
+/// `policy_digest` is the SHA-256 of the exact decoded execution policy bytes
+/// taken from the statement that already passed acceptance. It is a parameter
+/// rather than something derived here so that the bytes compared are provably
+/// the bytes that were accepted.
+///
+/// Every node in the bundle is assessed, and a node that fails does not stop
+/// the others being looked at: an operator fixing a ledger needs to know which
+/// nodes disagree, not merely that one did.
+///
+/// Returns findings, never a verdict.
+#[cfg(feature = "mst-ledger")]
+pub fn appraise(
+    bundle: &EvidenceBundle,
+    policy_digest: &[u8; 32],
+    requirements: &Requirements,
+) -> Result<Appraisal, AppraisalError> {
+    if bundle.nodes.is_empty() {
+        return Err(AppraisalError::EmptyBundle);
+    }
+
+    let mut appraisal = Appraisal::unevaluated("not assessed");
+    let mut verified = 0usize;
+    let mut matched = 0usize;
+    let mut failures: Vec<String> = Vec::new();
+
+    for node in &bundle.nodes {
+        match snp::verify_node(node, policy_digest, requirements) {
+            Ok(v) => {
+                verified += 1;
+                // The library already refused a mismatch, so reaching here
+                // means these are equal. Compared again anyway, because the
+                // alternative is reporting a match on the strength of an
+                // absent error, and this check is the entire point of the
+                // adapter.
+                let agrees = &v.host_data == policy_digest;
+                if agrees {
+                    matched += 1;
+                } else {
+                    failures.push(format!(
+                        "node {}: HOST_DATA {} does not equal the statement's policy digest {}",
+                        node.node_id,
+                        hex(&v.host_data),
+                        hex(policy_digest)
+                    ));
+                }
+                appraisal.nodes.push(NodeOutcome {
+                    node_id: node.node_id.clone(),
+                    // Not yet established: binding REPORT_DATA to the node
+                    // certificate, and that certificate to the service
+                    // identity, is separate work. Reported as unevaluated
+                    // rather than inferred from a successful attestation.
+                    identity_binding: CheckState::CannotEvaluate,
+                    attestation: CheckState::Pass,
+                    host_data_match: if agrees {
+                        CheckState::Pass
+                    } else {
+                        CheckState::Fail
+                    },
+                    detail: if agrees {
+                        format!("measurement {}", hex(&v.measurement))
+                    } else {
+                        "authenticated HOST_DATA does not match the statement".to_string()
+                    },
+                });
+            }
+            Err(why) => {
+                failures.push(format!("node {}: {why}", node.node_id));
+                appraisal.nodes.push(NodeOutcome {
+                    node_id: node.node_id.clone(),
+                    identity_binding: CheckState::CannotEvaluate,
+                    attestation: CheckState::Fail,
+                    // Not `Fail`: the comparison never happened. A node whose
+                    // report did not authenticate has not been shown to
+                    // disagree about the policy, and saying it did would be a
+                    // finding this crate did not make.
+                    host_data_match: CheckState::CannotEvaluate,
+                    detail: why.clone(),
+                });
+            }
+        }
+    }
+
+    let total = bundle.nodes.len();
+
+    appraisal.snp_uvm_validation = if verified == total {
+        Check::new(
+            CheckState::Pass,
+            format!("{total} node(s) authenticated against AMD and UVM collateral"),
+        )
+    } else {
+        Check::new(
+            CheckState::Fail,
+            format!(
+                "{verified} of {total} node(s) authenticated: {}",
+                failures.join("; ")
+            ),
+        )
+    };
+
+    appraisal.cce_policy_host_data = if verified == 0 {
+        Check::cannot_evaluate(
+            "no node's report authenticated, so no authenticated HOST_DATA exists to compare",
+        )
+    } else if matched == total {
+        Check::new(
+            CheckState::Pass,
+            format!("{matched}/{total} node(s) enforce the statement's policy digest"),
+        )
+    } else {
+        Check::new(
+            CheckState::Fail,
+            format!("{matched}/{total} node(s) agree with the statement's policy digest"),
+        )
+    };
+
+    appraisal.node_coverage = if verified == total {
+        Check::new(
+            CheckState::Pass,
+            format!("every node in the assessed snapshot ({total}) produced usable evidence"),
+        )
+    } else {
+        Check::new(
+            CheckState::Fail,
+            format!(
+                "{} of {total} node(s) produced no usable evidence",
+                total - verified
+            ),
+        )
+    };
+
+    // Deliberately left as it began. Binding each report's attested key to the
+    // service identity is not implemented, and an appraisal that inferred it
+    // from a valid attestation would accept a genuine SNP node that belongs to
+    // some other service entirely.
+    appraisal.ledger_identity_binding = Check::cannot_evaluate(
+        "binding a report's attested key to the ledger's service identity is not \
+         implemented in this build",
+    );
+
+    Ok(appraisal)
+}
+
+/// Lowercase hex, for reporting a digest an operator will compare by eye.
+#[cfg(feature = "mst-ledger")]
+fn hex(bytes: &[u8]) -> String {
+    use core::fmt::Write;
+    bytes.iter().fold(String::new(), |mut out, b| {
+        let _ = write!(out, "{b:02x}");
+        out
+    })
 }
 
 #[cfg(test)]
@@ -289,22 +447,108 @@ mod tests {
         assert!(!a.scoped_pass());
     }
 
-    /// The property the whole design rests on. If an unimplemented appraisal
-    /// could report a scoped pass, a gate would approve a deployment on the
-    /// strength of evidence nobody looked at.
+    /// An empty bundle must be refused, not appraised.
+    ///
+    /// This is the failure the whole design exists to prevent: zero nodes
+    /// assessed means zero mismatches found, which would otherwise read as
+    /// unanimous agreement.
     #[test]
-    fn the_unimplemented_entry_point_cannot_report_a_pass() {
+    fn an_empty_bundle_is_an_error_rather_than_a_unanimous_agreement() {
         let bundle = EvidenceBundle {
             service_certificate_pem: Vec::new(),
             nodes: Vec::new(),
         };
+        let result = appraise(&bundle, &[0u8; 32], &requirements());
+
+        #[cfg(feature = "mst-ledger")]
+        assert_eq!(result.unwrap_err(), AppraisalError::EmptyBundle);
+
+        // Without the adapter there is nothing to appraise at all, so the
+        // answer is every check unevaluated — and, critically, not a pass.
+        #[cfg(not(feature = "mst-ledger"))]
+        {
+            let a = result.expect("appraisal");
+            assert!(!a.scoped_pass());
+            assert_eq!(a.cce_policy_host_data.state, CheckState::CannotEvaluate);
+        }
+    }
+
+    /// A build without the adapter must say so, and must not pass.
+    #[cfg(not(feature = "mst-ledger"))]
+    #[test]
+    fn a_build_without_the_adapter_cannot_report_a_pass() {
+        let bundle = EvidenceBundle {
+            service_certificate_pem: Vec::new(),
+            nodes: vec![NodeEvidence {
+                node_id: "n".into(),
+                certificate_pem: Vec::new(),
+                snp_report: Vec::new(),
+                amd_endorsements: Vec::new(),
+                uvm_endorsement: Vec::new(),
+            }],
+        };
         let a = appraise(&bundle, &[0u8; 32], &requirements()).expect("appraisal");
         assert!(!a.scoped_pass());
+        for (_, _, check) in a.checks() {
+            assert_eq!(check.state, CheckState::CannotEvaluate);
+        }
+        assert!(a.cce_policy_host_data.detail.contains("mst-ledger"));
+    }
+
+    /// Evidence that cannot authenticate must not produce a HOST_DATA finding.
+    ///
+    /// A node whose report did not verify has not been shown to disagree about
+    /// the policy. Reporting `Fail` there would be a finding this crate did
+    /// not make, and would send an operator looking for a policy mismatch that
+    /// may not exist.
+    #[cfg(feature = "mst-ledger")]
+    #[test]
+    fn unusable_evidence_fails_attestation_without_claiming_a_policy_mismatch() {
+        let bundle = EvidenceBundle {
+            service_certificate_pem: Vec::new(),
+            nodes: vec![NodeEvidence {
+                node_id: "node-1".into(),
+                certificate_pem: Vec::new(),
+                snp_report: vec![0u8; 16],
+                amd_endorsements: vec![vec![1], vec![2], vec![3]],
+                uvm_endorsement: Vec::new(),
+            }],
+        };
+        let a = appraise(&bundle, &[0u8; 32], &requirements()).expect("appraisal");
+
+        assert!(!a.scoped_pass());
+        assert_eq!(a.snp_uvm_validation.state, CheckState::Fail);
+        assert_eq!(a.node_coverage.state, CheckState::Fail);
         assert_eq!(
             a.cce_policy_host_data.state,
             CheckState::CannotEvaluate,
-            "an unimplemented comparison must not claim a match"
+            "no authenticated HOST_DATA existed, so there was nothing to compare"
         );
+        assert_eq!(a.nodes.len(), 1);
+        assert_eq!(a.nodes[0].attestation, CheckState::Fail);
+        assert_eq!(a.nodes[0].host_data_match, CheckState::CannotEvaluate);
+    }
+
+    /// Identity binding is not implemented, and must not be inferred.
+    ///
+    /// A valid SNP report proves a genuine confidential VM; it does not prove
+    /// that VM belongs to the ledger being assessed.
+    #[cfg(feature = "mst-ledger")]
+    #[test]
+    fn identity_binding_is_never_inferred_from_a_valid_attestation() {
+        let bundle = EvidenceBundle {
+            service_certificate_pem: Vec::new(),
+            nodes: vec![NodeEvidence {
+                node_id: "node-1".into(),
+                certificate_pem: Vec::new(),
+                snp_report: vec![0u8; 16],
+                amd_endorsements: vec![vec![1], vec![2], vec![3]],
+                uvm_endorsement: Vec::new(),
+            }],
+        };
+        let a = appraise(&bundle, &[0u8; 32], &requirements()).expect("appraisal");
+        assert_eq!(a.ledger_identity_binding.state, CheckState::CannotEvaluate);
+        assert!(a.nodes[0].identity_binding == CheckState::CannotEvaluate);
     }
 
     /// These two are not pending work, and their reasons must say why rather
