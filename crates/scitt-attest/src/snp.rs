@@ -287,6 +287,33 @@ mod tests {
         assert!(err.contains("unknown CPU generation"), "{err}");
     }
 
+    /// The configured floor must land in the report's own field layout.
+    ///
+    /// `TcbFloor.reported_tcb` is a `u64` for the consumer's convenience, but
+    /// the report stores eight independent single-byte version numbers and the
+    /// comparison is componentwise. Getting the byte order wrong would not
+    /// error: it would scatter the configured versions across the wrong
+    /// fields, and compare a microcode floor against a bootloader number.
+    ///
+    /// The value below is a reported TCB observed on a live Genoa ledger node
+    /// (2026-09-22), decoded here through the library's own accessor. It pins
+    /// the little-endian choice to an external fact rather than restating
+    /// `to_le_bytes` back to itself.
+    #[test]
+    fn a_configured_floor_decodes_into_the_fields_the_report_uses() {
+        let floors = tcb_floor(&requirements(vec![TcbFloor {
+            generation: "genoa".into(),
+            reported_tcb: 0x5417_0000_0000_000a,
+        }]))
+        .unwrap();
+
+        let decoded = floors[0].1.as_milan_genoa();
+        assert_eq!(decoded.boot_loader, 10);
+        assert_eq!(decoded.tee, 0);
+        assert_eq!(decoded.snp, 23);
+        assert_eq!(decoded.microcode, 0x54);
+    }
+
     #[test]
     fn a_configured_floor_survives_translation() {
         let floors = tcb_floor(&requirements(vec![

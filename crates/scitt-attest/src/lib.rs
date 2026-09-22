@@ -238,7 +238,13 @@ pub struct Requirements {
     ///
     /// Per generation because the comparison is generation-aware and a floor
     /// pinned to one generation's value silently rejects nodes of another.
-    /// Observed `reported_tcb` was *not* uniform across a single ledger.
+    ///
+    /// A *floor*, not a pin, for a reason observed on a live three-node ledger
+    /// (2026-09-22): its nodes reported two different TCBs, and two different
+    /// launch measurements. A requirement demanding one exact value would have
+    /// rejected part of a healthy fleet. The comparison is componentwise and
+    /// refuses incomparable values, so the floor must be at or below every
+    /// node's version in every field.
     pub min_tcb: Vec<TcbFloor>,
 }
 
@@ -298,30 +304,16 @@ pub fn appraise(
     }
 
     let mut appraisal = Appraisal::unevaluated("not assessed");
-    let mut verified = 0usize;
-    let mut matched = 0usize;
-    let mut failures: Vec<String> = Vec::new();
 
     for node in &bundle.nodes {
         match snp::verify_node(node, policy_digest, requirements) {
             Ok(v) => {
-                verified += 1;
                 // The library already refused a mismatch, so reaching here
                 // means these are equal. Compared again anyway, because the
                 // alternative is reporting a match on the strength of an
                 // absent error, and this check is the entire point of the
                 // adapter.
                 let agrees = &v.host_data == policy_digest;
-                if agrees {
-                    matched += 1;
-                } else {
-                    failures.push(format!(
-                        "node {}: HOST_DATA {} does not equal the statement's policy digest {}",
-                        node.node_id,
-                        hex(&v.host_data),
-                        hex(policy_digest)
-                    ));
-                }
                 appraisal.nodes.push(NodeOutcome {
                     node_id: node.node_id.clone(),
                     // Not yet established: binding REPORT_DATA to the node
@@ -338,12 +330,19 @@ pub fn appraise(
                     detail: if agrees {
                         format!("measurement {}", hex(&v.measurement))
                     } else {
-                        "authenticated HOST_DATA does not match the statement".to_string()
+                        // The observed digest belongs here, not only in the
+                        // aggregate: an operator chasing a mismatch needs the
+                        // value the node is actually enforcing.
+                        format!(
+                            "authenticated HOST_DATA {} does not equal the statement's \
+                             policy digest {}",
+                            hex(&v.host_data),
+                            hex(policy_digest)
+                        )
                     },
                 });
             }
             Err(why) => {
-                failures.push(format!("node {}: {why}", node.node_id));
                 appraisal.nodes.push(NodeOutcome {
                     node_id: node.node_id.clone(),
                     identity_binding: CheckState::CannotEvaluate,
@@ -359,9 +358,87 @@ pub fn appraise(
         }
     }
 
-    let total = bundle.nodes.len();
+    let summary = aggregate(&appraisal.nodes);
+    appraisal.snp_uvm_validation = summary.snp_uvm_validation;
+    appraisal.cce_policy_host_data = summary.cce_policy_host_data;
+    appraisal.node_coverage = summary.node_coverage;
 
-    appraisal.snp_uvm_validation = if verified == total {
+    // Deliberately left as it began. Binding each report's attested key to the
+    // service identity is not implemented, and an appraisal that inferred it
+    // from a valid attestation would accept a genuine SNP node that belongs to
+    // some other service entirely.
+    appraisal.ledger_identity_binding = Check::cannot_evaluate(
+        "binding a report's attested key to the ledger's service identity is not \
+         implemented in this build",
+    );
+
+    Ok(appraisal)
+}
+
+/// The three fleet-wide checks derived from per-node findings.
+#[cfg(any(feature = "mst-ledger", test))]
+struct Aggregate {
+    snp_uvm_validation: Check,
+    cce_policy_host_data: Check,
+    node_coverage: Check,
+}
+
+/// Roll per-node findings up into the checks a caller gates on.
+///
+/// Separated from [`appraise`] and kept pure so the rules below can be tested
+/// against every combination of node findings, including ones real evidence
+/// cannot conveniently produce. It is compiled in non-adapter builds too, so
+/// the default test run still covers them.
+///
+/// Three rules here are deliberate and easy to get wrong:
+///
+/// 1. **Zero nodes establishes nothing.** Every counting rule below is of the
+///    form "all N agreed", which is vacuously true at N = 0. An empty slice
+///    would therefore report a clean pass having looked at nothing, so it is
+///    special-cased first. [`appraise`] already refuses an empty bundle; this
+///    is the same refusal at the layer that does the counting.
+/// 2. **A node that could not be assessed has not disagreed.** Nodes whose
+///    reports did not authenticate produce no `HOST_DATA` finding, so a run
+///    where the assessable nodes all agreed reports `CannotEvaluate`, not
+///    `Fail`. Both block a pass; only one of them sends an operator hunting a
+///    policy mismatch that was never observed.
+/// 3. **Incomplete coverage still blocks.** Rule 2 does not weaken the gate,
+///    because `node_coverage` fails whenever any node produced no usable
+///    evidence. The distinction is in what the report claims, not in what it
+///    permits.
+#[cfg(any(feature = "mst-ledger", test))]
+fn aggregate(outcomes: &[NodeOutcome]) -> Aggregate {
+    let total = outcomes.len();
+
+    if total == 0 {
+        let reason = "no node evidence was assessed, so nothing was established";
+        return Aggregate {
+            snp_uvm_validation: Check::cannot_evaluate(reason),
+            cce_policy_host_data: Check::cannot_evaluate(reason),
+            node_coverage: Check::cannot_evaluate(reason),
+        };
+    }
+
+    let verified = outcomes.iter().filter(|n| n.attestation.is_pass()).count();
+    let agreed = outcomes
+        .iter()
+        .filter(|n| n.host_data_match.is_pass())
+        .count();
+    let disagreed = outcomes
+        .iter()
+        .filter(|n| n.host_data_match == CheckState::Fail)
+        .count();
+
+    let detail_of = |f: &dyn Fn(&NodeOutcome) -> bool| {
+        outcomes
+            .iter()
+            .filter(|n| f(n))
+            .map(|n| format!("node {}: {}", n.node_id, n.detail))
+            .collect::<Vec<_>>()
+            .join("; ")
+    };
+
+    let snp_uvm_validation = if verified == total {
         Check::new(
             CheckState::Pass,
             format!("{total} node(s) authenticated against AMD and UVM collateral"),
@@ -371,28 +448,37 @@ pub fn appraise(
             CheckState::Fail,
             format!(
                 "{verified} of {total} node(s) authenticated: {}",
-                failures.join("; ")
+                detail_of(&|n: &NodeOutcome| !n.attestation.is_pass())
             ),
         )
     };
 
-    appraisal.cce_policy_host_data = if verified == 0 {
+    let cce_policy_host_data = if disagreed > 0 {
+        Check::new(
+            CheckState::Fail,
+            format!(
+                "{disagreed} of {total} node(s) enforce a different policy: {}",
+                detail_of(&|n: &NodeOutcome| n.host_data_match == CheckState::Fail)
+            ),
+        )
+    } else if verified == 0 {
         Check::cannot_evaluate(
             "no node's report authenticated, so no authenticated HOST_DATA exists to compare",
         )
-    } else if matched == total {
+    } else if agreed == total {
         Check::new(
             CheckState::Pass,
-            format!("{matched}/{total} node(s) enforce the statement's policy digest"),
+            format!("{agreed}/{total} node(s) enforce the statement's policy digest"),
         )
     } else {
-        Check::new(
-            CheckState::Fail,
-            format!("{matched}/{total} node(s) agree with the statement's policy digest"),
-        )
+        Check::cannot_evaluate(format!(
+            "{agreed} of {total} node(s) enforce the statement's policy digest and none \
+             disagree, but {} node(s) could not be assessed",
+            total - verified
+        ))
     };
 
-    appraisal.node_coverage = if verified == total {
+    let node_coverage = if verified == total {
         Check::new(
             CheckState::Pass,
             format!("every node in the assessed snapshot ({total}) produced usable evidence"),
@@ -407,16 +493,11 @@ pub fn appraise(
         )
     };
 
-    // Deliberately left as it began. Binding each report's attested key to the
-    // service identity is not implemented, and an appraisal that inferred it
-    // from a valid attestation would accept a genuine SNP node that belongs to
-    // some other service entirely.
-    appraisal.ledger_identity_binding = Check::cannot_evaluate(
-        "binding a report's attested key to the ledger's service identity is not \
-         implemented in this build",
-    );
-
-    Ok(appraisal)
+    Aggregate {
+        snp_uvm_validation,
+        cce_policy_host_data,
+        node_coverage,
+    }
 }
 
 /// Lowercase hex, for reporting a digest an operator will compare by eye.
@@ -610,6 +691,172 @@ mod tests {
                 generation: "genoa".into(),
                 reported_tcb: 0x5417_0000_0000_000a,
             }],
+        }
+    }
+
+    // ---- aggregation rules -------------------------------------------------
+    //
+    // These exercise the fleet-wide roll-up directly. Doing it through real
+    // evidence would need a bundle per case, each containing genuinely signed
+    // SNP reports that cannot be synthesised, and several of the cases below
+    // (a partially assessable ledger, a single dissenting node) are precisely
+    // the ones a healthy ledger will not produce on demand.
+
+    fn outcome(node_id: &str, attestation: CheckState, host: CheckState) -> NodeOutcome {
+        NodeOutcome {
+            node_id: node_id.into(),
+            identity_binding: CheckState::CannotEvaluate,
+            attestation,
+            host_data_match: host,
+            detail: format!("{node_id} detail"),
+        }
+    }
+
+    fn agreeing(node_id: &str) -> NodeOutcome {
+        outcome(node_id, CheckState::Pass, CheckState::Pass)
+    }
+
+    fn dissenting(node_id: &str) -> NodeOutcome {
+        outcome(node_id, CheckState::Pass, CheckState::Fail)
+    }
+
+    fn unusable(node_id: &str) -> NodeOutcome {
+        outcome(node_id, CheckState::Fail, CheckState::CannotEvaluate)
+    }
+
+    /// Nothing assessed must establish nothing.
+    ///
+    /// Every rule in the roll-up counts agreement, and "all of them agreed" is
+    /// vacuously true of an empty set. Without the explicit guard this returns
+    /// three passes having examined no evidence at all.
+    #[test]
+    fn aggregating_zero_nodes_establishes_nothing() {
+        let a = aggregate(&[]);
+        for check in [
+            &a.snp_uvm_validation,
+            &a.cce_policy_host_data,
+            &a.node_coverage,
+        ] {
+            assert_eq!(check.state, CheckState::CannotEvaluate);
+            assert!(check.detail.contains("no node evidence"));
+        }
+    }
+
+    #[test]
+    fn a_fully_agreeing_fleet_passes_every_aggregate_check() {
+        let a = aggregate(&[agreeing("a"), agreeing("b"), agreeing("c")]);
+        assert_eq!(a.snp_uvm_validation.state, CheckState::Pass);
+        assert_eq!(a.cce_policy_host_data.state, CheckState::Pass);
+        assert_eq!(a.node_coverage.state, CheckState::Pass);
+        assert!(a.cce_policy_host_data.detail.contains("3/3"));
+    }
+
+    /// One authenticated node enforcing a different policy is a real finding,
+    /// and the node responsible has to be named — "2/3 agree" leaves an
+    /// operator to work out which box to go and look at.
+    #[test]
+    fn a_single_dissenting_node_fails_the_comparison_and_is_named() {
+        let a = aggregate(&[agreeing("a"), dissenting("b"), agreeing("c")]);
+        assert_eq!(a.cce_policy_host_data.state, CheckState::Fail);
+        assert!(a.cce_policy_host_data.detail.contains("node b"));
+        assert!(
+            !a.cce_policy_host_data.detail.contains("node a"),
+            "only the dissenting node should be reported as dissenting"
+        );
+        assert_eq!(
+            a.snp_uvm_validation.state,
+            CheckState::Pass,
+            "a node that disagreed about policy still authenticated"
+        );
+        assert_eq!(a.node_coverage.state, CheckState::Pass);
+    }
+
+    /// The honesty rule: unassessable nodes are not dissenters.
+    ///
+    /// Every node that could be assessed agreed, so no disagreement was
+    /// observed and the comparison must not claim one. It still cannot pass —
+    /// the nodes that did not report might enforce anything — so the state is
+    /// `CannotEvaluate`, and coverage carries the failure.
+    #[test]
+    fn nodes_that_could_not_be_assessed_are_not_reported_as_disagreeing() {
+        let a = aggregate(&[agreeing("a"), unusable("b"), agreeing("c")]);
+        assert_eq!(
+            a.cce_policy_host_data.state,
+            CheckState::CannotEvaluate,
+            "no node was observed enforcing a different policy"
+        );
+        assert!(a.cce_policy_host_data.detail.contains("none"));
+        assert_eq!(a.node_coverage.state, CheckState::Fail);
+        assert!(a.node_coverage.detail.contains("1 of 3"));
+        assert_eq!(a.snp_uvm_validation.state, CheckState::Fail);
+        assert!(a.snp_uvm_validation.detail.contains("node b"));
+    }
+
+    #[test]
+    fn a_fleet_that_wholly_failed_to_authenticate_compares_nothing() {
+        let a = aggregate(&[unusable("a"), unusable("b")]);
+        assert_eq!(a.cce_policy_host_data.state, CheckState::CannotEvaluate);
+        assert!(a.cce_policy_host_data.detail.contains("no node's report"));
+        assert_eq!(a.node_coverage.state, CheckState::Fail);
+    }
+
+    /// An observed disagreement outranks incomplete coverage.
+    ///
+    /// Both block, so the gate is unaffected; the difference is that a node
+    /// demonstrably enforcing the wrong policy is the more urgent thing to put
+    /// in front of an operator, and must not be masked by a nearby node that
+    /// merely failed to respond.
+    #[test]
+    fn an_observed_disagreement_outranks_unassessable_nodes() {
+        let a = aggregate(&[dissenting("a"), unusable("b")]);
+        assert_eq!(a.cce_policy_host_data.state, CheckState::Fail);
+        assert!(a.cce_policy_host_data.detail.contains("node a"));
+    }
+
+    /// Exhaustive: across every arrangement of three nodes, the aggregate
+    /// checks all pass if and only if every node authenticated *and* agreed.
+    ///
+    /// Written as an enumeration rather than a handful of examples because
+    /// this is the property the deployment gate rests on, and a rule added
+    /// later that admits some other combination would be a silent weakening.
+    #[test]
+    fn every_aggregate_check_passes_only_when_every_node_authenticated_and_agreed() {
+        let kinds = [agreeing("n"), dissenting("n"), unusable("n")];
+        for i in 0..3usize {
+            for j in 0..3usize {
+                for k in 0..3usize {
+                    let nodes = [kinds[i].clone(), kinds[j].clone(), kinds[k].clone()];
+                    let a = aggregate(&nodes);
+                    let all_pass = a.snp_uvm_validation.state.is_pass()
+                        && a.cce_policy_host_data.state.is_pass()
+                        && a.node_coverage.state.is_pass();
+                    let every_node_agreed = [i, j, k].iter().all(|&x| x == 0);
+                    assert_eq!(
+                        all_pass, every_node_agreed,
+                        "combination {i}{j}{k} disagreed with the gate rule"
+                    );
+                }
+            }
+        }
+    }
+
+    /// No aggregate check may ever be silently absent: each must carry a
+    /// reason an operator can act on, in every combination.
+    #[test]
+    fn every_aggregate_outcome_carries_a_reason() {
+        let kinds = [agreeing("n"), dissenting("n"), unusable("n")];
+        for a in &kinds {
+            for b in &kinds {
+                let agg = aggregate(&[a.clone(), b.clone()]);
+                for check in [
+                    &agg.snp_uvm_validation,
+                    &agg.cce_policy_host_data,
+                    &agg.node_coverage,
+                ] {
+                    assert!(!check.detail.is_empty());
+                    assert_ne!(check.state, CheckState::NotChecked);
+                }
+            }
         }
     }
 }
