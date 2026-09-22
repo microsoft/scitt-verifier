@@ -42,6 +42,18 @@ pub enum Verdict {
     StatementTransparent,
     Untrusted,
     PolicyFailed,
+    /// An adapter's requirement about the ledger was not met.
+    ///
+    /// Its own verdict rather than a reuse of `PolicyFailed` because the two
+    /// name different subjects, and the human report prints both: a run whose
+    /// policy assertions all passed but whose ledger check failed would
+    /// otherwise read `STOP policy-failed` above `Policy decision: pass`,
+    /// which invites the reader to distrust the report rather than the ledger.
+    ///
+    /// Deliberately the same exit code as `PolicyFailed`: to a pipeline, "the
+    /// ledger does not enforce the policy you demanded" and "the signer is not
+    /// the one you demanded" call for the same stop.
+    ResourceFailed,
     CannotEvaluate,
     UsageError,
 }
@@ -54,6 +66,7 @@ impl Verdict {
             Verdict::StatementTransparent => "statement-transparent",
             Verdict::Untrusted => "untrusted",
             Verdict::PolicyFailed => "policy-failed",
+            Verdict::ResourceFailed => "resource-failed",
             Verdict::CannotEvaluate => "cannot-evaluate",
             Verdict::UsageError => "usage-error",
         }
@@ -64,7 +77,7 @@ impl Verdict {
             Verdict::ArtifactTransparent | Verdict::StatementTransparent => 0,
             Verdict::ResourceTransparent => 0,
             Verdict::Untrusted => 1,
-            Verdict::PolicyFailed => 2,
+            Verdict::PolicyFailed | Verdict::ResourceFailed => 2,
             Verdict::CannotEvaluate => 3,
             Verdict::UsageError => 4,
         }
@@ -512,6 +525,7 @@ mod tests {
         for v in [
             Verdict::Untrusted,
             Verdict::PolicyFailed,
+            Verdict::ResourceFailed,
             Verdict::CannotEvaluate,
             Verdict::UsageError,
         ] {

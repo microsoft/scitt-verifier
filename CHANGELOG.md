@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Ledger findings have their own verdicts
+
+Adapter checks report on a service, not on the policy document, and the two
+were previously collapsed. A run whose policy assertions all passed but whose
+ledger check failed printed `STOP policy-failed` above `Policy decision: pass`,
+which reads as a contradiction and invites the reader to distrust the report
+rather than the ledger.
+
+There are now two verdicts for adapter outcomes: `resource-transparent`
+(exit 0) when the appraised nodes enforce the policy the statement embeds, and
+`resource-failed` (exit 2) when a requirement about the ledger was not met.
+`resource-failed` keeps `policy-failed`'s exit code, because to a pipeline
+"the ledger does not enforce the policy you demanded" and "the signer is not
+the one you demanded" call for the same stop — but the headline now names the
+check that actually stopped the run.
+
 ### The conformance corpus can be regenerated
 
 Every fixture was signed against one person's test ledger. When that ledger was

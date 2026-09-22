@@ -56,7 +56,7 @@ inputs:
 
 outputs:
   verdict:
-    description: 'artifact-transparent | statement-transparent | untrusted | policy-failed | cannot-evaluate | usage-error'
+    description: 'artifact-transparent | statement-transparent | resource-transparent | untrusted | policy-failed | resource-failed | cannot-evaluate | usage-error'
     value: ${{ steps.verify.outputs.verdict }}
   exit-code:
     description: 'The raw exit code from the verifier.'

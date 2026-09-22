@@ -177,8 +177,10 @@ and is the next substantial piece of verification work.
 |---|---|---|---|
 | 0 | `artifact-transparent` | The artifact you supplied was registered | Proceed |
 | 0 | `statement-transparent` | Transparent, but no artifact was checked | Proceed only if you meant to skip binding |
+| 0 | `resource-transparent` | The appraised ledger nodes enforce the statement's policy | Proceed; note the scope of the claim |
 | 1 | `untrusted` | Statement signature or artifact binding failed | **Stop.** Treat as an incident |
 | 2 | `policy-failed` | Genuine, but your policy rejected it | Review the policy or the artifact |
+| 2 | `resource-failed` | Sound statement, but a ledger requirement was not met | Investigate the named check before deploying |
 | 3 | `cannot-evaluate` | Could not be evaluated | Refresh trust material; do not proceed |
 | 4 | `usage-error` | Usage or input error | Fix the invocation |
 

@@ -11,8 +11,10 @@ so changing one is a breaking change and moves the record's `schemaVersion`.
 |---|---|---|
 | `artifact-transparent` | 0 | The artifact you supplied is the one that was registered, the receipt proves inclusion, and your policy is satisfied. |
 | `statement-transparent` | 0 | The statement is transparent and your policy is satisfied — but **no artifact was checked**. |
+| `resource-transparent` | 0 | The statement is transparent, and the appraised ledger nodes enforce the execution policy it embeds. Always scoped to the nodes assessed. |
 | `untrusted` | 1 | The statement's own signature or the artifact binding did not hold. Do not deploy. |
 | `policy-failed` | 2 | Everything is cryptographically sound; your own rules rejected it. |
+| `resource-failed` | 2 | The statement is sound, but an adapter's requirement about the ledger was not met. |
 | `cannot-evaluate` | 3 | The tool could not answer the question. **This is not a pass.** |
 | `usage-error` | 4 | The invocation or its inputs were wrong. Nothing was established. |
 

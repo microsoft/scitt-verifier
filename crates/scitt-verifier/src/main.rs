@@ -1248,6 +1248,9 @@ fn choose_primary(verdict: Verdict, diagnostics: &[Diagnostic]) -> Option<Diagno
             Category::SignerIdentity,
         ],
         Verdict::PolicyFailed => &[Category::Policy],
+        // An adapter's findings are binding-category: the question is what the
+        // named service enforces, not whether the policy document was met.
+        Verdict::ResourceFailed => &[Category::Binding],
         Verdict::CannotEvaluate => &[Category::Trust, Category::Unsupported, Category::Policy],
         _ => &[Category::Input, Category::Internal],
     };
@@ -1591,10 +1594,9 @@ fn narrow_for_resource(
         Verdict::ResourceTransparent
     } else if resource.checks.iter().any(|c| c.state == CheckState::Fail) {
         // The relying party's own requirement about the ledger was not met.
-        // Deliberately the same exit code as any other policy failure: to a
-        // pipeline, "the ledger does not enforce the policy you demanded" and
-        // "the signer is not the one you demanded" call for the same stop.
-        Verdict::PolicyFailed
+        // Same exit code as any other policy failure, but its own verdict, so
+        // the headline names the check that actually stopped the run.
+        Verdict::ResourceFailed
     } else {
         // Asked and could not find out. Not a failure of the ledger and not a
         // pass either: exiting 0 here would let a gate succeed on a check that
@@ -1712,6 +1714,7 @@ mod resource_tests {
         let failures = [
             Verdict::Untrusted,
             Verdict::PolicyFailed,
+            Verdict::ResourceFailed,
             Verdict::CannotEvaluate,
             Verdict::UsageError,
         ];
@@ -1761,8 +1764,13 @@ mod resource_tests {
             Verdict::StatementTransparent,
             Some(&appraisal(&states, false)),
         );
-        assert_eq!(after, Verdict::PolicyFailed);
+        assert_eq!(after, Verdict::ResourceFailed);
         assert_eq!(after.exit_code(), 2);
+        assert_ne!(
+            after,
+            Verdict::PolicyFailed,
+            "a ledger finding must not be reported as a policy-document failure"
+        );
     }
 
     /// A scoped pass is its own verdict, not the artifact one.
