@@ -17,6 +17,8 @@
 pub mod bundle;
 pub mod error;
 #[cfg(feature = "mst-ledger")]
+mod identity;
+#[cfg(feature = "mst-ledger")]
 mod snp;
 
 pub use bundle::{EvidenceBundle, NodeEvidence};
@@ -330,46 +332,88 @@ pub fn appraise(
 
     let mut appraisal = Appraisal::unevaluated("not assessed");
 
+    // Parsed once, before any node is looked at. A bundle with no service
+    // certificate cannot establish the binding for any node, and saying so
+    // once is clearer than repeating the same sentence per node. It is not an
+    // error: a bundle recorded before this check existed is incomplete, not
+    // malformed, and the remaining checks are still worth reporting.
+    let service_der = parse_service_certificate(&bundle.service_certificate_pem);
+
     for node in &bundle.nodes {
         match snp::verify_node(node, policy_digest, requirements) {
             Ok(v) => {
-                // The library already refused a mismatch, so reaching here
-                // means these are equal. Compared again anyway, because the
-                // alternative is reporting a match on the strength of an
-                // absent error, and this check is the entire point of the
-                // adapter.
+                // Compared here as well as inside the library, because when
+                // the library rejected the node this crate still has to say
+                // *which* requirement it failed — and because reporting a
+                // match on the strength of an absent error would be claiming
+                // a comparison nobody made. This check is the whole point of
+                // the adapter, so it is made directly.
                 let agrees = &v.host_data == policy_digest;
+                // Assessed even when the node failed a requirement. The
+                // report's signature and AMD chain verified, so `REPORT_DATA`
+                // is authentic regardless, and whether a rejected node belongs
+                // to this ledger is exactly what an operator needs to know: a
+                // stranger's machine and your own ledger running the wrong
+                // policy call for opposite responses.
+                let (binding_state, binding_detail) =
+                    assess_binding(node, service_der.as_deref(), &v.report_data);
+                // One `detail` serves every check's aggregate message, so it
+                // has to describe whichever finding a reader would be chasing.
+                // Ordered by how far it sets them back: a node that is not
+                // this ledger's makes its policy agreement beside the point,
+                // so that is said first even when `HOST_DATA` matched.
+                let detail = if binding_state == CheckState::Fail {
+                    binding_detail
+                } else if !agrees {
+                    // The observed digest belongs here, not only in the
+                    // aggregate: an operator chasing a mismatch needs the
+                    // value the node is actually enforcing.
+                    format!(
+                        "authenticated HOST_DATA {} does not equal the statement's \
+                         policy digest {}",
+                        hex(&v.host_data),
+                        hex(policy_digest)
+                    )
+                } else if let Some(why) = &v.requirement_failure {
+                    why.clone()
+                } else if binding_state == CheckState::CannotEvaluate {
+                    binding_detail
+                } else {
+                    format!("measurement {}", hex(&v.measurement))
+                };
                 appraisal.nodes.push(NodeOutcome {
                     node_id: node.node_id.clone(),
-                    // Not yet established: binding REPORT_DATA to the node
-                    // certificate, and that certificate to the service
-                    // identity, is separate work. Reported as unevaluated
-                    // rather than inferred from a successful attestation.
-                    identity_binding: CheckState::CannotEvaluate,
-                    attestation: CheckState::Pass,
+                    identity_binding: binding_state,
+                    // The report authenticated — that much is settled by
+                    // reaching this arm. What remains is whether the node met
+                    // the *platform* requirements, and the library stops at
+                    // the first unmet requirement without saying which. When
+                    // `HOST_DATA` already disagrees, that mismatch alone
+                    // explains the rejection, so the platform requirements may
+                    // never have been reached and reporting them as failed
+                    // would accuse the node of something unobserved. The
+                    // policy mismatch is reported by its own check, which
+                    // fails, so nothing is let through by saying so honestly.
+                    attestation: match (&v.requirement_failure, agrees) {
+                        (None, _) => CheckState::Pass,
+                        (Some(_), true) => CheckState::Fail,
+                        (Some(_), false) => CheckState::CannotEvaluate,
+                    },
                     host_data_match: if agrees {
                         CheckState::Pass
                     } else {
                         CheckState::Fail
                     },
-                    detail: if agrees {
-                        format!("measurement {}", hex(&v.measurement))
-                    } else {
-                        // The observed digest belongs here, not only in the
-                        // aggregate: an operator chasing a mismatch needs the
-                        // value the node is actually enforcing.
-                        format!(
-                            "authenticated HOST_DATA {} does not equal the statement's \
-                             policy digest {}",
-                            hex(&v.host_data),
-                            hex(policy_digest)
-                        )
-                    },
+                    detail,
                 });
             }
             Err(why) => {
                 appraisal.nodes.push(NodeOutcome {
                     node_id: node.node_id.clone(),
+                    // Nothing in this report is authenticated, so its
+                    // `REPORT_DATA` cannot be compared to anything. A node
+                    // whose report did not verify has not been shown to belong
+                    // to this ledger or to any other.
                     identity_binding: CheckState::CannotEvaluate,
                     attestation: CheckState::Fail,
                     // Not `Fail`: the comparison never happened. A node whose
@@ -384,25 +428,86 @@ pub fn appraise(
     }
 
     let summary = aggregate(&appraisal.nodes);
+    appraisal.ledger_identity_binding = summary.ledger_identity_binding;
     appraisal.snp_uvm_validation = summary.snp_uvm_validation;
     appraisal.cce_policy_host_data = summary.cce_policy_host_data;
     appraisal.node_coverage = summary.node_coverage;
 
-    // Deliberately left as it began. Binding each report's attested key to the
-    // service identity is not implemented, and an appraisal that inferred it
-    // from a valid attestation would accept a genuine SNP node that belongs to
-    // some other service entirely.
-    appraisal.ledger_identity_binding = Check::cannot_evaluate(
-        "binding a report's attested key to the ledger's service identity is not \
-         implemented in this build",
-    );
-
     Ok(appraisal)
+}
+
+/// Read the bundle's service identity certificate, or say why it cannot be.
+///
+/// Returns `Err` with a sentence fit to show an operator rather than an
+/// [`AppraisalError`]: a bundle recorded without a service certificate is
+/// incomplete, not malformed, and the attestation findings it *does* contain
+/// are still worth reporting alongside an honest "identity was not assessed".
+#[cfg(feature = "mst-ledger")]
+fn parse_service_certificate(pem: &[u8]) -> Result<Vec<u8>, String> {
+    if pem.is_empty() {
+        return Err(
+            "the bundle contains no service identity certificate, so no node can \
+                    be tied to a ledger"
+                .to_string(),
+        );
+    }
+    let text = core::str::from_utf8(pem)
+        .map_err(|_| "the service identity certificate is not valid UTF-8 PEM".to_string())?;
+    let mut certs = scitt_receipt::chain::parse_pem_certificates(text)
+        .map_err(|e| format!("the service identity certificate could not be parsed: {e}"))?;
+    if certs.len() != 1 {
+        // Which certificate is the trust anchor decides what every node
+        // binding means, so an ambiguous file is refused rather than guessed.
+        return Err(format!(
+            "expected exactly one service identity certificate, found {}",
+            certs.len()
+        ));
+    }
+    Ok(certs.remove(0))
+}
+
+/// Assess one node's binding to the ledger, given the parsed service anchor.
+///
+/// Never returns `Pass` on absent evidence. A missing certificate is
+/// [`CheckState::CannotEvaluate`] — the question was not asked — whereas a
+/// certificate that is present and does not bind is [`CheckState::Fail`],
+/// because it was asked and answered no.
+#[cfg(feature = "mst-ledger")]
+fn assess_binding(
+    node: &NodeEvidence,
+    service_der: Result<&[u8], &String>,
+    report_data: &[u8; 64],
+) -> (CheckState, String) {
+    let service_der = match service_der {
+        Ok(der) => der,
+        Err(why) => return (CheckState::CannotEvaluate, why.clone()),
+    };
+    if node.certificate_pem.is_empty() {
+        return (
+            CheckState::CannotEvaluate,
+            "this node's certificate was not recorded, so the key its report attests \
+             cannot be tied to the ledger. CCF nodes rotate, so a certificate omitted at \
+             collection time cannot be fetched afterwards."
+                .to_string(),
+        );
+    }
+    match identity::verify_binding(&node.certificate_pem, service_der, report_data) {
+        Ok(details) => (
+            CheckState::Pass,
+            format!(
+                "attested key certified by the service identity; node certificate valid \
+                 {} to {} (validity not enforced)",
+                details.not_before, details.not_after
+            ),
+        ),
+        Err(why) => (CheckState::Fail, why),
+    }
 }
 
 /// The three fleet-wide checks derived from per-node findings.
 #[cfg(any(feature = "mst-ledger", test))]
 struct Aggregate {
+    ledger_identity_binding: Check,
     snp_uvm_validation: Check,
     cce_policy_host_data: Check,
     node_coverage: Check,
@@ -438,6 +543,7 @@ fn aggregate(outcomes: &[NodeOutcome]) -> Aggregate {
     if total == 0 {
         let reason = "no node evidence was assessed, so nothing was established";
         return Aggregate {
+            ledger_identity_binding: Check::cannot_evaluate(reason),
             snp_uvm_validation: Check::cannot_evaluate(reason),
             cce_policy_host_data: Check::cannot_evaluate(reason),
             node_coverage: Check::cannot_evaluate(reason),
@@ -463,19 +569,36 @@ fn aggregate(outcomes: &[NodeOutcome]) -> Aggregate {
             .join("; ")
     };
 
-    let snp_uvm_validation = if verified == total {
+    // Three-way, like the identity rule and for the same reason: a node that
+    // failed a platform requirement is a different finding from one whose
+    // platform requirements were never reached because its policy digest
+    // already disagreed. Reporting the second as a failure would accuse the
+    // node of something nobody observed, and would send an operator looking
+    // for a TCB problem when the ledger had simply been upgraded.
+    let platform_failed = outcomes
+        .iter()
+        .filter(|n| n.attestation == CheckState::Fail)
+        .count();
+
+    let snp_uvm_validation = if platform_failed > 0 {
+        Check::new(
+            CheckState::Fail,
+            format!(
+                "{platform_failed} of {total} node(s) did not authenticate or did not meet the \
+                 platform requirements: {}",
+                detail_of(&|n: &NodeOutcome| n.attestation == CheckState::Fail)
+            ),
+        )
+    } else if verified == total {
         Check::new(
             CheckState::Pass,
             format!("{total} node(s) authenticated against AMD and UVM collateral"),
         )
     } else {
-        Check::new(
-            CheckState::Fail,
-            format!(
-                "{verified} of {total} node(s) authenticated: {}",
-                detail_of(&|n: &NodeOutcome| !n.attestation.is_pass())
-            ),
-        )
+        Check::cannot_evaluate(format!(
+            "{verified} of {total} node(s) met the platform requirements; for the rest the \
+             policy digest already disagreed, so the platform requirements were not reached"
+        ))
     };
 
     let cce_policy_host_data = if disagreed > 0 {
@@ -486,7 +609,11 @@ fn aggregate(outcomes: &[NodeOutcome]) -> Aggregate {
                 detail_of(&|n: &NodeOutcome| n.host_data_match == CheckState::Fail)
             ),
         )
-    } else if verified == 0 {
+    } else if agreed == 0 {
+        // `agreed`, not `verified`: a node may produce an authenticated report
+        // and still be rejected on a platform requirement, and its `HOST_DATA`
+        // is comparable either way. Keying this on acceptance would report
+        // "nothing to compare" about digests that were in fact compared.
         Check::cannot_evaluate(
             "no node's report authenticated, so no authenticated HOST_DATA exists to compare",
         )
@@ -499,11 +626,62 @@ fn aggregate(outcomes: &[NodeOutcome]) -> Aggregate {
         Check::cannot_evaluate(format!(
             "{agreed} of {total} node(s) enforce the statement's policy digest and none \
              disagree, but {} node(s) could not be assessed",
-            total - verified
+            total - agreed
         ))
     };
 
-    let node_coverage = if verified == total {
+    // Same shape as the rules above, and for the same reasons: a node that
+    // disagrees is a failure, a node that could not be assessed leaves the
+    // question open, and "all of them agreed" is only meaningful because the
+    // zero-node case was refused first. A mixture is `CannotEvaluate` rather
+    // than a partial pass — if one node in a fleet cannot be shown to belong
+    // to this ledger, the operator has not learned that this ledger enforces
+    // the policy, only that some machine somewhere does.
+    let bound = outcomes
+        .iter()
+        .filter(|n| n.identity_binding.is_pass())
+        .count();
+    let unbound = outcomes
+        .iter()
+        .filter(|n| n.identity_binding == CheckState::Fail)
+        .count();
+
+    let ledger_identity_binding = if unbound > 0 {
+        Check::new(
+            CheckState::Fail,
+            format!(
+                "{unbound} of {total} node(s) could not be tied to the ledger's service \
+                 identity: {}",
+                detail_of(&|n: &NodeOutcome| n.identity_binding == CheckState::Fail)
+            ),
+        )
+    } else if bound == total {
+        Check::new(
+            CheckState::Pass,
+            format!(
+                "{bound}/{total} node(s) attest a key certified by the ledger's service \
+                 identity"
+            ),
+        )
+    } else {
+        Check::cannot_evaluate(format!(
+            "{bound} of {total} node(s) were tied to the ledger's service identity and none \
+             contradicted it, but {} could not be assessed",
+            total - bound
+        ))
+    };
+
+    // "Usable evidence" means an authenticated report was obtained, which is
+    // not the same as the node being acceptable. A node whose report verified
+    // and which is enforcing the wrong policy has produced perfectly usable
+    // evidence — of a problem. Counting it as a coverage gap would report the
+    // snapshot as incomplete when it was in fact complete and damning.
+    let assessable = outcomes
+        .iter()
+        .filter(|n| n.host_data_match != CheckState::CannotEvaluate)
+        .count();
+
+    let node_coverage = if assessable == total {
         Check::new(
             CheckState::Pass,
             format!("every node in the assessed snapshot ({total}) produced usable evidence"),
@@ -513,12 +691,13 @@ fn aggregate(outcomes: &[NodeOutcome]) -> Aggregate {
             CheckState::Fail,
             format!(
                 "{} of {total} node(s) produced no usable evidence",
-                total - verified
+                total - assessable
             ),
         )
     };
 
     Aggregate {
+        ledger_identity_binding,
         snp_uvm_validation,
         cce_policy_host_data,
         node_coverage,
@@ -802,6 +981,7 @@ mod tests {
     fn aggregating_zero_nodes_establishes_nothing() {
         let a = aggregate(&[]);
         for check in [
+            &a.ledger_identity_binding,
             &a.snp_uvm_validation,
             &a.cce_policy_host_data,
             &a.node_coverage,
@@ -809,6 +989,67 @@ mod tests {
             assert_eq!(check.state, CheckState::CannotEvaluate);
             assert!(check.detail.contains("no node evidence"));
         }
+    }
+
+    fn bound(node_id: &str) -> NodeOutcome {
+        NodeOutcome {
+            identity_binding: CheckState::Pass,
+            ..agreeing(node_id)
+        }
+    }
+
+    #[test]
+    fn identity_passes_only_when_every_node_is_bound() {
+        let a = aggregate(&[bound("a"), bound("b")]);
+        assert_eq!(a.ledger_identity_binding.state, CheckState::Pass);
+        assert!(a.ledger_identity_binding.detail.contains("2/2"));
+    }
+
+    /// One node that cannot be tied to this ledger is a failure, not a
+    /// partial pass. An operator has not learned that *their* ledger enforces
+    /// the policy while a machine of unknown provenance sits in the fleet.
+    #[test]
+    fn one_unbound_node_fails_identity_and_is_named() {
+        let mut stranger = bound("b");
+        stranger.identity_binding = CheckState::Fail;
+        let a = aggregate(&[bound("a"), stranger]);
+        assert_eq!(a.ledger_identity_binding.state, CheckState::Fail);
+        assert!(a.ledger_identity_binding.detail.contains("node b"));
+    }
+
+    /// A bundle that recorded no certificates leaves the question unasked.
+    /// It must never read as a pass — that is the whole failure this check
+    /// exists to prevent.
+    #[test]
+    fn identity_is_cannot_evaluate_when_nothing_was_assessed() {
+        let a = aggregate(&[agreeing("a"), agreeing("b")]);
+        assert_eq!(a.ledger_identity_binding.state, CheckState::CannotEvaluate);
+    }
+
+    /// A node whose report verified but whose policy digest disagrees has not
+    /// been shown to fail a *platform* requirement: the library stops at the
+    /// first unmet requirement, so the platform checks may never have run.
+    /// Reporting a failure there would send an operator hunting a TCB problem
+    /// when the ledger had simply been upgraded.
+    #[test]
+    fn a_policy_mismatch_is_not_reported_as_a_platform_failure() {
+        let node = outcome("a", CheckState::CannotEvaluate, CheckState::Fail);
+        let a = aggregate(&[node]);
+        assert_eq!(a.snp_uvm_validation.state, CheckState::CannotEvaluate);
+        assert_eq!(a.cce_policy_host_data.state, CheckState::Fail);
+    }
+
+    /// Coverage asks whether evidence was obtained, not whether it was liked.
+    /// A node enforcing the wrong policy produced entirely usable evidence —
+    /// of a problem — and calling the snapshot incomplete would hide that.
+    #[test]
+    fn an_unaccepted_but_authenticated_node_still_counts_as_covered() {
+        let node = outcome("a", CheckState::CannotEvaluate, CheckState::Fail);
+        assert_eq!(aggregate(&[node]).node_coverage.state, CheckState::Pass);
+        assert_eq!(
+            aggregate(&[unusable("a")]).node_coverage.state,
+            CheckState::Fail
+        );
     }
 
     #[test]

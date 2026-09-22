@@ -34,6 +34,13 @@ scitt-receipt = { path = "../scitt-receipt", default-features = false }
 # cannot appraise attestation, and is why the unevaluated path is not merely a
 # placeholder.
 tav-caci = { workspace = true, optional = true }
+# The crypto backend, used directly to verify a CCF node certificate's ECDSA
+# signature. `scitt-receipt::chain` cannot: the pinned X.509 parser recognises
+# only RSA signature algorithms and reports every ECDSA-signed certificate as
+# uncheckable, while CCF signs its service and node certificates with P-384.
+# The raw signature primitives handle ECDSA, so the certificate is taken apart
+# and verified through those instead.
+tav-crypto = { workspace = true }
 
 [features]
 # Matches every other crate here. A crate that defaulted to no backend would
@@ -44,5 +51,5 @@ default = ["crypto_pure_rust"]
 # Turns on real appraisal. Named for the adapter rather than for the library
 # behind it, so the flag a consumer sets describes what they get.
 mst-ledger = ["dep:tav-caci"]
-crypto_pure_rust = ["scitt-receipt/crypto_pure_rust", "tav-caci?/crypto_pure_rust"]
-crypto_openssl = ["scitt-receipt/crypto_openssl", "tav-caci?/crypto_openssl"]
+crypto_pure_rust = ["scitt-receipt/crypto_pure_rust", "tav-caci?/crypto_pure_rust", "tav-crypto/crypto_pure_rust"]
+crypto_openssl = ["scitt-receipt/crypto_openssl", "tav-caci?/crypto_openssl", "tav-crypto/crypto_openssl"]

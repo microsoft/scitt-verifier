@@ -29,13 +29,35 @@ use tav_caci::{synchronous as tav, AciError};
 /// The AMD endorsement chain length the library requires, as `[vcek, ask, ark]`.
 const AMD_ENDORSEMENT_COUNT: usize = 3;
 
-/// What one node's evidence established once every stage passed.
+/// What one node's evidence established.
+///
+/// Reaching this struct means the report's signature, its AMD chain, and the
+/// UVM endorsement all authenticated. It does *not* mean the node met the
+/// consumer's requirements — see [`Self::requirement_failure`]. The two are
+/// separated because the fields below are trustworthy either way: they came
+/// out of a report whose signature verified, so they can be reported even when
+/// the node is being rejected. Collapsing the two would throw away the
+/// authenticated `REPORT_DATA` and `HOST_DATA` of every rejected node, and
+/// leave an operator told only that "something did not authenticate" when the
+/// truth is "these are certainly your ledger's nodes, and they are enforcing a
+/// different policy".
 #[derive(Debug)]
 pub(crate) struct VerifiedNode {
     /// The authenticated policy digest the node reports it is enforcing.
     pub host_data: [u8; 32],
     /// The authenticated launch measurement.
     pub measurement: [u8; 48],
+    /// The authenticated `REPORT_DATA`, whose first 32 bytes CCF sets to
+    /// `sha256(SubjectPublicKeyInfo)` of the node's own key.
+    ///
+    /// Carried out of verification rather than re-read from the raw report so
+    /// that the bytes the identity binding compares are provably the bytes
+    /// whose signature and AMD chain verified.
+    pub report_data: [u8; 64],
+    /// Why the node failed the consumer's requirements, if it did.
+    ///
+    /// `None` means every configured requirement was met.
+    pub requirement_failure: Option<String>,
 }
 
 /// Run the three staged verifications for one node.
@@ -87,7 +109,12 @@ pub(crate) fn verify_node(
     // Stage 3: platform requirements, plus the library's own HOST_DATA check.
     // The report is `Copy`, so passing it by value here leaves it usable for
     // the reporting below — no second verification pass is needed.
-    tav::verify_caci_attestation(
+    //
+    // Its failure is returned alongside the authenticated report rather than
+    // in place of it. Everything this function has established so far is a
+    // fact about a signed report, and stays true whether or not the consumer
+    // is willing to accept the node.
+    let requirement_failure = tav::verify_caci_attestation(
         report,
         minimum_tcb,
         vec![*policy_digest],
@@ -95,16 +122,19 @@ pub(crate) fn verify_node(
         &requirements.uvm_feed,
         requirements.min_uvm_svn,
     )
-    .map_err(|e| {
+    .err()
+    .map(|e| {
         format!(
             "node did not meet the configured requirements: {}",
             describe(&e)
         )
-    })?;
+    });
 
     Ok(VerifiedNode {
         host_data: report.host_data,
         measurement: report.measurement,
+        report_data: report.report_data,
+        requirement_failure,
     })
 }
 
