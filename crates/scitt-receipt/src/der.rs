@@ -317,6 +317,54 @@ pub fn parse_signature_algorithm_oid(der: &[u8]) -> Result<String> {
     decode_oid(oid).ok_or_else(malformed)
 }
 
+/// The exact `TBSCertificate` bytes the signature was made over, paired with
+/// the signature itself.
+///
+/// Both are returned as borrowed slices of the original encoding, never
+/// re-encoded. A signature covers the bytes the issuer actually signed, and
+/// any re-encoding — a different length form, a dropped default — would change
+/// them and turn a genuine certificate into an invalid one.
+///
+/// The signature is returned as the contents of the `BIT STRING` with its
+/// unused-bits octet removed, which for every signature algorithm in use is
+/// the DER the verifier expects. A non-zero unused-bit count is refused rather
+/// than silently stripped: it is not a valid signature encoding, and guessing
+/// at the intent of one would be inventing input.
+pub fn tbs_and_signature(der: &[u8]) -> Result<(&[u8], &[u8])> {
+    let malformed = || Error::TrustMaterial("certificate structure could not be read".into());
+
+    // Certificate ::= SEQUENCE { tbsCertificate, signatureAlgorithm, signature }
+    let (0x30, certificate, _) = read_tlv(der).ok_or_else(malformed)? else {
+        return Err(malformed());
+    };
+    let (0x30, _tbs_contents, after_tbs) = read_tlv(certificate).ok_or_else(malformed)? else {
+        return Err(malformed());
+    };
+    // The signed bytes are the whole TLV, header included, not its contents.
+    // `read_tlv` hands back the contents and the remainder, so the element is
+    // what lies between them.
+    let tbs_len = certificate
+        .len()
+        .checked_sub(after_tbs.len())
+        .ok_or_else(malformed)?;
+    let tbs = certificate.get(..tbs_len).ok_or_else(malformed)?;
+
+    let (0x30, _algorithm, after_algorithm) = read_tlv(after_tbs).ok_or_else(malformed)? else {
+        return Err(malformed());
+    };
+    let (0x03, signature_bits, _) = read_tlv(after_algorithm).ok_or_else(malformed)? else {
+        return Err(malformed());
+    };
+    let (unused, signature) = signature_bits.split_first().ok_or_else(malformed)?;
+    if *unused != 0 {
+        return Err(Error::TrustMaterial(
+            "certificate signature is not a whole number of octets".into(),
+        ));
+    }
+
+    Ok((tbs, signature))
+}
+
 /// Decode an X.509 `Time`, which is a CHOICE of two encodings.
 ///
 /// UTCTime carries a two-digit year, and RFC 5280 §4.1.2.5.1 fixes the pivot:
@@ -720,6 +768,48 @@ mod validity_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The TBS bytes must be the exact encoded element, header included, and
+    /// must sit where the certificate's own bytes say they do.
+    ///
+    /// Built by hand rather than taken from a real certificate so the expected
+    /// boundaries are stated independently of the parser under test: a fixture
+    /// would only show that the function agrees with itself about where the
+    /// element ends.
+    #[test]
+    fn tbs_and_signature_return_the_exact_encoded_elements() {
+        let tbs = [0x30u8, 0x02, 0xAA, 0xBB];
+        let algorithm = [0x30u8, 0x01, 0x01];
+        // BIT STRING: zero unused bits, then the signature.
+        let signature = [0x03u8, 0x03, 0x00, 0xC1, 0xC2];
+        let body = [tbs.as_slice(), &algorithm, &signature].concat();
+        let cert = [&[0x30u8, body.len() as u8], body.as_slice()].concat();
+
+        let (got_tbs, got_sig) = tbs_and_signature(&cert).unwrap();
+        assert_eq!(got_tbs, tbs, "the signed bytes include the TLV header");
+        assert_eq!(got_sig, [0xC1, 0xC2], "the unused-bits octet is removed");
+    }
+
+    /// A signature that is not a whole number of octets is refused rather than
+    /// silently trimmed. It is not a valid encoding, and guessing at the
+    /// intent would mean verifying bytes nobody wrote.
+    #[test]
+    fn a_partial_octet_signature_is_refused() {
+        let body = [
+            [0x30u8, 0x00].as_slice(),
+            &[0x30, 0x00],
+            &[0x03, 0x02, 0x03, 0xF8],
+        ]
+        .concat();
+        let cert = [&[0x30u8, body.len() as u8], body.as_slice()].concat();
+        assert!(tbs_and_signature(&cert).is_err());
+    }
+
+    #[test]
+    fn a_truncated_certificate_is_refused() {
+        assert!(tbs_and_signature(&[0x30, 0x02, 0x30]).is_err());
+        assert!(tbs_and_signature(&[]).is_err());
+    }
 
     #[test]
     fn p256_spki_has_expected_prefix_and_length() {
