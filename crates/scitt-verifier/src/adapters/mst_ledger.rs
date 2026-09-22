@@ -27,6 +27,8 @@ use scitt_receipt::base64::Alphabet;
 use scitt_receipt::Sign1;
 
 use super::{AdapterAssessment, EvidenceSource};
+#[cfg(feature = "adapter-mst-ledger")]
+use crate::outcome::AdapterFinding;
 use crate::outcome::{AdapterCheck, CheckState};
 
 pub fn not_attempted(reason: impl Into<String>) -> AdapterAssessment {
@@ -42,6 +44,7 @@ pub fn not_attempted(reason: impl Into<String>) -> AdapterAssessment {
         .collect();
     AdapterAssessment {
         checks,
+        findings: Vec::new(),
         required_checks: required_checks(),
         scope: "no evidence was appraised".to_string(),
         notes: vec![reason],
@@ -268,6 +271,7 @@ pub fn appraise_evidence(
         })
         .collect();
 
+    let findings = node_findings(&appraisal.nodes);
     for node in &appraisal.nodes {
         if !node.attestation.is_pass() || !node.host_data_match.is_pass() {
             notes.push(format!(
@@ -315,10 +319,43 @@ pub fn appraise_evidence(
 
     AdapterAssessment {
         checks,
+        findings,
         required_checks: required_checks(),
         scope,
         notes,
     }
+}
+
+#[cfg(feature = "adapter-mst-ledger")]
+fn node_findings(nodes: &[scitt_adapter_mst_ledger::NodeOutcome]) -> Vec<AdapterFinding> {
+    let mut findings = Vec::with_capacity(nodes.len() * 3);
+    for node in nodes {
+        findings.push(AdapterFinding {
+            check: "ledger-identity-binding".into(),
+            subject: node.node_id.clone(),
+            state: map_state(node.identity_binding),
+            detail: node.detail.clone(),
+            expected: None,
+            observed: None,
+        });
+        findings.push(AdapterFinding {
+            check: "snp-uvm-validation".into(),
+            subject: node.node_id.clone(),
+            state: map_state(node.attestation),
+            detail: node.detail.clone(),
+            expected: None,
+            observed: None,
+        });
+        findings.push(AdapterFinding {
+            check: "cce-policy-host-data".into(),
+            subject: node.node_id.clone(),
+            state: map_state(node.host_data_match),
+            detail: node.detail.clone(),
+            expected: node.expected_policy_digest.clone(),
+            observed: node.observed_host_data.clone(),
+        });
+    }
+    findings
 }
 
 /// Reduce a hostname to a comparable form.
@@ -457,5 +494,27 @@ mod tests {
                 "connection-binding",
             ]
         );
+    }
+
+    #[cfg(feature = "adapter-mst-ledger")]
+    #[test]
+    fn node_policy_findings_keep_expected_and_observed_digests() {
+        let findings = node_findings(&[scitt_adapter_mst_ledger::NodeOutcome {
+            node_id: "node-a".into(),
+            identity_binding: scitt_adapter_mst_ledger::CheckState::Pass,
+            attestation: scitt_adapter_mst_ledger::CheckState::Pass,
+            host_data_match: scitt_adapter_mst_ledger::CheckState::Fail,
+            expected_policy_digest: Some("expected".into()),
+            observed_host_data: Some("observed".into()),
+            detail: "different commitments".into(),
+        }]);
+        let policy = findings
+            .iter()
+            .find(|finding| finding.check == "cce-policy-host-data")
+            .unwrap();
+        assert_eq!(policy.subject, "node-a");
+        assert_eq!(policy.state, CheckState::Fail);
+        assert_eq!(policy.expected.as_deref(), Some("expected"));
+        assert_eq!(policy.observed.as_deref(), Some("observed"));
     }
 }

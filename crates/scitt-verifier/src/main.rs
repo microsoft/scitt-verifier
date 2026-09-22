@@ -7,25 +7,28 @@
 mod adapters;
 mod cli;
 mod decode;
+mod display;
 mod inspect_json;
 mod online;
 mod outcome;
+mod progress;
 mod record;
 mod report;
 
 use cli::{BindingMode, Command, Format, TrustSource, VerifyArgs};
 use outcome::{
-    Acquisition, Assessment, Binding, BindingResult, Category, CheckState, Checks, Diagnostic, Gap,
-    Severity, Trust, Verdict,
+    Acquisition, AdapterCheck, Assessment, Binding, BindingResult, Category, CheckState, Checks,
+    Diagnostic, Gap, Severity, Trust, Verdict,
 };
 use scitt_policy::{Outcome as AssertionOutcome, Policy, PolicyDecision};
 use scitt_receipt::binding::{
     Binding as CoreBinding, BindingMode as CoreBindingMode, BindingReason as CoreBindingReason,
 };
 use scitt_receipt::{
-    chain::Outcome as ChainOutcome, verify_statement_with, LedgerKeySet, Sign1, StatementFacts,
-    VerifyOptions,
+    chain::Outcome as ChainOutcome, verify_statement_with, KeyLookup, LedgerKeySet, Sign1,
+    StatementFacts, VerifyOptions,
 };
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -54,7 +57,14 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Command::Inspect(args) => ExitCode::from(run_inspect(&args)),
-        Command::Verify(args) => ExitCode::from(run_verify(&args).exit_code()),
+        Command::Verify(args) => {
+            let stdout = std::io::stdout();
+            let color = stdout.is_terminal()
+                && std::env::var_os("NO_COLOR").is_none()
+                && std::env::var("TERM").map_or(true, |term| term != "dumb");
+            let mut stdout = stdout.lock();
+            ExitCode::from(run_verify(&args, &mut stdout, color).exit_code())
+        }
     }
 }
 
@@ -164,11 +174,23 @@ fn run_inspect(args: &cli::InspectArgs) -> u8 {
         },
     }
 }
-fn run_verify(args: &VerifyArgs) -> Verdict {
+fn run_verify(args: &VerifyArgs, out: &mut impl std::io::Write, color: bool) -> Verdict {
     let now = args.now.unwrap_or_else(wall_clock);
 
-    let assessment = evaluate(args, now);
-    emit(args, assessment, now)
+    let assessment = match args.format {
+        Format::Text => {
+            let mut progress = progress::Text::new(out, color);
+            let assessment = evaluate(args, now, &mut progress);
+            emit_assessment_summary(&assessment, &mut progress);
+            let _ = progress.finish();
+            assessment
+        }
+        Format::Json => {
+            let mut progress = progress::Noop;
+            evaluate(args, now, &mut progress)
+        }
+    };
+    emit(args, assessment, now, out, color)
 }
 
 /// The real clock, in Unix seconds.
@@ -186,17 +208,30 @@ fn wall_clock() -> i64 {
         .unwrap_or(0)
 }
 
-/// Run the checks. Never prints, never writes, never exits.
+/// Run the checks. Never writes persistent output and never exits.
 ///
 /// Keeping this free of side effects is what makes the "always emit evidence"
 /// guarantee cheap: there is exactly one return type, so there is exactly one
-/// place that has to know how to serialise a partial result.
-fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
+/// place that has to know how to serialise a partial result. Progress events
+/// describe boundaries already crossed; they do not influence the assessment.
+fn evaluate(args: &VerifyArgs, now: i64, progress: &mut dyn progress::Sink) -> Assessment {
     let trust = Trust::unsigned_key_set();
+    progress.emit(progress::Event::stage(
+        progress::Stage::Inputs,
+        progress::State::Started,
+        format!("statement {}", args.statement.display()),
+    ));
 
     let statement_bytes = match read(&args.statement) {
         Ok(b) => b,
         Err(e) => {
+            progress.emit(progress::Event::finding(
+                progress::Stage::Inputs,
+                "statement",
+                None,
+                progress::State::Fail,
+                e.clone(),
+            ));
             return Assessment::incomplete(
                 Verdict::UsageError,
                 trust,
@@ -207,12 +242,19 @@ fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
                     "Check the --statement path and that the file was produced by the build.",
                 ),
                 gaps(args, None, None),
-            )
+            );
         }
     };
     let policy_bytes = match read(&args.policy) {
         Ok(b) => b,
         Err(e) => {
+            progress.emit(progress::Event::finding(
+                progress::Stage::Inputs,
+                "policy",
+                None,
+                progress::State::Fail,
+                e.clone(),
+            ));
             return Assessment::incomplete(
                 Verdict::UsageError,
                 trust,
@@ -223,13 +265,20 @@ fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
                     "Check the --policy path.",
                 ),
                 gaps(args, None, None),
-            )
+            );
         }
     };
 
     let policy = match Policy::from_json(&policy_bytes) {
         Ok(p) => p,
         Err(e) => {
+            progress.emit(progress::Event::finding(
+                progress::Stage::Inputs,
+                "policy",
+                None,
+                progress::State::Fail,
+                e.clone(),
+            ));
             return Assessment::incomplete(
                 Verdict::UsageError,
                 trust,
@@ -240,11 +289,18 @@ fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
                     "Fix the policy document. A policy this tool cannot parse is a policy nobody is enforcing.",
                 ),
                 gaps(args, None, None),
-            )
+            );
         }
     };
 
     if let Err(reason) = adapters::validate_request(args.adapter, &policy) {
+        progress.emit(progress::Event::finding(
+            progress::Stage::Inputs,
+            "adapter",
+            None,
+            progress::State::Fail,
+            reason.clone(),
+        ));
         return Assessment::incomplete(
             Verdict::UsageError,
             trust,
@@ -265,25 +321,91 @@ fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
     let options = match verify_options(args) {
         Ok(o) => o,
         Err(d) => {
-            return Assessment::incomplete(Verdict::UsageError, trust, d, gaps(args, None, None))
+            progress.emit(progress::Event::finding(
+                progress::Stage::Inputs,
+                "trusted-roots",
+                None,
+                progress::State::Fail,
+                d.message.clone(),
+            ));
+            return Assessment::incomplete(Verdict::UsageError, trust, d, gaps(args, None, None));
         }
     };
+    progress.emit(progress::Event::finding(
+        progress::Stage::Inputs,
+        "policy",
+        None,
+        progress::State::Done,
+        format!("{} v{}", policy.policy_id, policy.policy_version),
+    ));
 
     // Trust material is resolved after the policy because the policy is what
     // decides where it may come from. Reading it earlier would mean the online
     // path had to either re-order itself or fetch before knowing what is
     // allowed, and only one of those is safe.
-    let resolved = match resolve_trust(args, &policy, &statement_bytes, &options) {
+    progress.emit(progress::Event::stage(
+        progress::Stage::Statement,
+        progress::State::Started,
+        "checking the signature and receipt inclusion",
+    ));
+    let resolved = match resolve_trust(args, &policy, &statement_bytes, &options, progress) {
         Ok(r) => r,
-        Err(a) => return *a,
+        Err(a) => {
+            let state = if a.checks.statement_signature != CheckState::NotChecked {
+                progress_state(a.checks.statement_signature)
+            } else if a.verdict == Verdict::UsageError {
+                progress::State::NotRun
+            } else {
+                progress::State::CannotEvaluate
+            };
+            progress.emit(progress::Event::stage(
+                progress::Stage::Statement,
+                state,
+                a.primary
+                    .as_ref()
+                    .map(|diagnostic| diagnostic.message.clone())
+                    .unwrap_or_else(|| "statement verification did not complete".into()),
+            ));
+            return *a;
+        }
     };
     let trust = resolved.trust;
     let facts = resolved.facts;
     let acquisition_diagnostics = resolved.diagnostics;
+    emit_statement_progress(&facts, progress);
+    emit_receipt_progress(&facts, progress);
+    let statement_state = if signature_state(&facts) == CheckState::Pass
+        && receipt_state(&facts) == CheckState::Pass
+    {
+        progress::State::Pass
+    } else if signature_state(&facts) == CheckState::Fail {
+        progress::State::Fail
+    } else {
+        progress::State::CannotEvaluate
+    };
+    progress.emit(progress::Event::stage(
+        progress::Stage::Statement,
+        statement_state,
+        format!(
+            "signature {}; receipt inclusion {}",
+            signature_state(&facts).as_str(),
+            receipt_state(&facts).as_str()
+        ),
+    ));
 
+    progress.emit(progress::Event::stage(
+        progress::Stage::ArtifactBinding,
+        progress::State::Started,
+        "checking the selected binding mode",
+    ));
     let binding = match check_binding(args, &statement_bytes) {
         Ok(b) => b,
         Err(e) => {
+            progress.emit(progress::Event::stage(
+                progress::Stage::ArtifactBinding,
+                progress::State::CannotEvaluate,
+                e.clone(),
+            ));
             let mut a = Assessment::incomplete(
                 Verdict::UsageError,
                 trust,
@@ -313,8 +435,32 @@ fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
             return a;
         }
     };
+    progress.emit(progress::Event::stage(
+        progress::Stage::ArtifactBinding,
+        progress_state(binding.state()),
+        binding.detail.clone(),
+    ));
 
+    progress.emit(progress::Event::stage(
+        progress::Stage::Policy,
+        progress::State::Started,
+        format!("evaluating {} v{}", policy.policy_id, policy.policy_version),
+    ));
     let decision = policy.evaluate_statement(&facts, now);
+    for result in &decision.results {
+        progress.emit(progress::Event::finding(
+            progress::Stage::Policy,
+            result.name.clone(),
+            None,
+            assertion_progress_state(result.outcome),
+            result.detail.clone(),
+        ));
+    }
+    progress.emit(progress::Event::stage(
+        progress::Stage::Policy,
+        progress_state(policy_state(&decision)),
+        format!("{} assertion(s) evaluated", decision.results.len()),
+    ));
     let verdict = decide(
         &facts,
         &binding,
@@ -326,7 +472,64 @@ fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
     // The adapter runs only after the statement has been accepted and the
     // policy has ruled on it. Appraising node evidence against a statement
     // nobody has authenticated would compare a number to another number.
-    let resource = run_adapter(args, &policy, &statement_bytes, verdict);
+    let resource = if let Some(adapter) = args.adapter {
+        progress.emit(progress::Event::stage(
+            progress::Stage::Adapter,
+            progress::State::Started,
+            format!("running {}", adapter.as_str()),
+        ));
+        let resource = run_adapter(args, &policy, &statement_bytes, verdict);
+        if let Some(result) = &resource {
+            for finding in &result.findings {
+                progress.emit(progress::Event::finding_with_values(
+                    progress::Stage::Adapter,
+                    finding.check.clone(),
+                    Some(finding.subject.clone()),
+                    progress_state(finding.state),
+                    finding.detail.clone(),
+                    finding.expected.clone(),
+                    finding.observed.clone(),
+                ));
+            }
+            let state = if result.scoped_pass() {
+                progress::State::Pass
+            } else if result
+                .checks
+                .iter()
+                .any(|check| check.state == CheckState::Fail)
+            {
+                progress::State::Fail
+            } else {
+                progress::State::CannotEvaluate
+            };
+            // The aggregate checks, not only the per-node findings. An
+            // appraisal that stopped before reaching any node produces no
+            // findings at all, so without these the transcript closed on a
+            // bare state and named no reason — the reader was told the
+            // appraisal failed and had to scroll to the verdict to learn
+            // why it had not run.
+            for (check, detail) in result.checks.iter().zip(collapsed_details(&result.checks)) {
+                progress.emit(progress::Event::finding(
+                    progress::Stage::Adapter,
+                    check.name.clone(),
+                    None,
+                    progress_state(check.state),
+                    detail,
+                ));
+            }
+            progress.emit(progress::Event::stage(
+                progress::Stage::Adapter,
+                state,
+                // Labelled, because the scope is a statement about what the
+                // result covers and reads as a description of the outcome
+                // when it stands alone.
+                format!("scope: {}", result.scope),
+            ));
+        }
+        resource
+    } else {
+        None
+    };
 
     let checks = Checks {
         statement_signature: signature_state(&facts),
@@ -374,6 +577,10 @@ fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
         primary,
         diagnostics,
         checks,
+        adapter_findings: resource
+            .as_ref()
+            .map(|result| result.findings.clone())
+            .unwrap_or_default(),
         not_checked: gaps(args, Some(&facts), Some(&decision)),
         trust,
         facts: Some(facts),
@@ -406,12 +613,18 @@ fn resolve_trust(
     policy: &Policy,
     statement_bytes: &[u8],
     options: &VerifyOptions,
+    progress: &mut dyn progress::Sink,
 ) -> Result<Resolved, Box<Assessment>> {
     match &args.trust {
         TrustSource::Local(path) => resolve_local(args, path, statement_bytes, options),
-        TrustSource::Online { ledger } => {
-            resolve_online(args, policy, statement_bytes, ledger.as_deref(), options)
-        }
+        TrustSource::Online { ledger } => resolve_online(
+            args,
+            policy,
+            statement_bytes,
+            ledger.as_deref(),
+            options,
+            progress,
+        ),
     }
 }
 
@@ -513,6 +726,7 @@ fn resolve_online(
     statement_bytes: &[u8],
     ledger: Option<&str>,
     options: &VerifyOptions,
+    progress: &mut dyn progress::Sink,
 ) -> Result<Resolved, Box<Assessment>> {
     // Parsed before anything is selected, so a statement this tool cannot read
     // never causes a request. Without this the failure is silent: discovery
@@ -532,12 +746,17 @@ fn resolve_online(
     // Selection runs first and completely. Nothing below this point can widen
     // what it chose, and nothing above it has touched the network.
     let candidates = online::candidate_issuers(statement_bytes);
-    let selected =
-        match online::select(policy, &candidates, ledger) {
-            online::Selection::Ready(list) => list,
-            // A misconfigured run is the operator's to fix, and saying anything
-            // about the artifact on the strength of it would be inventing a result.
-            online::Selection::Refused(why) => return Err(Box::new(Assessment::incomplete(
+    let selected = match online::select(policy, &candidates, ledger) {
+        online::Selection::Ready(list) => list,
+        // A misconfigured run is the operator's to fix, and saying anything
+        // about the artifact on the strength of it would be inventing a result.
+        online::Selection::Refused(why) => {
+            progress.emit(progress::Event::stage(
+                progress::Stage::ReceiptKeys,
+                progress::State::NotRun,
+                why.clone(),
+            ));
+            return Err(Box::new(Assessment::incomplete(
                 Verdict::UsageError,
                 Trust::no_key_set(),
                 Diagnostic::error(
@@ -547,35 +766,50 @@ fn resolve_online(
                     "Set assertions.issuer in the policy to the transparency services you accept.",
                 ),
                 gaps(args, None, None),
-            ))),
-            // Nothing to ask. This is not an error: it is a statement whose
-            // receipts point somewhere this policy does not accept. The normal
-            // verdict path turns that into cannot-evaluate, which is what it is.
-            online::Selection::Nothing(why) => {
-                let trust = Trust::no_key_set();
-                let facts = verify_or_fail(args, statement_bytes, &[], trust.clone(), options)?;
-                return Ok(Resolved {
-                    facts,
-                    trust,
-                    diagnostics: vec![Diagnostic::warning(
-                        "NoLedgerSelected",
-                        Category::Trust,
-                        why.clone(),
-                        "Add the service the receipt names to assertions.issuer if you accept it.",
-                    )],
-                    acquisition: Some(Acquisition {
-                        selected: Vec::new(),
-                        acquired: Vec::new(),
-                        failed: Vec::new(),
-                        not_attempted: Some(why),
-                    }),
-                });
-            }
-        };
+            )));
+        }
+        // Nothing to ask. This is not an error: it is a statement whose
+        // receipts point somewhere this policy does not accept. The normal
+        // verdict path turns that into cannot-evaluate, which is what it is.
+        online::Selection::Nothing(why) => {
+            progress.emit(progress::Event::stage(
+                progress::Stage::ReceiptKeys,
+                progress::State::CannotEvaluate,
+                why.clone(),
+            ));
+            let trust = Trust::no_key_set();
+            let facts = verify_or_fail(args, statement_bytes, &[], trust.clone(), options)?;
+            return Ok(Resolved {
+                facts,
+                trust,
+                diagnostics: vec![Diagnostic::warning(
+                    "NoLedgerSelected",
+                    Category::Trust,
+                    why.clone(),
+                    "Add the service the receipt names to assertions.issuer if you accept it.",
+                )],
+                acquisition: Some(Acquisition {
+                    selected: Vec::new(),
+                    acquired: Vec::new(),
+                    failed: Vec::new(),
+                    not_attempted: Some(why),
+                }),
+            });
+        }
+    };
 
+    progress.emit(progress::Event::stage(
+        progress::Stage::ReceiptKeys,
+        progress::State::Started,
+        format!("contacting {} selected ledger(s)", selected.len()),
+    ));
     // The real clock, never `--now`: this records when the fetch happened, and
     // `--now` answers a different question entirely.
-    let (acquired, failed) = online::partition(scitt_network::acquire_all(&selected, wall_clock()));
+    let outcomes = {
+        let mut observer = AcquisitionProgress { progress };
+        scitt_network::acquire_all_with(&selected, wall_clock(), &mut observer)
+    };
+    let (acquired, failed) = online::partition(outcomes);
 
     // The mode describes what this run actually holds, not what it set out to
     // do. Every fetch failing leaves it with nothing, and that is what it says.
@@ -659,6 +893,45 @@ fn resolve_online(
         diagnostics,
         acquisition: Some(acquisition),
     })
+}
+
+struct AcquisitionProgress<'a> {
+    progress: &'a mut dyn progress::Sink,
+}
+
+impl scitt_network::Observer for AcquisitionProgress<'_> {
+    fn started(&mut self, issuer: &str) {
+        self.progress.emit(progress::Event::finding(
+            progress::Stage::ReceiptKeys,
+            "acquisition",
+            Some(issuer.to_string()),
+            progress::State::Started,
+            "resolving service identity and fetching the key set",
+        ));
+    }
+
+    fn finished(&mut self, issuer: &str, outcome: &scitt_network::Outcome) {
+        match outcome {
+            Ok(acquired) => self.progress.emit(progress::Event::finding(
+                progress::Stage::ReceiptKeys,
+                "acquisition",
+                Some(issuer.to_string()),
+                progress::State::Done,
+                format!(
+                    "{} key set acquired at UTC {}",
+                    acquired.provenance.provider,
+                    display::timestamp(acquired.provenance.acquired_at)
+                ),
+            )),
+            Err(failed) => self.progress.emit(progress::Event::finding(
+                progress::Stage::ReceiptKeys,
+                "acquisition",
+                Some(issuer.to_string()),
+                progress::State::CannotEvaluate,
+                failed.error.detail.clone(),
+            )),
+        }
+    }
 }
 
 /// Map an acquisition fault onto a diagnostic code in this tool's namespace.
@@ -855,7 +1128,13 @@ fn same_file(a: &Path, b: &Path) -> bool {
 /// failed `--facts` leaves `"pass": true, "exitCode": 0` on disk for a run that
 /// exits 4. Stdout would be correct and the file would be wrong, which is the
 /// worse way round — the terminal scrolls away, the audit record is kept.
-fn emit(args: &VerifyArgs, mut assessment: Assessment, now: i64) -> Verdict {
+fn emit(
+    args: &VerifyArgs,
+    mut assessment: Assessment,
+    now: i64,
+    out: &mut impl std::io::Write,
+    color: bool,
+) -> Verdict {
     // First, because it is the only output that is evidence in its own right
     // rather than a description of a conclusion. The key sets and certificates
     // written here are what a later run replays, and they are true whatever
@@ -915,8 +1194,12 @@ fn emit(args: &VerifyArgs, mut assessment: Assessment, now: i64) -> Verdict {
     // Built after every write outcome is known, so stdout agrees with the exit
     // code and with the record on disk.
     match args.format {
-        Format::Json => println!("{:#}", record::build(args, &assessment, now)),
-        Format::Text => report::verify(&assessment),
+        Format::Json => {
+            let _ = writeln!(out, "{:#}", record::build(args, &assessment, now));
+        }
+        Format::Text => {
+            let _ = report::verify(out, &assessment, args.verbose, color);
+        }
     }
 
     assessment.verdict
@@ -952,6 +1235,262 @@ fn signature_state(facts: &StatementFacts) -> CheckState {
         Some(true) => CheckState::Pass,
         Some(false) => CheckState::Fail,
         None => CheckState::CannotEvaluate,
+    }
+}
+
+fn progress_state(state: CheckState) -> progress::State {
+    match state {
+        CheckState::Pass => progress::State::Pass,
+        CheckState::Fail => progress::State::Fail,
+        CheckState::NotChecked => progress::State::NotChecked,
+        CheckState::CannotEvaluate => progress::State::CannotEvaluate,
+    }
+}
+
+fn assertion_progress_state(outcome: AssertionOutcome) -> progress::State {
+    match outcome {
+        AssertionOutcome::Pass => progress::State::Pass,
+        AssertionOutcome::Fail => progress::State::Fail,
+        AssertionOutcome::CannotEvaluate => progress::State::CannotEvaluate,
+    }
+}
+
+fn emit_statement_progress(facts: &StatementFacts, progress: &mut dyn progress::Sink) {
+    let algorithm = facts
+        .alg
+        .map(scitt_receipt::labels::alg::name)
+        .unwrap_or_else(|| "(algorithm unavailable)".into());
+    progress.emit(progress::Event::finding(
+        progress::Stage::Statement,
+        "statement-signature",
+        facts
+            .leaf_subject
+            .as_ref()
+            .map(|value| format!("signing certificate subject: {value}")),
+        progress_state(signature_state(facts)),
+        format!(
+            "{algorithm}; {} signed bytes; claim digest {}",
+            facts.signed_statement_len, facts.claim_digest
+        ),
+    ));
+    if let Some(issuer) = &facts.cwt.iss {
+        progress.emit(progress::Event::finding(
+            progress::Stage::Statement,
+            "statement-issuer",
+            None,
+            progress::State::Done,
+            format!("statement issuer: {issuer}"),
+        ));
+    }
+    if let Some(subject) = &facts.cwt.sub {
+        progress.emit(progress::Event::finding(
+            progress::Stage::Statement,
+            "statement-subject",
+            None,
+            progress::State::Done,
+            format!("statement subject: {subject}"),
+        ));
+    }
+}
+
+fn emit_receipt_progress(facts: &StatementFacts, progress: &mut dyn progress::Sink) {
+    if facts.receipts_present == 0 {
+        progress.emit(progress::Event::finding(
+            progress::Stage::Statement,
+            "receipt-inclusion",
+            None,
+            progress::State::CannotEvaluate,
+            "the statement contains no receipt",
+        ));
+    }
+
+    for receipt in &facts.receipts {
+        let subject = format!("#{}", receipt.index + 1);
+        let state = if receipt.fully_verified() {
+            progress::State::Pass
+        } else {
+            // Receipt bytes are unauthenticated until every receipt check
+            // passes. A broken attachment therefore cannot establish failure
+            // of the statement; it leaves inclusion unevaluated.
+            progress::State::CannotEvaluate
+        };
+        progress.emit(progress::Event::finding(
+            progress::Stage::Statement,
+            "receipt-identity",
+            Some(subject.clone()),
+            progress::State::Done,
+            format!(
+                "receipt issuer {}",
+                receipt.issuer.as_deref().unwrap_or("(unavailable)")
+            ),
+        ));
+        progress.emit(progress::Event::finding(
+            progress::Stage::Statement,
+            "receipt-key",
+            Some(subject.clone()),
+            key_lookup_progress_state(receipt.key_lookup.as_ref()),
+            format!(
+                "key lookup {}; receipt key id {}",
+                key_lookup_word(receipt.key_lookup.as_ref()),
+                receipt.kid.as_deref().unwrap_or("(unavailable)")
+            ),
+        ));
+        progress.emit(progress::Event::finding(
+            progress::Stage::Statement,
+            "registration-time",
+            Some(subject.clone()),
+            if receipt.registered_at.is_some() {
+                progress::State::Done
+            } else {
+                progress::State::CannotEvaluate
+            },
+            format!(
+                "registered at UTC {}",
+                display::optional_timestamp(receipt.registered_at)
+            ),
+        ));
+        let mut detail = format!(
+            "root signature {}; statement binding {}",
+            check_word(receipt.root_signature_valid),
+            check_word(receipt.bound_to_statement)
+        );
+        if !receipt.problems.is_empty() {
+            detail.push_str("; ");
+            detail.push_str(&receipt.problems.join("; "));
+        }
+        progress.emit(progress::Event::finding(
+            progress::Stage::Statement,
+            "receipt-inclusion",
+            Some(subject),
+            state,
+            detail,
+        ));
+    }
+
+    // Some receipt blobs fail before ReceiptFacts can be constructed. Keep
+    // those diagnostics visible in the live transcript as well as the final
+    // report rather than silently dropping malformed attachments.
+    for problem in &facts.problems {
+        progress.emit(progress::Event::finding(
+            progress::Stage::Statement,
+            "statement-diagnostic",
+            None,
+            progress::State::CannotEvaluate,
+            problem.clone(),
+        ));
+    }
+}
+
+fn emit_assessment_summary(assessment: &Assessment, progress: &mut dyn progress::Sink) {
+    progress.emit(progress::Event::finding(
+        progress::Stage::Summary,
+        "trust-material",
+        None,
+        progress::State::Done,
+        assessment.trust.describe(),
+    ));
+    for limitation in &assessment.trust.limitations {
+        progress.emit(progress::Event::finding(
+            progress::Stage::Summary,
+            "trust-limitation",
+            None,
+            progress::State::Notice,
+            *limitation,
+        ));
+    }
+    for diagnostic in &assessment.diagnostics {
+        if diagnostic.severity == Severity::Warning
+            && assessment
+                .not_checked
+                .iter()
+                .any(|gap| gap.code == diagnostic.code)
+        {
+            continue;
+        }
+        // Severity survives into the transcript. A diagnostic that set the
+        // verdict must not read like the trust limitations printed beside it:
+        // a reader scanning for what stopped the run would find nothing, and
+        // the one failure mode this tool exists to avoid is a check that
+        // failed being mistaken for a note.
+        let state = match diagnostic.severity {
+            Severity::Error => progress::State::Fail,
+            Severity::Warning => progress::State::Notice,
+        };
+        progress.emit(progress::Event::finding(
+            progress::Stage::Summary,
+            diagnostic.code,
+            Some(diagnostic.category.as_str().into()),
+            state,
+            with_suffix(&diagnostic.message, "action", diagnostic.action),
+        ));
+    }
+    for gap in &assessment.not_checked {
+        progress.emit(progress::Event::finding(
+            progress::Stage::Summary,
+            gap.code,
+            Some(gap.category.as_str().into()),
+            progress::State::NotChecked,
+            with_suffix(&gap.message, "impact", gap.impact),
+        ));
+    }
+}
+
+/// Say a shared reason once, and refer to it afterwards.
+///
+/// One cause commonly blocks every adapter check, and repeating the same
+/// paragraph six times buries the one line that differs. Nothing is lost: each
+/// state is still reported in full, and a check whose reason was given earlier
+/// names where to find it.
+fn collapsed_details(checks: &[AdapterCheck]) -> Vec<String> {
+    let mut first: Vec<(&str, &str)> = Vec::new();
+    checks
+        .iter()
+        .map(|check| {
+            match first
+                .iter()
+                .find(|(detail, _)| *detail == check.detail)
+                .map(|(_, name)| *name)
+            {
+                Some(name) => format!("same reason as {name}"),
+                None => {
+                    first.push((&check.detail, &check.name));
+                    check.detail.clone()
+                }
+            }
+        })
+        .collect()
+}
+
+fn with_suffix(message: &str, label: &str, value: &str) -> String {
+    format!(
+        "{}; {label}: {value}",
+        message.trim_end_matches(['.', ';', ' '])
+    )
+}
+
+fn check_word(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "valid",
+        Some(false) => "invalid",
+        None => "not evaluated",
+    }
+}
+
+fn key_lookup_word(value: Option<&KeyLookup>) -> &'static str {
+    match value {
+        Some(KeyLookup::Found) => "found",
+        Some(KeyLookup::UnknownKid) => "unknown key id",
+        Some(KeyLookup::Revoked) => "revoked",
+        None => "not attempted",
+    }
+}
+
+fn key_lookup_progress_state(value: Option<&KeyLookup>) -> progress::State {
+    match value {
+        Some(KeyLookup::Found) => progress::State::Done,
+        Some(KeyLookup::UnknownKid) | Some(KeyLookup::Revoked) | None => {
+            progress::State::CannotEvaluate
+        }
     }
 }
 
@@ -1697,6 +2236,36 @@ mod resource_tests {
     use super::*;
     use crate::outcome::AdapterCheck;
 
+    /// A reason given once must still be findable from every check it blocked.
+    ///
+    /// The collapse is only legible if the back-reference names the check that
+    /// carries the text. A bare "as above" would leave a reader scanning.
+    #[test]
+    fn a_shared_reason_is_stated_once_and_then_named() {
+        let check = |name: &str, detail: &str| AdapterCheck {
+            name: name.into(),
+            label: name.into(),
+            state: CheckState::CannotEvaluate,
+            detail: detail.into(),
+        };
+        let checks = [
+            check("first", "the ledger does not match"),
+            check("second", "the ledger does not match"),
+            check("third", "its own reason"),
+            check("fourth", "the ledger does not match"),
+        ];
+
+        assert_eq!(
+            collapsed_details(&checks),
+            vec![
+                "the ledger does not match".to_string(),
+                "same reason as first".to_string(),
+                "its own reason".to_string(),
+                "same reason as first".to_string(),
+            ]
+        );
+    }
+
     fn appraisal(states: &[CheckState], scoped_pass: bool) -> adapters::AdapterAssessment {
         adapters::AdapterAssessment {
             checks: states
@@ -1709,6 +2278,7 @@ mod resource_tests {
                     detail: "detail".into(),
                 })
                 .collect(),
+            findings: Vec::new(),
             required_checks: (0..states.len())
                 .map(|i| format!("c{i}"))
                 .chain((!scoped_pass).then(|| "unestablished".to_string()))

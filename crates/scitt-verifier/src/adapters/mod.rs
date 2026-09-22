@@ -11,7 +11,7 @@ use scitt_receipt::Sign1;
 use std::path::Path;
 
 use crate::cli::Adapter;
-use crate::outcome::{AdapterCheck, CheckState};
+use crate::outcome::{AdapterCheck, AdapterFinding, CheckState};
 
 #[cfg_attr(not(feature = "adapter-mst-ledger"), allow(dead_code))]
 pub enum EvidenceSource<'a> {
@@ -22,6 +22,7 @@ pub enum EvidenceSource<'a> {
 /// Findings and their explicit acceptance contract, independent of domain.
 pub struct AdapterAssessment {
     pub checks: Vec<AdapterCheck>,
+    pub findings: Vec<AdapterFinding>,
     pub required_checks: Vec<String>,
     pub scope: String,
     pub notes: Vec<String>,
@@ -97,6 +98,7 @@ mod tests {
                 state,
                 detail: "detail".into(),
             }],
+            findings: Vec::new(),
             required_checks: vec!["binding".into()],
             scope: "test".into(),
             notes: Vec::new(),

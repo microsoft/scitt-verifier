@@ -235,6 +235,11 @@ pub struct NodeOutcome {
     pub attestation: CheckState,
     /// Authenticated `HOST_DATA` equals the statement-derived digest.
     pub host_data_match: CheckState,
+    /// Statement-derived digest compared against this node, when its report
+    /// authenticated far enough for the comparison to run.
+    pub expected_policy_digest: Option<String>,
+    /// Authenticated `HOST_DATA` read from this node's report.
+    pub observed_host_data: Option<String>,
     pub detail: String,
 }
 
@@ -404,6 +409,8 @@ pub fn appraise(
                     } else {
                         CheckState::Fail
                     },
+                    expected_policy_digest: Some(hex(policy_digest)),
+                    observed_host_data: Some(hex(&v.host_data)),
                     detail,
                 });
             }
@@ -421,6 +428,8 @@ pub fn appraise(
                     // disagree about the policy, and saying it did would be a
                     // finding this crate did not make.
                     host_data_match: CheckState::CannotEvaluate,
+                    expected_policy_digest: None,
+                    observed_host_data: None,
                     detail: why.clone(),
                 });
             }
@@ -956,6 +965,8 @@ mod tests {
             identity_binding: CheckState::CannotEvaluate,
             attestation,
             host_data_match: host,
+            expected_policy_digest: None,
+            observed_host_data: None,
             detail: format!("{node_id} detail"),
         }
     }

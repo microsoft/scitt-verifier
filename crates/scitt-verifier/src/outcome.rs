@@ -266,6 +266,21 @@ pub struct AdapterCheck {
     pub detail: String,
 }
 
+/// One adapter finding about one named subject.
+///
+/// Kept generic so progress and records can expose per-subject results without
+/// teaching the CLI about SNP reports, HOST_DATA, or any future adapter's
+/// domain vocabulary.
+#[derive(Debug, Clone)]
+pub struct AdapterFinding {
+    pub check: String,
+    pub subject: String,
+    pub state: CheckState,
+    pub detail: String,
+    pub expected: Option<String>,
+    pub observed: Option<String>,
+}
+
 /// What this run checked, and what it did not.
 ///
 /// The four core checks are fixed fields because every run has an answer for
@@ -416,6 +431,7 @@ pub struct Assessment {
     pub primary: Option<Diagnostic>,
     pub diagnostics: Vec<Diagnostic>,
     pub checks: Checks,
+    pub adapter_findings: Vec<AdapterFinding>,
     pub not_checked: Vec<Gap>,
     pub trust: Trust,
     pub facts: Option<StatementFacts>,
@@ -443,6 +459,7 @@ impl Assessment {
             diagnostics: vec![primary.clone()],
             primary: Some(primary),
             checks: Checks::none(),
+            adapter_findings: Vec::new(),
             not_checked,
             trust,
             facts: None,

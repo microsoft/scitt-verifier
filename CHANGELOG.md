@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+### Text verification reports progress as checks run
+
+Human-readable `verify` output now begins with an append-only transcript emitted
+at real input, statement, online key acquisition, artifact-binding, policy, and
+adapter boundaries. The transcript is driven by typed events and does not
+participate in verdict selection. JSON stdout remains the final verification
+record only and stays equivalent to `--result`.
+Untrusted transcript values are bounded and terminal control characters are
+escaped before display, including an adapter-supplied check name.
+Diagnostic severity survives into the transcript: one that decided the verdict
+is reported as a failure rather than sitting among the trust limitations.
+The adapter stage reports its aggregate checks, so an appraisal that stopped
+before reaching any node still names the reason at the point it happened. A
+reason shared by several checks is stated once and afterwards referred to by
+the check that carries it.
+Receipt outcomes and policy assertion results now appear at their real
+statement and policy execution boundaries.
+Statement identity facts are reported when verification completes, followed by
+a typed assessment summary of diagnostics, omitted checks, and trust limits.
+Default text output now stops after the concise verdict block; `--verbose`
+retains the completed evidence report.
+Human output now uses explicit identity labels, UTC timestamp renderings,
+grouped receipt/ledger/node findings, a separated verdict block, and restrained
+TTY-only color that respects `NO_COLOR` and never affects JSON or redirection.
+
+MST adapter node outcomes now survive as generic structured
+`appraisal.adapterFindings`, including separate expected and observed policy
+commitments where the comparison ran. The same findings drive node-level
+progress without making transcript order part of the acceptance contract.
+This is an added field, so the record's `schemaVersion` does not move;
+`docs/output.md` now states which changes do.
+
 ### Statement verification and optional adapters have separate boundaries
 
 The README now starts with transparent statements and relying-party policy,

@@ -1,59 +1,78 @@
 //! Human-readable output.
 //!
-//! The design rule: a person reading this in a CI log at 2am should be able to
-//! tell, without scrolling, whether to deploy — and if not, whether the problem
-//! is the artifact or their own configuration.
+//! The completed verdict that follows the live verification transcript.
 //!
-//! That rule is why the verdict comes first. An earlier version printed the
-//! full statement, receipt, binding, and policy detail before the one line
-//! anybody actually needed, which meant the answer was the last thing on
-//! screen — and in a long pipeline log, often the part scrolled past.
+//! The transcript says what ran as it happened; this renderer states the final
+//! decision. The completed evidence report remains available with `--verbose`.
 
 use scitt_policy::{Outcome, PolicyDecision};
 use scitt_receipt::{CborValue, KeyLookup, Sign1, StatementFacts};
+use std::io::{self, Write};
 
 use crate::outcome::{Assessment, CheckState, Verdict};
 
 /// Text longer than this is summarised unless `--verbose` is given.
 const TEXT_LIMIT: usize = 64;
 
-pub fn verify(a: &Assessment) {
-    headline(a);
-    println!();
-    detail(a);
+pub fn verify(out: &mut impl Write, a: &Assessment, verbose: bool, color: bool) -> io::Result<()> {
+    writeln!(out)?;
+    headline(out, a, color)?;
+    if verbose {
+        writeln!(out)?;
+        detail(out, a)?;
+    }
+    Ok(())
 }
 
 /// Everything a reader needs in order to act, before any evidence.
-fn headline(a: &Assessment) {
-    println!("{} {}", a.verdict.banner(), a.verdict.as_str());
-    println!();
+fn headline(out: &mut impl Write, a: &Assessment, color: bool) -> io::Result<()> {
+    writeln!(out, "Verdict")?;
+    writeln!(out, "-------")?;
+    writeln!(
+        out,
+        "{}",
+        styled_verdict(a.verdict.banner(), a.verdict.as_str(), color)
+    )?;
+    writeln!(out)?;
 
     if let Some(d) = &a.primary {
-        println!("Primary diagnostic:  {} ({})", d.code, d.category.as_str());
-        println!("  {}", d.message);
-        println!();
+        writeln!(
+            out,
+            "Primary diagnostic:  {} ({})",
+            d.code,
+            d.category.as_str()
+        )?;
+        writeln!(out, "  {}", d.message)?;
+        writeln!(out)?;
     }
 
     if let Some(decision) = &a.decision {
-        println!(
+        writeln!(
+            out,
             "Policy document:     {} v{}",
             decision.policy_id, decision.policy_version
-        );
+        )?;
     }
-    println!("Trust material:      {}", a.trust.describe());
+    writeln!(out, "Trust material:      {}", a.trust.describe())?;
 
     // Named "decision" rather than "policy" so it cannot be misread as a
     // second mention of the policy document above it.
-    println!(
+    writeln!(
+        out,
         "Statement signature: {}",
         a.checks.statement_signature.label()
-    );
-    println!(
+    )?;
+    writeln!(
+        out,
         "Receipt inclusion:   {}",
         a.checks.receipt_inclusion.label()
-    );
-    println!("Artifact binding:    {}", a.checks.artifact_binding.label());
-    println!("Policy decision:     {}", a.checks.policy.label());
+    )?;
+    writeln!(
+        out,
+        "Artifact binding:    {}",
+        a.checks.artifact_binding.label()
+    )?;
+    writeln!(out, "Policy decision:     {}", a.checks.policy.label())?;
 
     // Adapter checks follow the fixed four, so the core result reads the same
     // whether or not an adapter ran. Labels are padded to the same column as
@@ -65,18 +84,24 @@ fn headline(a: &Assessment) {
         // are longer than the core ones and several overflow the column; with
         // padding alone the label and its state ran together into one word.
         let head = format!("{}:", check.label);
-        println!("{head:<20} {}", check.state.label());
+        writeln!(out, "{head:<20} {}", check.state.label())?;
         if !check.detail.is_empty() {
-            println!("  {}", check.detail);
+            writeln!(out, "  {}", check.detail)?;
         }
     }
 
     // The distinction the verdict exists to make. A pass that never looked at
     // an artifact is a pass about a file, not about a deployment.
     if a.verdict == Verdict::StatementTransparent {
-        println!();
-        println!("NOTICE: artifact binding was not requested. This run says the statement is");
-        println!("        transparent; it does not say which artifact it describes.");
+        writeln!(out)?;
+        writeln!(
+            out,
+            "NOTICE: artifact binding was not requested. This run says the statement is"
+        )?;
+        writeln!(
+            out,
+            "        transparent; it does not say which artifact it describes."
+        )?;
     }
 
     // A resource pass is always bounded, and the bound is not a footnote: it
@@ -90,43 +115,53 @@ fn headline(a: &Assessment) {
             .iter()
             .find(|d| d.code == "ResourceAppraisalScoped")
         {
-            println!();
-            println!("NOTICE: this pass is scoped.");
-            println!("        {}", scope.message);
+            writeln!(out)?;
+            writeln!(out, "NOTICE: this pass is scoped.")?;
+            writeln!(out, "        {}", scope.message)?;
         }
     }
 
     if let Some(d) = &a.primary {
-        println!();
-        println!("Action: {}", d.action);
+        writeln!(out)?;
+        writeln!(out, "Action: {}", d.action)?;
     }
 
     // Spelled out because this is the case people misread. A non-zero exit that
     // does not mean "compromised" still means "do not proceed".
     if a.verdict == Verdict::CannotEvaluate {
-        println!();
-        println!("This is not a pass. The tool could not answer the question;");
-        println!("the usual causes are stale trust material or an unsupported feature.");
+        writeln!(out)?;
+        writeln!(
+            out,
+            "This is not a pass. The tool could not answer the question;"
+        )?;
+        writeln!(
+            out,
+            "the usual causes are stale trust material or an unsupported feature."
+        )?;
     }
+    Ok(())
 }
 
-fn detail(a: &Assessment) {
-    println!("Details");
+fn detail(out: &mut impl Write, a: &Assessment) -> io::Result<()> {
+    writeln!(out, "Details")?;
 
     if let Some(facts) = &a.facts {
-        statement_detail(facts);
-        receipts_detail(facts);
+        statement_detail(out, facts)?;
+        receipts_detail(out, facts)?;
     } else {
-        println!();
-        println!("  The run stopped before any statement facts were established.");
+        writeln!(out)?;
+        writeln!(
+            out,
+            "  The run stopped before any statement facts were established."
+        )?;
     }
 
-    println!();
-    println!("  Artifact binding");
-    println!("    {}", a.binding.detail);
+    writeln!(out)?;
+    writeln!(out, "  Artifact binding")?;
+    writeln!(out, "    {}", a.binding.detail)?;
 
     if let Some(decision) = &a.decision {
-        policy_detail(decision);
+        policy_detail(out, decision)?;
     }
 
     // Everything the primary diagnostic did not already say. Gating on
@@ -139,108 +174,131 @@ fn detail(a: &Assessment) {
         .filter(|d| !primary.is_some_and(|p| p.code == d.code && p.message == d.message))
         .collect();
     if !rest.is_empty() {
-        println!();
-        println!("  Diagnostics");
+        writeln!(out)?;
+        writeln!(out, "  Diagnostics")?;
         for d in rest {
-            println!("    [{}] {}", d.code, d.message);
+            writeln!(out, "    [{}] {}", d.code, d.message)?;
         }
     }
 
     if !a.not_checked.is_empty() {
-        println!();
-        println!("  Not checked");
+        writeln!(out)?;
+        writeln!(out, "  Not checked")?;
         for g in &a.not_checked {
-            println!("    [{}] {}", g.code, g.message);
-            println!("      impact: {}", g.impact);
+            writeln!(out, "    [{}] {}", g.code, g.message)?;
+            writeln!(out, "      impact: {}", g.impact)?;
         }
     }
 
     if !a.trust.limitations.is_empty() {
-        println!();
-        println!("  Trust limitations");
+        writeln!(out)?;
+        writeln!(out, "  Trust limitations")?;
         for l in &a.trust.limitations {
-            println!("    - {l}");
+            writeln!(out, "    - {l}")?;
         }
     }
+    Ok(())
 }
 
-fn statement_detail(facts: &StatementFacts) {
-    println!();
-    println!("  Statement");
-    println!("    claim digest        {}", facts.claim_digest);
-    println!("    signed bytes        {}", facts.signed_statement_len);
-    println!(
+fn statement_detail(out: &mut impl Write, facts: &StatementFacts) -> io::Result<()> {
+    writeln!(out)?;
+    writeln!(out, "  Statement")?;
+    writeln!(out, "    claim digest        {}", facts.claim_digest)?;
+    writeln!(
+        out,
+        "    signed bytes        {}",
+        facts.signed_statement_len
+    )?;
+    writeln!(
+        out,
         "    algorithm           {}",
         facts
             .alg
             .map(scitt_receipt::labels::alg::name)
             .unwrap_or_else(|| "(none)".into())
-    );
-    println!("    signature           {}", tri(facts.signature_valid));
+    )?;
+    writeln!(
+        out,
+        "    signature           {}",
+        tri(facts.signature_valid)
+    )?;
     if let Some(subject) = &facts.leaf_subject {
-        println!("    signer              {subject}");
+        writeln!(out, "    signing cert subject {subject}")?;
     }
     if let Some(iss) = &facts.cwt.iss {
-        println!("    cwt iss             {iss}");
+        writeln!(out, "    statement issuer    {iss}")?;
     }
     if let Some(sub) = &facts.cwt.sub {
-        println!("    cwt sub             {sub}");
+        writeln!(out, "    statement subject   {sub}")?;
     }
 
     for problem in &facts.problems {
-        println!("    ! {problem}");
+        writeln!(out, "    ! {problem}")?;
     }
+    Ok(())
 }
 
-fn receipts_detail(facts: &StatementFacts) {
+fn receipts_detail(out: &mut impl Write, facts: &StatementFacts) -> io::Result<()> {
     if facts.receipts.is_empty() {
-        println!();
-        println!("  Receipts");
-        println!("    none — this statement is signed, but not transparent");
-        return;
+        writeln!(out)?;
+        writeln!(out, "  Receipts")?;
+        writeln!(
+            out,
+            "    none — this statement is signed, but not transparent"
+        )?;
+        return Ok(());
     }
     for (index, r) in facts.receipts.iter().enumerate() {
-        println!();
-        println!("  Receipt {}", index + 1);
-        println!(
-            "    issuer              {}",
+        writeln!(out)?;
+        writeln!(out, "  Receipt {}", index + 1)?;
+        writeln!(
+            out,
+            "    receipt issuer      {}",
             r.issuer.as_deref().unwrap_or("(none)")
-        );
-        println!(
-            "    kid                 {}",
+        )?;
+        writeln!(
+            out,
+            "    receipt key id      {}",
             r.kid.as_deref().unwrap_or("(none)")
-        );
-        println!(
-            "    registered at       {}",
-            r.registered_at
-                .map(|t| t.to_string())
-                .unwrap_or_else(|| "(none)".into())
-        );
-        println!(
+        )?;
+        writeln!(
+            out,
+            "    registered at UTC   {}",
+            crate::display::optional_timestamp(r.registered_at)
+        )?;
+        writeln!(
+            out,
             "    merkle root         {}",
             r.root.as_deref().unwrap_or("(not computed)")
-        );
-        println!(
+        )?;
+        writeln!(
+            out,
             "    key lookup          {}",
             r.key_lookup
                 .as_ref()
                 .map(describe_lookup)
                 .unwrap_or("(not attempted)")
-        );
-        println!("    root signature      {}", tri(r.root_signature_valid));
-        println!("    bound to statement  {}", tri(r.bound_to_statement));
+        )?;
+        writeln!(
+            out,
+            "    root signature      {}",
+            tri(r.root_signature_valid)
+        )?;
+        writeln!(out, "    bound to statement  {}", tri(r.bound_to_statement))?;
         for problem in &r.problems {
-            println!("    ! {problem}");
+            writeln!(out, "    ! {problem}")?;
         }
     }
+    Ok(())
 }
 
-fn policy_detail(decision: &PolicyDecision) {
-    println!();
-    println!(
+fn policy_detail(out: &mut impl Write, decision: &PolicyDecision) -> io::Result<()> {
+    writeln!(out)?;
+    writeln!(
+        out,
         "  Policy {} v{}",
         decision.policy_id, decision.policy_version
-    );
+    )?;
     for r in &decision.results {
         // Spelled out rather than symbolic. "????" was memorable but told an
         // auditor nothing about whether the rule was skipped or unanswerable.
@@ -249,8 +307,9 @@ fn policy_detail(decision: &PolicyDecision) {
             Outcome::Fail => CheckState::Fail,
             Outcome::CannotEvaluate => CheckState::CannotEvaluate,
         };
-        println!("    [{}] {} — {}", mark.label(), r.name, r.detail);
+        writeln!(out, "    [{}] {} — {}", mark.label(), r.name, r.detail)?;
     }
+    Ok(())
 }
 
 /// Describe a statement without verifying any part of it.
@@ -676,7 +735,7 @@ fn print_cwt_claims(value: &CborValue, verbose: bool, parent: Option<i64>) {
             CborValue::Int(i)
                 if matches!(*i, labels::CWT_IAT | labels::CWT_NBF | labels::CWT_EXP) =>
             {
-                timestamp(cbor::as_numeric_date(claim).ok())
+                crate::display::optional_timestamp(cbor::as_numeric_date(claim).ok())
             }
             _ => scalar(claim, verbose, known),
         };
@@ -827,18 +886,21 @@ fn inspect_receipts(statement: &Sign1, verbose: bool) {
                 .unwrap_or_else(|| "(none)".into())
         );
         println!(
-            "  kid                 {}",
+            "  receipt key id      {}",
             summary.kid.as_deref().unwrap_or("(none)")
         );
         println!(
-            "  iss                 {}",
+            "  receipt issuer      {}",
             summary.issuer.as_deref().unwrap_or("(none)")
         );
         println!(
-            "  sub                 {}",
+            "  receipt subject     {}",
             summary.subject.as_deref().unwrap_or("(none)")
         );
-        println!("  registered at       {}", timestamp(summary.registered_at));
+        println!(
+            "  registered at UTC   {}",
+            crate::display::optional_timestamp(summary.registered_at)
+        );
         println!(
             "  data structure      {}",
             match summary.vds {
@@ -895,46 +957,13 @@ fn print_labels(prefix: &str, labels: &[String]) {
     println!("{prefix} {}", labels.join(", "));
 }
 
-/// Render a Unix timestamp as both the raw value and a UTC instant.
-///
-/// The raw seconds are kept because they are what a policy compares against;
-/// the formatted form is there so a human notices a statement dated 1970.
-fn timestamp(seconds: Option<i64>) -> String {
-    let Some(s) = seconds else {
-        return "(none)".into();
-    };
-    match utc_rfc3339(s) {
-        Some(text) => format!("{s} ({text})"),
-        None => format!("{s} (not a representable date)"),
+fn styled_verdict(banner: &str, verdict: &str, color: bool) -> String {
+    let text = format!("{banner} {verdict}");
+    if !color {
+        return text;
     }
-}
-
-/// Format a Unix timestamp as RFC 3339 UTC, without pulling in a date crate.
-///
-/// Uses Howard Hinnant's civil-from-days algorithm, which is exact for the
-/// proleptic Gregorian calendar. Returns `None` rather than a wrong date for
-/// values that cannot be represented.
-fn utc_rfc3339(seconds: i64) -> Option<String> {
-    let days = seconds.div_euclid(86_400);
-    let secs_of_day = seconds.rem_euclid(86_400);
-
-    let z = days.checked_add(719_468)?;
-    let era = if z >= 0 { z } else { z - 146_096 }.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = if m <= 2 { y + 1 } else { y };
-
-    Some(format!(
-        "{year:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
-        secs_of_day / 3_600,
-        (secs_of_day % 3_600) / 60,
-        secs_of_day % 60
-    ))
+    let code = if banner == "PASS" { "1;32" } else { "1;31" };
+    format!("\u{1b}[{code}m{text}\u{1b}[0m")
 }
 
 /// Render a tri-state honestly.
@@ -959,7 +988,7 @@ fn describe_lookup(lookup: &KeyLookup) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::path_segment;
+    use super::{path_segment, styled_verdict};
     use scitt_receipt::CborValue;
 
     /// The bracketed label is meant to be pasted into a policy `path`, so an
@@ -996,5 +1025,17 @@ mod tests {
     fn a_key_no_policy_can_name_has_no_path() {
         assert!(path_segment(&CborValue::ByteString(vec![1, 2, 3])).is_none());
         assert!(path_segment(&CborValue::Array(vec![])).is_none());
+    }
+
+    #[test]
+    fn verdict_color_is_limited_to_the_verdict_line() {
+        assert_eq!(
+            styled_verdict("PASS", "statement-transparent", false),
+            "PASS statement-transparent"
+        );
+        assert_eq!(
+            styled_verdict("STOP", "untrusted", true),
+            "\u{1b}[1;31mSTOP untrusted\u{1b}[0m"
+        );
     }
 }

@@ -96,6 +96,23 @@ pub struct Failed {
 /// not have.
 pub type Outcome = Result<Acquired, Box<Failed>>;
 
+/// Observation hook for callers presenting acquisition progress.
+///
+/// This crate reports lifecycle only. The observer cannot alter routing,
+/// deadlines, returned bytes, or verification decisions.
+pub trait Observer {
+    fn started(&mut self, issuer: &str);
+    fn finished(&mut self, issuer: &str, outcome: &Outcome);
+}
+
+struct NoopObserver;
+
+impl Observer for NoopObserver {
+    fn started(&mut self, _issuer: &str) {}
+
+    fn finished(&mut self, _issuer: &str, _outcome: &Outcome) {}
+}
+
 /// Provenance for a ledger that never got as far as a route.
 fn unrouted(issuer: &str, now: i64, error: &AcquireError) -> Provenance {
     Provenance {
@@ -342,10 +359,19 @@ fn acquire_before(issuer: &str, now: i64, deadline: Instant) -> Outcome {
 /// A ledger that was never asked and a ledger that answered badly are different
 /// facts, and only one of them says anything about the ledger.
 pub fn acquire_all(issuers: &[String], now: i64) -> Vec<Outcome> {
+    acquire_all_with(issuers, now, &mut NoopObserver)
+}
+
+/// Acquire for several issuers and report each real lifecycle boundary.
+///
+/// The observer is presentation-only. One deadline still covers the entire
+/// list, including issuers that time out before their request begins.
+pub fn acquire_all_with(issuers: &[String], now: i64, observer: &mut dyn Observer) -> Vec<Outcome> {
     let deadline = Instant::now() + limits::TOTAL_DEADLINE;
     let mut out = Vec::with_capacity(issuers.len());
 
     for issuer in issuers {
+        observer.started(issuer);
         if Instant::now() >= deadline {
             let error = AcquireError::new(
                 Diagnostic::DeadlineExceeded,
@@ -355,10 +381,14 @@ pub fn acquire_all(issuers: &[String], now: i64) -> Vec<Outcome> {
                 ),
             );
             let provenance = unrouted(issuer, now, &error);
-            out.push(Err(Box::new(Failed { provenance, error })));
+            let outcome = Err(Box::new(Failed { provenance, error }));
+            observer.finished(issuer, &outcome);
+            out.push(outcome);
             continue;
         }
-        out.push(acquire_before(issuer, now, deadline));
+        let outcome = acquire_before(issuer, now, deadline);
+        observer.finished(issuer, &outcome);
+        out.push(outcome);
     }
 
     out
@@ -481,6 +511,45 @@ mod tests {
             revoked_kids: Vec::new(),
             skipped: Vec::new(),
         }
+    }
+
+    #[test]
+    fn observing_an_empty_selection_performs_no_lifecycle_callbacks() {
+        struct Count(usize);
+        impl Observer for Count {
+            fn started(&mut self, _issuer: &str) {
+                self.0 += 1;
+            }
+
+            fn finished(&mut self, _issuer: &str, _outcome: &Outcome) {
+                self.0 += 1;
+            }
+        }
+
+        let mut count = Count(0);
+        assert!(acquire_all_with(&[], 0, &mut count).is_empty());
+        assert_eq!(count.0, 0);
+    }
+
+    #[test]
+    fn observer_sees_start_and_finish_for_a_configuration_failure() {
+        #[derive(Default)]
+        struct Events(Vec<&'static str>);
+        impl Observer for Events {
+            fn started(&mut self, _issuer: &str) {
+                self.0.push("started");
+            }
+
+            fn finished(&mut self, _issuer: &str, outcome: &Outcome) {
+                assert!(outcome.is_err());
+                self.0.push("finished");
+            }
+        }
+
+        let mut events = Events::default();
+        let outcomes = acquire_all_with(&["unsupported.example".to_string()], 0, &mut events);
+        assert_eq!(events.0, ["started", "finished"]);
+        assert!(outcomes[0].is_err());
     }
 
     /// A probe that is stricter than the library it guards would refuse hosts

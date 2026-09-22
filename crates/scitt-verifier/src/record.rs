@@ -48,7 +48,7 @@ use serde_json::{json, Map, Value};
 
 use crate::cli::{BindingMode, TrustSource, VerifyArgs};
 use crate::outcome::{
-    Acquisition, AdapterCheck, Assessment, Binding, Checks, Diagnostic, Gap, Trust,
+    Acquisition, AdapterCheck, AdapterFinding, Assessment, Binding, Checks, Diagnostic, Gap, Trust,
 };
 
 /// The full record: observations, rules, and decision.
@@ -515,6 +515,9 @@ fn appraisal_json(assessment: &Assessment) -> Value {
         "exitCode": assessment.verdict.exit_code(),
         "pass": assessment.verdict.is_pass(),
         "checks": checks_json(&assessment.checks),
+        "adapterFindings": Value::Array(
+            assessment.adapter_findings.iter().map(adapter_finding_json).collect()
+        ),
         // The single field that answers "what stopped my deployment".
         // Everything else here is supporting detail for that one question.
         "primaryDiagnostic": match &assessment.primary {
@@ -550,6 +553,17 @@ fn adapter_check_json(c: &AdapterCheck) -> Value {
     })
 }
 
+fn adapter_finding_json(f: &AdapterFinding) -> Value {
+    json!({
+        "check": f.check,
+        "subject": f.subject,
+        "state": f.state.as_str(),
+        "detail": f.detail,
+        "expected": f.expected,
+        "observed": f.observed,
+    })
+}
+
 fn diagnostic_json(d: &Diagnostic) -> Value {
     json!({
         "code": d.code,
@@ -581,6 +595,7 @@ fn key_lookup_name(lookup: &KeyLookup) -> &'static str {
 mod tests {
     use super::*;
     use crate::cli::Format;
+    use crate::outcome::{AdapterFinding, CheckState};
     use crate::outcome::{Category, Verdict};
     use std::path::PathBuf;
 
@@ -595,6 +610,7 @@ mod tests {
             evidence: None,
             save_evidence: None,
             format: Format::Text,
+            verbose: false,
             result: None,
             facts: None,
             save_trust: None,
@@ -668,6 +684,27 @@ mod tests {
             "adapter checks must always be an array, got {adapter:?}"
         );
         assert_eq!(adapter.as_array().map(Vec::len), Some(0));
+    }
+
+    #[test]
+    fn adapter_findings_keep_structured_expected_and_observed_values() {
+        let mut assessment = incomplete();
+        assessment.adapter_findings.push(AdapterFinding {
+            check: "cce-policy-host-data".into(),
+            subject: "node-a".into(),
+            state: CheckState::Fail,
+            detail: "different commitments".into(),
+            expected: Some("expected".into()),
+            observed: Some("observed".into()),
+        });
+
+        let record = build(&args(), &assessment, 0);
+        let finding = &record["appraisal"]["adapterFindings"][0];
+        assert_eq!(finding["check"], "cce-policy-host-data");
+        assert_eq!(finding["subject"], "node-a");
+        assert_eq!(finding["state"], "fail");
+        assert_eq!(finding["expected"], "expected");
+        assert_eq!(finding["observed"], "observed");
     }
 
     /// The four core checks are the compatibility surface. Adding adapter

@@ -1,11 +1,50 @@
 # The output contract
 
 Everything in this document is a contract. A pipeline branches on these values,
-so changing one is a breaking change and moves the record's `schemaVersion`.
+so removing a field, renaming one, or changing what an existing one means is a
+breaking change and moves the record's `schemaVersion`. Adding a field is not:
+a consumer that does not read it is unaffected, and requiring a version bump
+for every addition would make the version say nothing about compatibility.
 
 ## The verdict
 
 `verify` produces exactly one verdict.
+
+Text output is an append-only verification transcript followed by a concise
+verdict block. `--verbose` additionally prints the completed evidence report.
+Progress is emitted at the execution boundary of each stage; it is not
+reconstructed from the final result. Stage order and display numbering are
+presentation details, not an acceptance contract. The verdict, checks, and
+exit code continue to come only from the completed assessment.
+Transcript values are bounded and terminal control characters are escaped so
+an issuer, path, or remote diagnostic cannot forge another displayed line.
+Individual receipt outcomes and policy assertion results are emitted during
+their respective stages; the later report remains a completed evidence view,
+not the source from which the transcript is reconstructed.
+After execution, an assessment-summary stage lists trust limitations,
+diagnostics, and intentionally omitted checks as typed notices. This stage
+summarizes the completed assessment; it does not participate in deriving it.
+A diagnostic keeps its severity here: one that decided the verdict is shown as
+a failure, not as a notice beside the trust limitations. Where one cause blocks
+several adapter checks, the reason is given once and the remaining checks name
+the check that carries it; every state is still reported in full.
+
+Human timestamps are labelled UTC and include both Unix seconds and an RFC 3339
+instant. JSON keeps the original numeric values. Identity labels distinguish
+the statement issuer and subject, signing-certificate subject, receipt issuer
+and key ID, acquisition ledger, and appraised ledger node.
+
+Repeated receipt, acquisition-ledger, and adapter-node findings are grouped
+under their subject instead of repeating the identity on every row. The final
+result is separated into a `Verdict` block so its scope, primary diagnostic,
+and required action remain clear when copied independently.
+
+When stdout is an interactive terminal, state and verdict tokens use restrained
+ANSI color. Redirected output, `TERM=dumb`, `NO_COLOR`, and JSON output remain
+plain text/data with no escape sequences.
+
+`--format json` emits no transcript on stdout. Stdout remains the final JSON
+record only, preserving its equivalence with `--result`.
 
 | Verdict | Exit | What it claims |
 |---|---|---|
@@ -84,6 +123,18 @@ machine `name`, a human `label`, one of the four `state` values above, and a
 An adapter reports checks; it does not report a verdict. Adapter results may
 narrow the verdict but never widen it, so an adapter cannot turn a failed core
 check, or evidence it could not gather, into a pass.
+
+Per-subject adapter results are also retained under
+`appraisal.adapterFindings`. Each entry identifies the adapter check and
+subject, carries the same four-state vocabulary, and may include structured
+`expected` and `observed` values. For example, an MST policy-commitment mismatch
+records the statement-derived digest and authenticated `HOST_DATA` separately;
+consumers do not need to parse either value out of an English diagnostic.
+
+The array is always present and empty when no adapter produced subject-level
+findings. Aggregate adapter checks remain the acceptance surface. Findings
+explain those checks and drive the human transcript; their presence or display
+order never grants a pass.
 
 Internally, the shared assessment derives success from an explicit, non-empty
 set of required check names, rather than trusting a separate pass boolean.

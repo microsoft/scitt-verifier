@@ -72,6 +72,8 @@ VERIFY OPTIONS:
     --artifact <FILE>        The artifact the statement should describe.
     --binding-mode <MODE>    none | payload-bytes | payload-digest         [default: none]
     --format <FORMAT>        text | json                                   [default: text]
+    --verbose, -v            Include the completed evidence report after the
+                             text transcript and verdict block.
     --result <FILE>          Write the verification record to a file. This is
                              byte-for-byte the same document --format json
                              prints to stdout; the flag chooses the sink, not
@@ -292,6 +294,8 @@ pub struct VerifyArgs {
     /// else recorded, and accepting the flag anyway would imply it had.
     pub save_evidence: Option<PathBuf>,
     pub format: Format,
+    /// Include the completed evidence report in human-readable output.
+    pub verbose: bool,
     pub result: Option<PathBuf>,
     /// Where to write the observations-only projection, if asked for.
     ///
@@ -348,6 +352,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     let mut evidence = None;
     let mut save_evidence = None;
     let mut format = Format::Text;
+    let mut verbose = false;
     let mut result = None;
     let mut facts = None;
     let mut trusted_roots = None;
@@ -401,6 +406,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                     }
                 }
             }
+            "--verbose" | "-v" => verbose = true,
             "--now" => {
                 let raw = value(&mut it, flag)?;
                 now = Some(
@@ -558,6 +564,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         evidence,
         save_evidence,
         format,
+        verbose,
         result,
         facts,
         save_trust,
