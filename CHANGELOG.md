@@ -2,6 +2,43 @@
 
 ## Unreleased
 
+### Evidence can now be collected from the ledger itself
+
+`--binding-mode live-evidence` collects the ledger's attestation evidence
+during the run instead of reading a bundle someone recorded earlier. It
+requires `--online`, and the ledger it contacts is the one named by
+`ledger.host` in the policy — never a flag, for the same reason the allowlist
+is not a flag.
+
+This is a security change, not a convenience. A saved bundle carries
+`service.pem`, the certificate identity binding is checked *against*, so the
+subject of the appraisal also supplies its own anchor: a self-consistent bundle
+produced by an attacker's own ledger satisfies every check in the appraisal and
+is wrong only in which service it describes. The previous release could catch
+that by comparing the collector's unsigned manifest to `ledger.host`, which
+detects the wrong bundle but not a forged one.
+
+A live run takes the service certificate from the public identity service over
+the public web PKI, and pins the connection that carries the node reports to
+exactly that certificate. Substituting a ledger no longer substitutes the
+anchor with it. `bootstrap` in `scitt-acquire` was separated out of key
+acquisition so both uses share one authenticated path and one network deadline.
+
+`--save-evidence <DIR>` writes what a live run collected, in the same form
+`--binding-mode saved-evidence` reads, so a verdict can be re-examined offline
+later. Saving is part of the run: if the copy cannot be written the run fails
+rather than reporting a verdict it did not preserve.
+
+What has not changed: freshness and connection binding remain
+`cannot-evaluate`. CCF offers no challenge-response attestation, so a report is
+a recording whether this run fetched it or not; the endpoint load-balances, so
+the node that served a response cannot be tied to the report it carried. A live
+run now says *observed at* a time it knows rather than *recorded at* a time
+someone else asserted, which is the only part of the scope that improves.
+
+An unreachable ledger is `cannot-evaluate`, never a failure: a service that did
+not answer is not a service that answered badly.
+
 ### The evidence must come from the ledger the policy names
 
 `ledger.host` was parsed, validated non-empty, and then never compared against
@@ -25,7 +62,7 @@ port is a differing endpoint and is not normalised away. A policy with no
 The comparison is against the collector's unsigned manifest, so it catches the
 wrong bundle, not a forged one. Pinning the bundle's service certificate to the
 one the public identity service publishes for that host is the adversarial
-form, and needs a network request this build does not make.
+form; `live-evidence`, above, is that form.
 
 ### Ledger findings have their own verdicts
 

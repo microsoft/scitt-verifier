@@ -263,6 +263,33 @@ naming a service your policy does not accept produces no request at all. Add
 See [docs/trust-material.md](docs/trust-material.md), including the
 rotation-as-a-pull-request pattern and support for self-hosted ledgers.
 
+## Appraising the ledger itself
+
+A statement may describe a *deployment* rather than a file — an Azure
+Confidential Ledger's execution policy, say. The `mst-ledger` adapter answers
+one question about that: do the ledger's attested nodes enforce the policy this
+statement embeds?
+
+```console
+scitt-verifier verify --statement statement.cose --policy ledger-gate.json \
+  --online --binding-mode live-evidence --adapter mst-ledger \
+  --save-evidence ./evidence
+```
+
+The ledger under appraisal is the one named by `ledger.host` in the policy, and
+it is usually **not** the transparency service that issued the receipt: a
+production transparency service notarises builds for many deployments. Evidence
+from anywhere else is refused rather than appraised.
+
+`live-evidence` collects the evidence during the run. `saved-evidence` replays
+a bundle captured earlier — useful, but weaker: a saved bundle supplies the
+service certificate that identity binding is checked against, so it is the
+subject of the appraisal vouching for itself. A live run takes that certificate
+from the public identity service instead.
+
+Neither mode establishes freshness or connection binding, and the verdict says
+so. Requires a build with `--features adapter-mst-ledger`.
+
 ## Policy documents
 
 ```json

@@ -447,7 +447,7 @@ fn binding_json(args: &VerifyArgs, assessment: &Assessment) -> Value {
         // not to a file, and the artifact block must not imply an artifact
         // comparison happened. The resource appraisal is recorded separately,
         // under the adapter checks.
-        BindingMode::SavedEvidence => "none",
+        BindingMode::SavedEvidence | BindingMode::LiveEvidence => "none",
     };
 
     // Derived from the outcome, not from whether `--artifact` was passed.
@@ -593,6 +593,7 @@ mod tests {
             binding_mode: BindingMode::None,
             adapter: None,
             evidence: None,
+            save_evidence: None,
             format: Format::Text,
             result: None,
             facts: None,

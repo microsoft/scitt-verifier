@@ -109,13 +109,36 @@ fn scitt_attest_names() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
-/// Appraise saved evidence against an accepted statement.
+/// Where an appraisal's evidence comes from.
+///
+/// The two differ in one way that matters to the reader: a saved bundle
+/// supplies its own service certificate, so the subject of the appraisal also
+/// supplies the anchor the appraisal checks against. A bundle that is
+/// internally consistent therefore passes whether or not it came from the
+/// ledger the policy names. Live acquisition takes the anchor from the public
+/// identity service instead, so the ledger cannot vouch for itself.
+#[derive(Debug, Clone, Copy)]
+// A build without the adapter still has to accept the argument so that one
+// call site serves both, but it never reads it. Naming that rather than
+// deleting the fields keeps the two builds' signatures identical.
+#[cfg_attr(not(feature = "adapter-mst-ledger"), allow(dead_code))]
+pub enum EvidenceSource<'a> {
+    /// A bundle recorded earlier, read from disk.
+    Saved(&'a std::path::Path),
+    /// Collected by this run from the ledger the policy names.
+    Live {
+        /// Where to write the collected evidence, if the run asked for a copy.
+        save_to: Option<&'a std::path::Path>,
+    },
+}
+
+/// Appraise ledger evidence against an accepted statement.
 ///
 /// `statement` is the parsed statement that already passed acceptance.
 #[cfg(not(feature = "adapter-mst-ledger"))]
-pub fn appraise_saved_evidence(
+pub fn appraise_evidence(
     _adapter: Adapter,
-    _evidence_dir: &std::path::Path,
+    _source: EvidenceSource<'_>,
     _statement: &Sign1,
     _bind: &BindLedgerPolicy,
     _trust: &TrustInputs,
@@ -131,11 +154,11 @@ pub fn appraise_saved_evidence(
     )
 }
 
-/// Appraise saved evidence against an accepted statement.
+/// Appraise ledger evidence against an accepted statement.
 #[cfg(feature = "adapter-mst-ledger")]
-pub fn appraise_saved_evidence(
+pub fn appraise_evidence(
     adapter: Adapter,
-    evidence_dir: &std::path::Path,
+    source: EvidenceSource<'_>,
     statement: &Sign1,
     bind: &BindLedgerPolicy,
     trust: &TrustInputs,
@@ -201,13 +224,35 @@ pub fn appraise_saved_evidence(
         ));
     }
 
-    let (bundle, metadata) = match crate::evidence::load(evidence_dir) {
-        Ok(b) => b,
-        Err(e) => {
-            return ResourceAppraisal::not_attempted(format!(
-                "the evidence bundle is unusable: {e}"
-            ))
+    let loaded = match source {
+        EvidenceSource::Saved(dir) => {
+            crate::evidence::load(dir).map_err(|e| format!("the evidence bundle is unusable: {e}"))
         }
+        EvidenceSource::Live { save_to } => {
+            // One deadline for the whole acquisition, started here. Reaching
+            // an unreachable ledger is an inability, never a finding: the
+            // question was asked and nothing answered it, which is not the
+            // same as a node that answered badly.
+            let deadline = std::time::Instant::now() + scitt_acquire::limits::TOTAL_DEADLINE;
+            crate::live::fetch(&ledger.host, deadline)
+                .map_err(|e| format!("evidence could not be collected from {}: {e}", ledger.host))
+                .and_then(|(bundle, metadata)| match save_to {
+                    Some(dir) => crate::evidence::save(dir, &bundle, &metadata)
+                        .map(|()| (bundle, metadata))
+                        .map_err(|e| {
+                            // Refused rather than appraised-and-not-saved. A
+                            // run asked for a copy of what it judged; a
+                            // verdict with no such copy is not the run that
+                            // was requested.
+                            format!("the collected evidence could not be saved: {e}")
+                        }),
+                    None => Ok((bundle, metadata)),
+                })
+        }
+    };
+    let (bundle, metadata) = match loaded {
+        Ok(b) => b,
+        Err(e) => return ResourceAppraisal::not_attempted(e),
     };
 
     // The policy names the ledger it is about. Until this check existed the
@@ -217,11 +262,12 @@ pub fn appraise_saved_evidence(
     // policy is a claim about a particular deployment; comparing it to some
     // other service's nodes answers a question nobody asked.
     //
-    // Scope of the guarantee: `snapshot.json`'s `ledger` is collector-asserted
-    // and unsigned, so this catches the wrong bundle, not a forged one. The
-    // check that would survive an adversary is pinning the bundle's service
-    // certificate to the one the public identity service publishes for
-    // `ledger.host` — an online step this build does not take.
+    // Scope of the guarantee: for a saved bundle, `snapshot.json`'s `ledger`
+    // is collector-asserted and unsigned, so this catches the wrong bundle,
+    // not a forged one. Only a live run closes that gap, by pinning the
+    // connection to the certificate the public identity service publishes for
+    // `ledger.host`. The comparison still runs on a live run, where it is
+    // trivially satisfied, so that one rule governs both paths.
     let expected = normalise_host(&ledger.host);
     let found = normalise_host(&metadata.ledger);
     if expected != found {
@@ -288,22 +334,38 @@ pub fn appraise_saved_evidence(
         }
     }
 
-    // The scope is not decoration. A pass here is about a recording of a node
-    // set, and every part of that sentence bounds the claim: *which* nodes —
-    // named, so a reader can tell a three-node ledger from three nodes of a
-    // larger one — and that they were recorded rather than observed.
-    let collected = metadata
-        .collected_at
-        .clone()
-        .unwrap_or_else(|| "an unrecorded time".to_string());
+    // The scope is not decoration. Every part of the sentence bounds the
+    // claim: *which* nodes — named, so a reader can tell a three-node ledger
+    // from three nodes of a larger one — and whether they were observed by
+    // this run or replayed from someone else's recording. The two readings
+    // differ in what backs the anchor, so they must not share a sentence.
     let ids: Vec<&str> = appraisal.nodes.iter().map(|n| n.node_id.as_str()).collect();
-    let scope = format!(
-        "offline evidence appraisal of {} node(s) [{}] recorded from {} at {collected}; \
-         not an observation of the live ledger",
-        metadata.node_count,
-        ids.join(", "),
-        metadata.ledger
-    );
+    let scope = if metadata.observed {
+        format!(
+            "appraisal of {} node(s) [{}] observed at {} on {}, whose service identity was \
+             confirmed against the public identity service; not a proof that those nodes are \
+             still serving",
+            metadata.node_count,
+            ids.join(", "),
+            metadata
+                .collected_at
+                .clone()
+                .unwrap_or_else(|| "an unrecorded time".to_string()),
+            metadata.ledger
+        )
+    } else {
+        let collected = metadata
+            .collected_at
+            .clone()
+            .unwrap_or_else(|| "an unrecorded time".to_string());
+        format!(
+            "offline evidence appraisal of {} node(s) [{}] recorded from {} at {collected}; \
+             not an observation of the live ledger",
+            metadata.node_count,
+            ids.join(", "),
+            metadata.ledger
+        )
+    };
 
     ResourceAppraisal {
         checks,

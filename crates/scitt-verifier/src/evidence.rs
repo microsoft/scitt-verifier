@@ -89,6 +89,14 @@ pub struct BundleMetadata {
     pub ledger: String,
     pub collected_at: Option<String>,
     pub node_count: usize,
+    /// Whether this run obtained the evidence itself.
+    ///
+    /// A saved bundle is a recording someone else made: its recorded ledger
+    /// name and collection time are claims. Evidence this run fetched was
+    /// observed, at a time this run knows, from a ledger this run
+    /// authenticated. The difference does not change any check — it changes
+    /// what the scope sentence may honestly say about them.
+    pub observed: bool,
 }
 
 /// Read a bundle directory into memory.
@@ -180,6 +188,7 @@ pub fn load(dir: &Path) -> Result<(EvidenceBundle, BundleMetadata), String> {
         ledger: manifest.ledger,
         collected_at: manifest.collected_at,
         node_count: nodes.len(),
+        observed: false,
     };
     Ok((
         EvidenceBundle {
@@ -188,6 +197,132 @@ pub fn load(dir: &Path) -> Result<(EvidenceBundle, BundleMetadata), String> {
         },
         metadata,
     ))
+}
+
+/// Write a collected bundle to disk in the same form [`load`] reads.
+///
+/// Deliberately the same manifest and the same layout, so a saved copy of a
+/// live run can be replayed later and reach the same appraisal. A copy that
+/// could not be re-read would record that a run happened without recording
+/// what it judged.
+///
+/// The digests are written for every file. They do not make the bundle
+/// trustworthy — nothing signs the manifest — but they are what lets a later
+/// replay say "this was disturbed" instead of appraising altered bytes.
+pub fn save(dir: &Path, bundle: &EvidenceBundle, metadata: &BundleMetadata) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+
+    let write = |name: &str, bytes: &[u8]| -> Result<serde_json::Value, String> {
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(serde_json::json!({ "path": name, "sha256": hex(&scitt_receipt::sha256(bytes)) }))
+    };
+
+    let mut nodes = Vec::with_capacity(bundle.nodes.len());
+    for node in &bundle.nodes {
+        // The node id is a ledger-supplied string that becomes a filename, so
+        // it is reduced to characters that cannot escape the directory or
+        // mean something to a shell. Real CCF node ids are hex; anything else
+        // would not be one, and quietly writing it as a path would be the
+        // bundle deciding where this run writes.
+        let stem: String = node
+            .node_id
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .take(64)
+            .collect();
+        if stem.is_empty() {
+            return Err(format!(
+                "node id {:?} contains nothing usable as a filename",
+                node.node_id
+            ));
+        }
+
+        let mut entry = serde_json::Map::new();
+        entry.insert("id".into(), node.node_id.clone().into());
+        entry.insert(
+            "report".into(),
+            write(&format!("{stem}-report.bin"), &node.snp_report)?,
+        );
+
+        // Re-encoded as one PEM file in the order the appraiser took them,
+        // because that order is load-bearing and a replay must see the same.
+        let mut amd = String::new();
+        for der in &node.amd_endorsements {
+            amd.push_str(&pem_block(der));
+        }
+        entry.insert(
+            "amdEndorsements".into(),
+            write(&format!("{stem}-amd.pem"), amd.as_bytes())?,
+        );
+        entry.insert(
+            "uvmEndorsement".into(),
+            write(&format!("{stem}-uvm.cose"), &node.uvm_endorsement)?,
+        );
+        if !node.certificate_pem.is_empty() {
+            entry.insert(
+                "certificate".into(),
+                write(&format!("{stem}-node.pem"), &node.certificate_pem)?,
+            );
+        }
+        nodes.push(serde_json::Value::Object(entry));
+    }
+
+    let mut manifest = serde_json::Map::new();
+    manifest.insert("version".into(), SUPPORTED_VERSION.into());
+    manifest.insert("ledger".into(), metadata.ledger.clone().into());
+    if let Some(at) = &metadata.collected_at {
+        manifest.insert("collectedAt".into(), at.clone().into());
+    }
+    if !bundle.service_certificate_pem.is_empty() {
+        std::fs::write(dir.join("service.pem"), &bundle.service_certificate_pem)
+            .map_err(|e| format!("{}: {e}", dir.join("service.pem").display()))?;
+        manifest.insert("serviceCertificate".into(), "service.pem".into());
+    }
+    manifest.insert("nodes".into(), serde_json::Value::Array(nodes));
+
+    let text = serde_json::to_string_pretty(&serde_json::Value::Object(manifest))
+        .map_err(|e| format!("the manifest could not be written: {e}"))?;
+    let path = dir.join(MANIFEST);
+    std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Wrap one DER certificate as a PEM block.
+pub fn pem_block(der: &[u8]) -> String {
+    let b64 = base64_encode(der);
+    let mut out = String::from("-----BEGIN CERTIFICATE-----\n");
+    for line in b64.as_bytes().chunks(64) {
+        out.push_str(std::str::from_utf8(line).expect("base64 is ascii"));
+        out.push('\n');
+    }
+    out.push_str("-----END CERTIFICATE-----\n");
+    out
+}
+
+pub fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(TABLE[(n >> 18) as usize & 63] as char);
+        out.push(TABLE[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
 }
 
 fn read_ref(dir: &Path, file: &FileRef, node_id: &str, field: &str) -> Result<Vec<u8>, String> {
@@ -415,6 +550,81 @@ mod tests {
         let (_d, got) = bundle(&manifest);
         let err = got.unwrap_err();
         assert!(err.contains("trusted"), "{err}");
+    }
+
+    /// A saved copy of a live run must appraise to the same evidence.
+    ///
+    /// The point of `--save-evidence` is that a verdict can be re-examined
+    /// later. A copy that did not load, or loaded as something else, would
+    /// record that a run happened without recording what it judged.
+    #[test]
+    fn a_saved_bundle_reloads_to_the_same_evidence() {
+        let der = scitt_receipt::chain::parse_pem_certificates(PEM).unwrap();
+        let bundle = EvidenceBundle {
+            service_certificate_pem: PEM.as_bytes().to_vec(),
+            nodes: vec![NodeEvidence {
+                node_id: "a".repeat(64),
+                certificate_pem: PEM.as_bytes().to_vec(),
+                snp_report: b"report".to_vec(),
+                amd_endorsements: der.clone(),
+                uvm_endorsement: b"uvm".to_vec(),
+            }],
+        };
+        let meta = BundleMetadata {
+            ledger: "l.example".into(),
+            collected_at: Some("2026-01-01T00:00:00Z".into()),
+            node_count: 1,
+            observed: true,
+        };
+
+        let dir = tempdir::Dir::new();
+        save(dir.path(), &bundle, &meta).expect("save");
+        let (again, meta_again) = load(dir.path()).expect("reload");
+
+        assert_eq!(again.nodes.len(), 1);
+        assert_eq!(again.nodes[0].node_id, bundle.nodes[0].node_id);
+        assert_eq!(again.nodes[0].snp_report, bundle.nodes[0].snp_report);
+        assert_eq!(
+            again.nodes[0].uvm_endorsement,
+            bundle.nodes[0].uvm_endorsement
+        );
+        assert_eq!(again.nodes[0].amd_endorsements, der);
+        assert_eq!(
+            again.service_certificate_pem,
+            bundle.service_certificate_pem
+        );
+        assert_eq!(meta_again.ledger, "l.example");
+        assert_eq!(
+            meta_again.collected_at.as_deref(),
+            Some("2026-01-01T00:00:00Z")
+        );
+        // A reloaded bundle is a recording, whatever it was when collected.
+        assert!(!meta_again.observed);
+    }
+
+    /// A node id is ledger-supplied and becomes a filename.
+    #[test]
+    fn a_node_id_cannot_choose_where_the_save_writes() {
+        let bundle = EvidenceBundle {
+            service_certificate_pem: Vec::new(),
+            nodes: vec![NodeEvidence {
+                node_id: "../../etc".into(),
+                certificate_pem: Vec::new(),
+                snp_report: b"r".to_vec(),
+                amd_endorsements: Vec::new(),
+                uvm_endorsement: b"u".to_vec(),
+            }],
+        };
+        let meta = BundleMetadata {
+            ledger: "l".into(),
+            collected_at: None,
+            node_count: 1,
+            observed: true,
+        };
+        let dir = tempdir::Dir::new();
+        save(dir.path(), &bundle, &meta).expect("save");
+        // The separators are gone, so nothing was written outside the bundle.
+        assert!(dir.path().join("etc-report.bin").exists());
     }
 
     /// A tiny scratch directory, removed on drop.

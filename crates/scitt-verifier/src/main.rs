@@ -10,6 +10,8 @@ mod decode;
 #[cfg(feature = "adapter-mst-ledger")]
 mod evidence;
 mod inspect_json;
+#[cfg(feature = "adapter-mst-ledger")]
+mod live;
 mod online;
 mod outcome;
 mod record;
@@ -1472,11 +1474,14 @@ fn check_binding(args: &VerifyArgs, statement_bytes: &[u8]) -> Result<BindingRes
     // comparison and receive a pass for one nobody performed.
     let mode = match args.binding_mode {
         BindingMode::None => return Ok(BindingResult::not_requested()),
-        // Not an artifact binding at all. `saved-evidence` binds the statement
-        // to what a service enforces, which is a different subject and a
-        // different claim; it is appraised separately and must never reach the
-        // core, which would have to invent an artifact to compare against.
-        BindingMode::SavedEvidence => return Ok(BindingResult::not_requested()),
+        // Not an artifact binding at all. The evidence modes bind the
+        // statement to what a service enforces, which is a different subject
+        // and a different claim; they are appraised separately and must never
+        // reach the core, which would have to invent an artifact to compare
+        // against.
+        BindingMode::SavedEvidence | BindingMode::LiveEvidence => {
+            return Ok(BindingResult::not_requested())
+        }
         BindingMode::PayloadBytes => CoreBindingMode::PayloadBytes,
         BindingMode::PayloadDigest => CoreBindingMode::PayloadDigest,
     };
@@ -1530,7 +1535,13 @@ fn run_adapter(
     decision: &PolicyDecision,
 ) -> Option<resource::ResourceAppraisal> {
     let adapter = args.adapter?;
-    let evidence_dir = args.evidence.as_ref()?;
+    let source = match args.binding_mode {
+        BindingMode::SavedEvidence => resource::EvidenceSource::Saved(args.evidence.as_ref()?),
+        BindingMode::LiveEvidence => resource::EvidenceSource::Live {
+            save_to: args.save_evidence.as_deref(),
+        },
+        _ => return None,
+    };
 
     // Acceptance first, and not as a formality. The adapter's whole output is
     // a claim about a policy taken *from this statement*; if the statement was
@@ -1566,9 +1577,9 @@ fn run_adapter(
         }
     };
 
-    Some(resource::appraise_saved_evidence(
+    Some(resource::appraise_evidence(
         adapter,
-        evidence_dir,
+        source,
         &statement,
         bind,
         trust_inputs,

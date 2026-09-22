@@ -81,6 +81,23 @@ An adapter reports checks; it does not report a verdict. Adapter results may
 narrow the verdict but never widen it, so an adapter cannot turn a failed core
 check, or evidence it could not gather, into a pass.
 
+#### Where the evidence came from
+
+`--binding-mode live-evidence` collects the evidence during the run;
+`saved-evidence` replays a bundle captured earlier. The checks are identical.
+What differs is the anchor: a saved bundle supplies the service certificate
+that identity binding is checked against, so a bundle collected from another
+ledger is internally consistent and passes. A live run takes that certificate
+from the public identity service and pins the connection to it.
+
+The scope sentence distinguishes the two, and is the only place the difference
+is visible in the output. A live run reports the nodes as *observed at* a time
+this run knows; a replay reports them as *recorded at* a time the collector
+asserted. Freshness and connection binding are `cannot-evaluate` either way.
+
+A ledger that could not be reached yields `cannot-evaluate`, not a failure: a
+service that did not answer is not a service that answered badly.
+
 ## Diagnostics
 
 Every problem is a structured diagnostic with a stable `code`, a `category`, a
