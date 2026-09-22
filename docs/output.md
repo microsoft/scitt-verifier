@@ -18,18 +18,21 @@ so changing one is a breaking change and moves the record's `schemaVersion`.
 | `cannot-evaluate` | 3 | The tool could not answer the question. **This is not a pass.** |
 | `usage-error` | 4 | The invocation or its inputs were wrong. Nothing was established. |
 
-### Why exit 0 is two verdicts
+### Why exit 0 has distinct verdicts
 
-These are different claims, and only one of them is what a release gate is
-actually asking:
+These are different claims; select the one your task requires:
 
 - `statement-transparent` — *some* statement was registered on a transparency
   service and satisfies your policy.
 - `artifact-transparent` — *the bytes you are about to deploy* were registered.
+- `resource-transparent` — the selected adapter's resource requirements held
+  within the reported evidence scope.
 
 A tool that prints one word for both lets a run that never opened the artifact
 look identical to one that compared it byte for byte. If you are gating a
-deployment, **gate on `artifact-transparent`**, not on exit 0.
+file deployment, **gate on `artifact-transparent`**, not on exit 0. A resource
+appraisal instead requires `resource-transparent` and its scope; neither is
+a substitute for the other.
 
 Exit 0 is shared deliberately: a team adopting the gate incrementally should not
 have their build break the day they add `--artifact`. The distinction lives in
@@ -52,8 +55,9 @@ an answer of "no" — receipts are unauthenticated in transit, so a broken one
 may never have come from a transparency service at all. Transparency is either
 established by a verified receipt (`pass`) or left open (`cannot-evaluate`).
 
-`not-checked` and `cannot-evaluate` are the pair most worth keeping apart. The
-first is an incomplete invocation; the second is a broken one.
+`not-checked` and `cannot-evaluate` are the pair most worth keeping apart.
+The first may be intentional (for example, no artifact in a statement-only
+run); the second says a requested check could not be completed.
 
 ### Adapter checks
 
@@ -81,14 +85,25 @@ An adapter reports checks; it does not report a verdict. Adapter results may
 narrow the verdict but never widen it, so an adapter cannot turn a failed core
 check, or evidence it could not gather, into a pass.
 
+Internally, the shared assessment derives success from an explicit, non-empty
+set of required check names, rather than trusting a separate pass boolean.
+Each required name must occur exactly once and have state `pass`; missing or
+duplicate results cannot pass. Checks outside that set still disclose limits
+of the scoped claim, such as MST freshness and connection binding.
+
 #### Where the evidence came from
 
 `--binding-mode live-evidence` collects the evidence during the run;
 `saved-evidence` replays a bundle captured earlier. The checks are identical.
 What differs is the anchor: a saved bundle supplies the service certificate
-that identity binding is checked against, so a bundle collected from another
-ledger is internally consistent and passes. A live run takes that certificate
-from the public identity service and pins the connection to it.
+that identity binding is checked against. Its unsigned manifest must match
+`adapters.mst-ledger.target.host`, but a forged, self-consistent bundle can
+substitute both evidence and anchor. A live run takes that certificate from the
+public identity service and pins the connection to it.
+
+Saving a live bundle does not preserve independently verifiable acquisition
+provenance: offline replay trusts the supplied bundle's origin. File digests
+detect changes relative to its unsigned manifest, not substitution of both.
 
 The scope sentence distinguishes the two, and is the only place the difference
 is visible in the output. A live run reports the nodes as *observed at* a time
@@ -97,6 +112,11 @@ asserted. Freshness and connection binding are `cannot-evaluate` either way.
 
 A ledger that could not be reached yields `cannot-evaluate`, not a failure: a
 service that did not answer is not a service that answered badly.
+
+Receipt-key acquisition (`--online`) is distinct from resource evidence
+acquisition (`live-evidence`), though the latter currently requires the former.
+See [adapters](adapters.md) for policy, invocation, and the checks that determine
+a scoped resource success.
 
 ## Diagnostics
 

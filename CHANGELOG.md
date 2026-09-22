@@ -2,12 +2,45 @@
 
 ## Unreleased
 
+### Statement verification and optional adapters have separate boundaries
+
+The README now starts with transparent statements and relying-party policy,
+not deployment appraisal. Artifact binding and resource adapters are opt-in;
+receipt support remains limited to the CCF VDS profile.
+
+Network acquisition is renamed from `scitt-acquire` to `scitt-network`.
+The pure MST appraisal package moves from `crates/scitt-attest` to
+`adapters/mst-ledger`, named `scitt-adapter-mst-ledger`. There is no generic
+attestation crate. CLI dispatch, MST orchestration, and bundle handling live in
+`crates/scitt-verifier/src/adapters/`; networking stays in `scitt-network`.
+
+The unpublished adapter policy shape is replaced, not retained as an alias:
+`ledger` moves to `adapters.mst-ledger.target`, `trust` to
+`adapters.mst-ledger.trust`, and `assertions.bindLedgerPolicy` to
+`adapters.mst-ledger.binding`. Statement rules remain in `assertions`.
+Unknown adapters/fields are rejected, and `Policy::evaluate` cannot silently
+pass requirements that need adapter execution.
+
+The CLI rejects policy/adapter-selector mismatches before acquisition and
+requires a passing statement verdict before appraisal. Shared adapter results
+derive success from explicit required checks rather than an independent
+boolean. TLS evidence collection is in `scitt_network::mst_ledger::collect`;
+the CLI decodes and joins the responses into the pure adapter's evidence types.
+Saved bundles retain their existing trust limitations: their manifests and
+service-certificate provenance are not authenticated on offline replay.
+
+The `adapter-mst-ledger` build feature, `--adapter mst-ledger`,
+`saved-evidence`/`live-evidence` modes, and acquisition behavior are unchanged.
+`--online` selects receipt-key acquisition; live resource acquisition is an
+additional explicit mode that currently requires it. See
+[adapters](docs/adapters.md).
+
 ### Evidence can now be collected from the ledger itself
 
 `--binding-mode live-evidence` collects the ledger's attestation evidence
 during the run instead of reading a bundle someone recorded earlier. It
 requires `--online`, and the ledger it contacts is the one named by
-`ledger.host` in the policy — never a flag, for the same reason the allowlist
+`adapters.mst-ledger.target.host` in the policy — never a flag, for the same reason the allowlist
 is not a flag.
 
 This is a security change, not a convenience. A saved bundle carries
@@ -15,13 +48,13 @@ This is a security change, not a convenience. A saved bundle carries
 subject of the appraisal also supplies its own anchor: a self-consistent bundle
 produced by an attacker's own ledger satisfies every check in the appraisal and
 is wrong only in which service it describes. The previous release could catch
-that by comparing the collector's unsigned manifest to `ledger.host`, which
+that by comparing the collector's unsigned manifest to the policy target, which
 detects the wrong bundle but not a forged one.
 
 A live run takes the service certificate from the public identity service over
 the public web PKI, and pins the connection that carries the node reports to
 exactly that certificate. Substituting a ledger no longer substitutes the
-anchor with it. `bootstrap` in `scitt-acquire` was separated out of key
+anchor with it. `bootstrap` in `scitt-network` was separated out of key
 acquisition so both uses share one authenticated path and one network deadline.
 
 `--save-evidence <DIR>` writes what a live run collected, in the same form
@@ -41,7 +74,7 @@ not answer is not a service that answered badly.
 
 ### The evidence must come from the ledger the policy names
 
-`ledger.host` was parsed, validated non-empty, and then never compared against
+The target host was parsed, validated non-empty, and then never compared against
 anything. A bundle captured from one service was appraised against a policy
 written for another, and the whole report — scope notice included — named the
 subject the operator had asked about rather than the one the evidence came
@@ -53,11 +86,11 @@ service that issued the receipt is usually *not* the service the statement
 describes. Pointing the adapter at the notary's own evidence produced a
 confident, wrong answer.
 
-The bundle's `ledger` is now compared against `ledger.host` before any node is
+The bundle's `ledger` is now compared against `adapters.mst-ledger.target.host` before any node is
 appraised, and a mismatch fails the run. Hostnames are compared case-insensitively
 and tolerate a URL, a trailing root dot, or surrounding whitespace; a differing
 port is a differing endpoint and is not normalised away. A policy with no
-`ledger` section no longer runs the adapter at all.
+`adapters.mst-ledger` section no longer runs the adapter at all.
 
 The comparison is against the collector's unsigned manifest, so it catches the
 wrong bundle, not a forged one. Pinning the bundle's service certificate to the

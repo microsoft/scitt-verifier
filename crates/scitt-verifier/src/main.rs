@@ -1,22 +1,17 @@
 //! `scitt-verifier` — an offline gate for SCITT transparent statements.
 //!
 //! Reads bytes, produces a verdict and a verification record, and exits with a
-//! code a pipeline can branch on. Nothing here reaches the network: the trust
-//! material is an input, so a verification that succeeds on a laptop succeeds
-//! identically on an air-gapped build agent three months later.
+//! code a pipeline can branch on. Network access is explicit and isolated in
+//! `scitt-network`; statement verification and policy evaluation remain offline.
 
+mod adapters;
 mod cli;
 mod decode;
-#[cfg(feature = "adapter-mst-ledger")]
-mod evidence;
 mod inspect_json;
-#[cfg(feature = "adapter-mst-ledger")]
-mod live;
 mod online;
 mod outcome;
 mod record;
 mod report;
-mod resource;
 
 use cli::{BindingMode, Command, Format, TrustSource, VerifyArgs};
 use outcome::{
@@ -249,6 +244,20 @@ fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
         }
     };
 
+    if let Err(reason) = adapters::validate_request(args.adapter, &policy) {
+        return Assessment::incomplete(
+            Verdict::UsageError,
+            trust,
+            Diagnostic::error(
+                "AdapterPolicyMismatch",
+                Category::Input,
+                reason,
+                "Select the adapter and evidence mode required by this policy.",
+            ),
+            gaps(args, None, None),
+        );
+    }
+
     // Chain validation always runs; `--trusted-roots` only decides whether the
     // anchor is one the operator chose or the one the statement brought with
     // it. Making the check itself conditional would mean the common case
@@ -305,12 +314,19 @@ fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
         }
     };
 
-    let decision = policy.evaluate(&facts, now);
+    let decision = policy.evaluate_statement(&facts, now);
+    let verdict = decide(
+        &facts,
+        &binding,
+        &decision,
+        args.binding_mode,
+        args.trusted_roots.is_some(),
+    );
 
     // The adapter runs only after the statement has been accepted and the
     // policy has ruled on it. Appraising node evidence against a statement
     // nobody has authenticated would compare a number to another number.
-    let resource = run_adapter(args, &policy, &statement_bytes, &facts, &decision);
+    let resource = run_adapter(args, &policy, &statement_bytes, verdict);
 
     let checks = Checks {
         statement_signature: signature_state(&facts),
@@ -323,13 +339,6 @@ fn evaluate(args: &VerifyArgs, now: i64) -> Assessment {
             .unwrap_or_default(),
     };
 
-    let verdict = decide(
-        &facts,
-        &binding,
-        &decision,
-        args.binding_mode,
-        args.trusted_roots.is_some(),
-    );
     // The adapter can only ever narrow. It is handed a verdict that has
     // already been decided and may replace a pass with a weaker outcome; there
     // is no path by which an adapter turns a failure into a success, which is
@@ -566,7 +575,7 @@ fn resolve_online(
 
     // The real clock, never `--now`: this records when the fetch happened, and
     // `--now` answers a different question entirely.
-    let (acquired, failed) = online::partition(scitt_acquire::acquire_all(&selected, wall_clock()));
+    let (acquired, failed) = online::partition(scitt_network::acquire_all(&selected, wall_clock()));
 
     // The mode describes what this run actually holds, not what it set out to
     // do. Every fetch failing leaves it with nothing, and that is what it says.
@@ -659,8 +668,8 @@ fn resolve_online(
 /// exists so the `diagnostics` list keeps one naming convention throughout: a
 /// pipeline matching on `code` should not have to know that some codes came
 /// from a different crate.
-fn acquisition_code(d: scitt_acquire::Diagnostic) -> &'static str {
-    use scitt_acquire::Diagnostic as D;
+fn acquisition_code(d: scitt_network::Diagnostic) -> &'static str {
+    use scitt_network::Diagnostic as D;
     match d {
         D::InvalidIssuer => "AcquisitionInvalidIssuer",
         D::UnsupportedProvider => "AcquisitionUnsupportedProvider",
@@ -678,7 +687,7 @@ fn acquisition_code(d: scitt_acquire::Diagnostic) -> &'static str {
 fn verify_or_fail(
     args: &VerifyArgs,
     statement_bytes: &[u8],
-    acquired: &[scitt_acquire::Acquired],
+    acquired: &[scitt_network::Acquired],
     trust: Trust,
     options: &VerifyOptions,
 ) -> Result<StatementFacts, Box<Assessment>> {
@@ -731,7 +740,7 @@ fn save_trust(dir: &Path, assessment: &Assessment) -> Result<Vec<PathBuf>, Diagn
         // The issuer is a validated hostname by the time it reaches here, so
         // it cannot contain a separator or traverse upwards. Checked rather
         // than assumed, because this is the one place an issuer becomes a path.
-        debug_assert!(scitt_acquire::validate_host(&a.issuer).is_ok());
+        debug_assert!(scitt_network::validate_host(&a.issuer).is_ok());
         let keys = dir.join(format!("{}.keys.cbor", a.issuer));
         let cert = dir.join(format!("{}.service-cert.der", a.issuer));
 
@@ -1531,16 +1540,28 @@ fn run_adapter(
     args: &VerifyArgs,
     policy: &Policy,
     statement_bytes: &[u8],
-    facts: &StatementFacts,
-    decision: &PolicyDecision,
-) -> Option<resource::ResourceAppraisal> {
+    statement_verdict: Verdict,
+) -> Option<adapters::AdapterAssessment> {
     let adapter = args.adapter?;
     let source = match args.binding_mode {
-        BindingMode::SavedEvidence => resource::EvidenceSource::Saved(args.evidence.as_ref()?),
-        BindingMode::LiveEvidence => resource::EvidenceSource::Live {
+        BindingMode::SavedEvidence => match args.evidence.as_deref() {
+            Some(path) => adapters::EvidenceSource::Saved(path),
+            None => {
+                return Some(adapters::not_attempted(
+                    adapter,
+                    "saved evidence is missing",
+                ))
+            }
+        },
+        BindingMode::LiveEvidence => adapters::EvidenceSource::Live {
             save_to: args.save_evidence.as_deref(),
         },
-        _ => return None,
+        _ => {
+            return Some(adapters::not_attempted(
+                adapter,
+                "the selected binding mode cannot run an adapter",
+            ))
+        }
     };
 
     // Acceptance first, and not as a formality. The adapter's whole output is
@@ -1548,43 +1569,25 @@ fn run_adapter(
     // not accepted then those bytes are unattributed, and comparing them to
     // what a node enforces would produce a confident-looking match that
     // establishes nothing about who asked for that policy.
-    if facts.signature_valid != Some(true) || !decision.satisfied() {
-        return Some(resource::ResourceAppraisal::not_attempted(
-            "the statement was not accepted, so its embedded execution policy is not \
-             attributable to anyone; node evidence was not appraised",
+    if !statement_verdict.is_pass() {
+        return Some(adapters::not_attempted(
+            adapter,
+            "the statement did not pass signature, receipt, chain, and relying-party \
+             policy acceptance; adapter evidence was not appraised",
         ));
     }
-
-    let (Some(bind), Some(trust_inputs), Some(target)) = (
-        policy.assertions.bind_ledger_policy.as_ref(),
-        policy.trust.as_ref(),
-        policy.ledger.as_ref(),
-    ) else {
-        return Some(resource::ResourceAppraisal::not_attempted(
-            "an adapter was requested, but the policy is missing one of the sections that \
-             hold the evidence to something: bindLedgerPolicy says which claim to compare, \
-             trust says what the nodes must satisfy, and ledger says which service the \
-             evidence must have come from",
-        ));
-    };
 
     let statement = match Sign1::parse(statement_bytes) {
         Ok(s) => s,
         Err(e) => {
-            return Some(resource::ResourceAppraisal::not_attempted(format!(
-                "the accepted statement could not be re-parsed for the adapter: {e}"
-            )))
+            return Some(adapters::not_attempted(
+                adapter,
+                format!("the accepted statement could not be re-parsed for the adapter: {e}"),
+            ))
         }
     };
 
-    Some(resource::appraise_evidence(
-        adapter,
-        source,
-        &statement,
-        bind,
-        trust_inputs,
-        target,
-    ))
+    Some(adapters::appraise(adapter, source, &statement, policy))
 }
 
 /// Let an adapter narrow a verdict, never widen one.
@@ -1595,7 +1598,7 @@ fn run_adapter(
 /// returned nothing but successes could still not rescue a failed signature.
 fn narrow_for_resource(
     verdict: Verdict,
-    resource: Option<&resource::ResourceAppraisal>,
+    resource: Option<&adapters::AdapterAssessment>,
 ) -> Verdict {
     let Some(resource) = resource else {
         return verdict;
@@ -1603,7 +1606,7 @@ fn narrow_for_resource(
     if !verdict.is_pass() {
         return verdict;
     }
-    if resource.scoped_pass {
+    if resource.scoped_pass() {
         // A distinct success, not the artifact one: this run established what
         // a service enforces, not which file is being shipped.
         Verdict::ResourceTransparent
@@ -1623,7 +1626,7 @@ fn narrow_for_resource(
 /// Turn adapter findings into diagnostics a reader can act on.
 fn diagnose_resource(
     verdict: Verdict,
-    resource: Option<&resource::ResourceAppraisal>,
+    resource: Option<&adapters::AdapterAssessment>,
 ) -> Vec<Diagnostic> {
     let Some(resource) = resource else {
         return Vec::new();
@@ -1639,8 +1642,7 @@ fn diagnose_resource(
             "ResourceAppraisalScoped",
             Category::Binding,
             format!("this result is scoped: {}", resource.scope),
-            "Treat this as an appraisal of the evidence named above, not as a live \
-             observation of the ledger.",
+            "Interpret this result only within the scope stated by the adapter.",
         ));
     }
 
@@ -1650,8 +1652,8 @@ fn diagnose_resource(
                 "ResourceCheckFailed",
                 Category::Binding,
                 format!("{}: {}", check.label, check.detail),
-                "The appraised nodes do not satisfy this requirement. Do not deploy against \
-                 this ledger until it is understood.",
+                "The appraised evidence does not satisfy this requirement. Investigate \
+                 the adapter finding before relying on the resource.",
             ));
         }
     }
@@ -1660,14 +1662,14 @@ fn diagnose_resource(
     // it could not answer. Without this the run reports `cannot-evaluate` with
     // nothing naming a cause, and the reader is told only that something went
     // wrong — which is the one outcome this tool exists to avoid.
-    if verdict == Verdict::CannotEvaluate && !resource.blocking.is_empty() {
+    if verdict == Verdict::CannotEvaluate && !resource.blocking().is_empty() {
         out.push(Diagnostic::error(
             "ResourceAppraisalIncomplete",
             Category::Binding,
             format!(
-                "the statement was accepted, but the ledger appraisal could not be \
-                 completed: {} did not pass. This is not a finding about the ledger.",
-                resource.blocking.join(", ")
+                "the adapter appraisal could not be completed: {} did not pass. \
+                 This is not a finding about the resource.",
+                resource.blocking().join(", ")
             ),
             "Read the per-check detail above. A check this build cannot perform is a \
              limitation of the tool, not evidence about the service.",
@@ -1695,8 +1697,8 @@ mod resource_tests {
     use super::*;
     use crate::outcome::AdapterCheck;
 
-    fn appraisal(states: &[CheckState], scoped_pass: bool) -> resource::ResourceAppraisal {
-        resource::ResourceAppraisal {
+    fn appraisal(states: &[CheckState], scoped_pass: bool) -> adapters::AdapterAssessment {
+        adapters::AdapterAssessment {
             checks: states
                 .iter()
                 .enumerate()
@@ -1707,13 +1709,11 @@ mod resource_tests {
                     detail: "detail".into(),
                 })
                 .collect(),
-            scoped_pass,
+            required_checks: (0..states.len())
+                .map(|i| format!("c{i}"))
+                .chain((!scoped_pass).then(|| "unestablished".to_string()))
+                .collect(),
             scope: "scope".into(),
-            blocking: if scoped_pass {
-                Vec::new()
-            } else {
-                vec!["Check 0".into()]
-            },
             notes: Vec::new(),
         }
     }

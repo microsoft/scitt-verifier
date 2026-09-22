@@ -1,4 +1,4 @@
-//! Authenticated acquisition of a ledger's receipt-verification keys.
+//! Explicit network acquisition for statement verification and optional adapters.
 //!
 //! # Why this is not just "download the key set"
 //!
@@ -20,6 +20,7 @@
 pub mod error;
 pub mod http;
 pub mod limits;
+pub mod mst_ledger;
 pub mod provider;
 
 pub use error::{AcquireError, Diagnostic};

@@ -1775,7 +1775,7 @@ fn naming_the_wrong_convention_cannot_be_evaluated() {
 // was never made would be proving the opposite of what it claims.
 //
 // The paths that do reach a service are covered by the ignored live tests in
-// the scitt-acquire crate, where a real endpoint is named explicitly.
+// the scitt-network crate, where a real endpoint is named explicitly.
 // ---------------------------------------------------------------------------
 
 /// A run that names no ledger and no key set has not been told how to

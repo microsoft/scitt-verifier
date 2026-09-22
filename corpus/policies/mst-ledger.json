@@ -1,0 +1,33 @@
+{
+  "policyId": "example/ledger-policy-gate",
+  "policyVersion": "1",
+  "description": "Illustrative MST adapter schema for documentation and regression tests, not a production policy. The all-zero UVM root fingerprint and all other acceptance values must be replaced with independently approved values.",
+  "assertions": {
+    "issuer": ["example-log.confidential-ledger.azure.com"],
+    "statementSubject": { "equals": "example-execution-policy" },
+    "receiptCount": 1
+  },
+  "adapters": {
+    "mst-ledger": {
+      "target": {
+        "host": "example-target.confidential-ledger.azure.com"
+      },
+      "trust": {
+        "uvmIssuer": "did:x509:0:sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "uvmEku": "1.2.3.4"
+      },
+      "binding": {
+        "path": ["security-policy-base64"],
+        "encoding": "base64",
+        "maxDecodedBytes": 1048576,
+        "nodeCoverage": "all-enumerated",
+        "expectNodeCount": 3,
+        "uvmFeed": "example-uvm-feed",
+        "minUvmSvn": 1,
+        "minimumTcb": [
+          { "generation": "genoa", "reportedTcb": "0x0101010101010101" }
+        ]
+      }
+    }
+  }
+}

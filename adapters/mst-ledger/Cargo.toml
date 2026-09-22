@@ -1,5 +1,5 @@
 [package]
-name = "scitt-attest"
+name = "scitt-adapter-mst-ledger"
 description = "Appraisal of SNP/UVM evidence against a statement-derived policy commitment"
 version.workspace = true
 edition.workspace = true
@@ -20,14 +20,14 @@ authors.workspace = true
 # It also must never depend on `scitt-verifier`. That is what makes "an adapter
 # reports checks, not a verdict" structural rather than a convention: the
 # `Verdict` type is not in scope here, so no code in this crate can construct
-# one and turn missing evidence into a pass. Nor on `scitt-acquire`, which is
+# one and turn missing evidence into a pass. Nor on `scitt-network`, which is
 # where networking lives.
 [dependencies]
 # For did:x509 resolution and certificate parsing. Reused rather than
 # reimplemented because this crate must enforce the EKU predicate that the
 # attestation library parses and then discards, and `scitt-receipt` already
 # does exactly that for statement issuers.
-scitt-receipt = { path = "../scitt-receipt", default-features = false }
+scitt-receipt = { path = "../../crates/scitt-receipt", default-features = false }
 # Optional so a build that does not want the adapter does not pay for the SNP
 # and UVM verification stack. Without it this crate still compiles, and every
 # check reports CannotEvaluate — which is the honest answer for a build that

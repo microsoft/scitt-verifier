@@ -404,8 +404,8 @@ impl Trust {
 pub struct Acquisition {
     /// The issuers selection authorised, in request order.
     pub selected: Vec<String>,
-    pub acquired: Vec<scitt_acquire::Acquired>,
-    pub failed: Vec<scitt_acquire::Failed>,
+    pub acquired: Vec<scitt_network::Acquired>,
+    pub failed: Vec<scitt_network::Failed>,
     /// Set when selection stopped before any request was made, with the reason.
     pub not_attempted: Option<String>,
 }

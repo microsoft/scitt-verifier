@@ -38,7 +38,7 @@ like one that passed. Naming the wrong mode is reported as *cannot compare*
 (exit 3), never as a mismatch — a mode error is not evidence about your artifact.
 
 *What is never fetched:* header 260 (`payload_location`) is displayed by
-`inspect` and otherwise ignored. This tool is offline; retrieving the preimage
+`inspect` and otherwise ignored. Verification is offline by default; retrieving the preimage
 from a URL the statement itself chose would not establish anything anyway.
 
 Hash algorithms: SHA-256, SHA-384, and SHA-512. Any other value in header 258
@@ -53,7 +53,7 @@ is reported as *cannot compare*, never approximated with a different hash.
 statement carries no chain at all. Code `CertificateChainNotValidated` is
 reported when the chain could not be examined at all.
 
-The chain is always validated: every certificate is checked to be signed by the
+For supported chains, every certificate is checked to be signed by the
 next, and the path must end at a self-issued anchor. Without `--trusted-roots`
 that anchor is the root the statement itself carries, so the result establishes
 that the chain is *internally consistent* — not that it leads anywhere you
@@ -64,10 +64,11 @@ equally consistent. The receipt binding still protects you — they cannot get a
 ledger receipt for it without registering with the transparency service — but
 do not read a validated chain as an identity claim unless you supplied the root.
 
-*What actually protects you today:* registration, and `--trusted-roots`. Pass a
-PEM file of the CAs you accept and the anchor must come from that file; the gap
-above then disappears and the `certificateChainValidated` and
-`requireChainToRootSha256` assertions become meaningful.
+*How to establish an independent anchor:* pass `--trusted-roots` with a PEM
+file of the CAs you accept, or use `requireChainToRootSha256` to require a root
+fingerprint chosen independently of the statement. Registration alone does not
+establish signer identity. `certificateChainValidated` alone is insufficient:
+an attacker can create an internally consistent chain.
 
 *What does not:* `signerSubjectContains` and `signerIssuerContains` substring-match
 the leaf certificate embedded in the statement — the same certificate an attacker
@@ -149,9 +150,8 @@ the same accepted CA could claim the expected DID and obtain a genuine receipt.
 
 *Reported at runtime:* `appraisal.notChecked` code `RevocationNotChecked`.
 
-Not checked. Revocation checking requires network access, and this tool is
-offline by design. There is no plan to change that; a gate that stops working
-when OCSP is unreachable is not a gate anyone keeps enabled.
+Not checked, including with `--online`. Receipt-key acquisition and live
+adapter evidence acquisition do not perform certificate revocation checks.
 
 ### Verifiable data structures other than `CCF_LEDGER_SHA256`
 
@@ -219,11 +219,11 @@ mechanism here for "this key existed and must no longer be honoured".
 
 ## Deliberate non-goals
 
-**Fetching statements from a service.** This tool verifies bytes you already
-have. `--online` fetches *keys*, never statements or receipts: the evidence
-being judged is always input you supplied, so what is being checked cannot be
-chosen by the network. Retrieval of statements belongs in whatever already knows
-your service topology.
+**Fetching statements from a service.** This tool verifies statement bytes you
+already have. `--online` fetches *keys*, never statements or receipts.
+The optional `live-evidence` adapter mode separately acquires resource
+evidence, but does not fetch or replace the statement being verified.
+Retrieval of statements belongs in whatever already knows your service topology.
 
 **Deciding what is trustworthy.** The tool reports facts and evaluates *your*
 policy. It ships no default policy, because a default would be a trust decision

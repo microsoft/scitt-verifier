@@ -17,6 +17,13 @@ higher than the cost of a network dependency — most often during rotation,
 where a pinned gate fails closed on every build until someone lands a pull
 request.
 
+This document concerns **receipt-signing keys**. Optional resource adapters
+have separate targets and trust inputs under `adapters.<name>`. For example,
+`mst-ledger` obtains live evidence from `adapters.mst-ledger.target.host`, not
+from the receipt issuer selected by `assertions.issuer` or `--ledger`.
+`--online` alone does not appraise a resource; `live-evidence` additionally
+requests that work and currently requires `--online`. See [adapters](adapters.md).
+
 `tools/scitt-keys.py` automates the pinned procedure. It is a prototype of a
 planned `scitt-keys` binary; the command surface below is expected to be stable.
 

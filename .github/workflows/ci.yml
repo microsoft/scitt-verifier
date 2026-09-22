@@ -39,8 +39,8 @@ jobs:
       # The adapter is off by default, so the two steps above never compile a
       # line of it. Without this, its code could stop building — or start
       # failing its tests — and every job here would stay green.
-      - run: cargo clippy -p scitt-attest --features mst-ledger --all-targets
-      - run: cargo test -p scitt-attest --features mst-ledger
+      - run: cargo clippy -p scitt-adapter-mst-ledger --features mst-ledger --all-targets
+      - run: cargo test -p scitt-adapter-mst-ledger --features mst-ledger
 
       # Same reasoning one level up. `adapter-mst-ledger` is what wires the
       # adapter into the CLI — the evidence loader, the policy translation, and
@@ -67,7 +67,7 @@ jobs:
           # Both crates make the same promise — callers supply bytes, we decide
           # nothing about time, exit status, or the network — so both are held
           # to it here. A crate that claims purity and is never scanned drifts.
-          crates="scitt-receipt scitt-attest"
+          roots="crates/scitt-receipt/src adapters/mst-ledger/src"
           io_pattern='std::fs|File::open|read_to_string'
 
           # `if grep` cannot tell "found nothing" from "looked at nothing": both
@@ -75,8 +75,7 @@ jobs:
           # `set -e`. Rename or move the crate and every check below reports
           # clean forever — in the one job whose entire purpose is to notice.
           # So establish there is something to scan before trusting silence.
-          for name in $crates; do
-            core=crates/$name/src
+          for core in $roots; do
             test -d "$core" || {
               echo "::error::$core does not exist; these checks would pass without scanning anything"
               exit 1
@@ -113,28 +112,27 @@ jobs:
             esac
           }
 
-          for name in $crates; do
-            core=crates/$name/src
+          for core in $roots; do
             check "$core" "$io_pattern" \
-                  "$name must not perform file I/O; callers supply bytes."
+                  "$core must not perform file I/O; callers supply bytes."
             # \b matters: an unanchored 'chrono' matches tav_cose::synchronous.
             check "$core" 'SystemTime|Instant::now|\bchrono\b' \
-                  "$name must not read the clock; freshness is a policy question."
+                  "$core must not read the clock; freshness is a policy question."
             check "$core" 'std::process::exit|ExitCode' \
-                  "$name must not decide exit codes."
+                  "$core must not decide exit codes."
             check "$core" 'reqwest|hyper|ureq|TcpStream' \
-                  "$name must not open network connections; verification is offline."
+                  "$core must not open network connections; verification is offline."
           done
 
           check crates/scitt-receipt/src 'scitt_policy|scitt_verifier' \
                 'scitt-receipt must not depend on policy or the CLI.'
           # This one is the structural half of "an adapter reports checks, not a
-          # verdict". If scitt-attest could see the CLI, it could construct a
+          # verdict". If scitt-adapter-mst-ledger could see the CLI, it could construct a
           # Verdict, and an appraisal that gathered no evidence could return a
           # pass. Keeping the type out of scope is what makes that impossible
           # rather than merely discouraged.
-          check crates/scitt-attest/src 'scitt_verifier' \
-                'scitt-attest must not depend on the CLI; it reports checks, not verdicts.'
+          check adapters/mst-ledger/src 'scitt_verifier' \
+                'scitt-adapter-mst-ledger must not depend on the CLI; it reports checks, not verdicts.'
           exit $violations
 
       - name: Reject dependency drift in the core manifests
@@ -156,13 +154,13 @@ jobs:
           check_manifest crates/scitt-receipt/Cargo.toml \
             '^(scitt-policy|scitt-verifier)' \
             'scitt-receipt must not depend on scitt-policy or scitt-verifier.'
-          # scitt-acquire is named here as well as scitt-verifier: it is where
+          # scitt-network is named here as well as scitt-verifier: it is where
           # networking lives, and a dependency edge to it would let the offline
           # appraisal reach the ledger it is supposed to be appraising from
           # evidence someone else collected.
-          check_manifest crates/scitt-attest/Cargo.toml \
-            '^(scitt-verifier|scitt-acquire)' \
-            'scitt-attest must not depend on scitt-verifier or scitt-acquire.'
+          check_manifest adapters/mst-ledger/Cargo.toml \
+            '^(scitt-verifier|scitt-network)' \
+            'scitt-adapter-mst-ledger must not depend on scitt-verifier or scitt-network.'
 
   size:
     name: Binary size budget

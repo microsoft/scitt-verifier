@@ -26,6 +26,23 @@
 use crate::PathSegment;
 use serde::{Deserialize, Serialize};
 
+/// Requirements for appraisal by the MST ledger adapter.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct MstLedgerPolicy {
+    pub target: LedgerTarget,
+    pub trust: TrustInputs,
+    pub binding: BindLedgerPolicy,
+}
+
+impl MstLedgerPolicy {
+    pub fn validate(&self) -> Result<(), String> {
+        self.target.validate()?;
+        self.trust.validate()?;
+        self.binding.validate()
+    }
+}
+
 /// The ledger whose enforced policy is being appraised.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -48,7 +65,7 @@ pub struct LedgerTarget {
 impl LedgerTarget {
     pub fn validate(&self) -> Result<(), String> {
         if self.host.trim().is_empty() {
-            return Err("ledger.host is empty; the policy must name the ledger it is about".into());
+            return Err("target.host is empty; the policy must name the ledger it is about".into());
         }
         Ok(())
     }
@@ -228,52 +245,46 @@ pub struct BindLedgerPolicy {
 impl BindLedgerPolicy {
     pub fn validate(&self) -> Result<(), String> {
         if self.path.is_empty() {
-            return Err(
-                "bindLedgerPolicy.path is empty; it would address the whole payload \
+            return Err("binding.path is empty; it would address the whole payload \
                         rather than the policy claim"
-                    .into(),
-            );
+                .into());
         }
         if let Some(max) = self.max_decoded_bytes {
             if max == 0 {
-                return Err(
-                    "bindLedgerPolicy.maxDecodedBytes is 0, which no policy can satisfy".into(),
-                );
+                return Err("binding.maxDecodedBytes is 0, which no policy can satisfy".into());
             }
         }
         if let Some(count) = self.expect_node_count {
             if count == 0 {
                 return Err(
-                    "bindLedgerPolicy.expectNodeCount is 0; zero nodes agreeing establishes \
+                    "binding.expectNodeCount is 0; zero nodes agreeing establishes \
                      nothing, so this would be satisfied by evidence about no ledger at all"
                         .into(),
                 );
             }
         }
         if self.uvm_feed.trim().is_empty() {
-            return Err("bindLedgerPolicy.uvmFeed is empty".into());
+            return Err("binding.uvmFeed is empty".into());
         }
         if self.minimum_tcb.is_empty() {
             return Err(
-                "bindLedgerPolicy.minimumTcb is empty; an empty floor is not a floor — the \
+                "binding.minimumTcb is empty; an empty floor is not a floor — the \
                  attestation library skips the check entirely, accepting any reported TCB"
                     .into(),
             );
         }
         for (index, entry) in self.minimum_tcb.iter().enumerate() {
             if entry.generation.trim().is_empty() {
-                return Err(format!(
-                    "bindLedgerPolicy.minimumTcb[{index}].generation is empty"
-                ));
+                return Err(format!("binding.minimumTcb[{index}].generation is empty"));
             }
             entry
                 .value()
-                .map_err(|e| format!("bindLedgerPolicy.minimumTcb[{index}]: {e}"))?;
+                .map_err(|e| format!("binding.minimumTcb[{index}]: {e}"))?;
         }
         if let Some(pin) = &self.expect_policy_sha256 {
             if pin.len() != 64 || !pin.chars().all(|c| c.is_ascii_hexdigit()) {
                 return Err(format!(
-                    "bindLedgerPolicy.expectPolicySha256 must be 64 hex characters, got {:?}",
+                    "binding.expectPolicySha256 must be 64 hex characters, got {:?}",
                     pin
                 ));
             }
@@ -291,14 +302,14 @@ mod tests {
         format!(
             r#"{{
               "policyId": "p", "policyVersion": "1",
-              "ledger": {{ "host": "l.example" }},
+              "assertions": {{ "receiptCount": 1 }},
+              "adapters": {{ "mst-ledger": {{
+              "target": {{ "host": "l.example" }},
               "trust": {{
                 "uvmIssuer": "did:x509:0:sha256:abc",
                 "uvmEku": "1.3.6.1.4.1.311.76.59.1.2"
               }},
-              "assertions": {{
-                "receiptCount": 1,
-                "bindLedgerPolicy": {{
+                "binding": {{
                   "path": ["security-policy-base64"],
                   "encoding": "base64",
                   "nodeCoverage": "all-enumerated",
@@ -307,7 +318,7 @@ mod tests {
                   "minimumTcb": [
                     {{ "generation": "genoa", "reportedTcb": "0x541700000000000a" }}
                   ]{extra}
-                }}
+                }} }}
               }}
             }}"#
         )
@@ -317,13 +328,28 @@ mod tests {
     #[test]
     fn a_complete_section_parses_and_validates() {
         let p = Policy::from_json(&policy_json("")).expect("policy");
-        let ledger = p.ledger.expect("ledger");
-        assert_eq!(ledger.host, "l.example");
-        let bind = p.assertions.bind_ledger_policy.expect("bind");
+        let adapter = p.adapters.mst_ledger.expect("adapter");
+        assert_eq!(adapter.target.host, "l.example");
+        let bind = adapter.binding;
         assert_eq!(bind.encoding, Encoding::Base64);
         assert_eq!(bind.node_coverage, NodeCoverage::AllEnumerated);
         assert_eq!(bind.min_uvm_svn, 104);
         assert_eq!(bind.minimum_tcb[0].value().unwrap(), 0x5417_0000_0000_000a);
+    }
+
+    #[test]
+    fn every_adapter_field_round_trips_under_its_namespace() {
+        let bytes = policy_json(
+            r#", "maxDecodedBytes": 4096, "expectNodeCount": 3,
+            "expectPolicySha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef""#,
+        );
+        let original: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let policy = Policy::from_json(&bytes).unwrap();
+        let serialized = serde_json::to_value(&policy).unwrap();
+        assert_eq!(serialized["adapters"], original["adapters"]);
+        assert!(serialized.get("ledger").is_none());
+        assert!(serialized.get("trust").is_none());
+        assert!(serialized["assertions"].get("bindLedgerPolicy").is_none());
     }
 
     /// The section must parse in builds that cannot act on it.
@@ -334,7 +360,7 @@ mod tests {
     #[test]
     fn the_section_parses_regardless_of_build_features() {
         let p = Policy::from_json(&policy_json("")).expect("policy");
-        assert!(p.assertions.bind_ledger_policy.is_some());
+        assert!(p.adapters.mst_ledger.is_some());
     }
 
     /// An EKU written into the DID would be silently discarded downstream, so
@@ -425,5 +451,162 @@ mod tests {
         );
         let err = Policy::from_json(json.as_bytes()).unwrap_err();
         assert!(err.contains("trust"), "{err}");
+    }
+
+    fn policy_value() -> serde_json::Value {
+        serde_json::from_slice(&policy_json("")).unwrap()
+    }
+
+    #[test]
+    fn each_adapter_section_is_required() {
+        for field in ["target", "trust", "binding"] {
+            let mut json = policy_value();
+            json["adapters"]["mst-ledger"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            let err = Policy::from_json(&serde_json::to_vec(&json).unwrap()).unwrap_err();
+            assert!(err.contains(&format!("missing field `{field}`")), "{err}");
+        }
+    }
+
+    #[test]
+    fn legacy_policy_fields_are_refused_even_alongside_valid_rules() {
+        for (location, field, value) in [
+            ("", "ledger", serde_json::json!({"host": "l.example"})),
+            (
+                "",
+                "trust",
+                policy_value()["adapters"]["mst-ledger"]["trust"].clone(),
+            ),
+            (
+                "/assertions",
+                "bindLedgerPolicy",
+                policy_value()["adapters"]["mst-ledger"]["binding"].clone(),
+            ),
+        ] {
+            let mut json = policy_value();
+            json.pointer_mut(location)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert(field.into(), value);
+            let err = Policy::from_json(&serde_json::to_vec(&json).unwrap()).unwrap_err();
+            assert!(err.contains(&format!("unknown field `{field}`")), "{err}");
+        }
+    }
+
+    #[test]
+    fn unknown_fields_are_refused_at_every_adapter_level() {
+        for location in [
+            "/adapters",
+            "/adapters/mst-ledger",
+            "/adapters/mst-ledger/target",
+            "/adapters/mst-ledger/trust",
+            "/adapters/mst-ledger/binding",
+            "/adapters/mst-ledger/binding/minimumTcb/0",
+        ] {
+            let mut json = policy_value();
+            json.pointer_mut(location)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert("unknownRequirement".into(), true.into());
+            let err = Policy::from_json(&serde_json::to_vec(&json).unwrap()).unwrap_err();
+            assert!(err.contains("unknown field `unknownRequirement`"), "{err}");
+        }
+    }
+
+    #[test]
+    fn public_evaluation_cannot_silently_bypass_an_adapter() {
+        let policy = Policy::from_json(&policy_json("")).unwrap();
+        let facts = scitt_receipt::StatementFacts {
+            receipts_present: 1,
+            ..Default::default()
+        };
+        let statement = policy.evaluate_statement(&facts, 0);
+        assert!(statement.satisfied());
+        assert_eq!(statement.results.len(), 1);
+        assert_eq!(statement.results[0].name, "receiptCount");
+
+        let decision = policy.evaluate(&facts, 0);
+        assert_eq!(decision.policy_id, policy.policy_id);
+        assert_eq!(decision.policy_version, policy.policy_version);
+        assert!(!decision.satisfied());
+        assert!(!decision.failed());
+        assert!(decision.unevaluable());
+        assert_eq!(decision.results.len(), 2);
+        assert_eq!(decision.results[0].outcome, crate::Outcome::Pass);
+        assert_eq!(decision.results[1].name, "adapters.mst-ledger");
+        assert_eq!(decision.results[1].outcome, crate::Outcome::CannotEvaluate);
+        assert!(decision.results[1].detail.contains("adapter evidence"));
+    }
+
+    #[test]
+    fn adapter_absence_does_not_mask_a_statement_failure() {
+        let policy = Policy::from_json(&policy_json("")).unwrap();
+        let facts = scitt_receipt::StatementFacts::default();
+        let decision = policy.evaluate(&facts, 0);
+        assert!(decision.failed());
+        assert!(decision.unevaluable());
+        assert!(!decision.satisfied());
+        assert_eq!(decision.results.len(), 2);
+        assert_eq!(decision.results[0].outcome, crate::Outcome::Fail);
+        assert_eq!(decision.results[1].outcome, crate::Outcome::CannotEvaluate);
+    }
+
+    #[test]
+    fn an_adapter_only_policy_never_claims_statement_acceptance() {
+        let mut json = policy_value();
+        json["assertions"] = serde_json::json!({});
+        let policy = Policy::from_json(&serde_json::to_vec(&json).unwrap()).unwrap();
+        assert!(!policy.adapters.is_empty());
+        let facts = scitt_receipt::StatementFacts::default();
+        let statement = policy.evaluate_statement(&facts, 0);
+        assert!(statement.results.is_empty());
+        assert!(!statement.satisfied());
+        let decision = policy.evaluate(&facts, 0);
+        assert!(!decision.satisfied());
+        assert!(!decision.failed());
+        assert!(decision.unevaluable());
+        assert_eq!(decision.results.len(), 1);
+        assert_eq!(decision.results[0].name, "adapters.mst-ledger");
+    }
+
+    #[test]
+    fn empty_adapters_do_not_make_an_empty_policy_meaningful() {
+        for adapters in [
+            serde_json::json!({}),
+            serde_json::json!({"mst-ledger": null}),
+        ] {
+            let mut json = policy_value();
+            json["assertions"] = serde_json::json!({});
+            json["adapters"] = adapters;
+            let err = Policy::from_json(&serde_json::to_vec(&json).unwrap()).unwrap_err();
+            assert!(err.contains("no assertions"), "{err}");
+        }
+    }
+
+    #[test]
+    fn statement_only_evaluation_is_unchanged_without_adapters() {
+        let mut json = policy_value();
+        json.as_object_mut().unwrap().remove("adapters");
+        let policy = Policy::from_json(&serde_json::to_vec(&json).unwrap()).unwrap();
+        assert!(policy.adapters.is_empty());
+        for receipts_present in [0, 1, 2] {
+            let facts = scitt_receipt::StatementFacts {
+                receipts_present,
+                ..Default::default()
+            };
+            let public = policy.evaluate(&facts, 0);
+            let statement = policy.evaluate_statement(&facts, 0);
+            assert_eq!(
+                serde_json::to_value(&public).unwrap(),
+                serde_json::to_value(&statement).unwrap()
+            );
+            assert_eq!(public.satisfied(), receipts_present == 1);
+            assert_eq!(public.failed(), receipts_present != 1);
+            assert!(!public.unevaluable());
+        }
     }
 }

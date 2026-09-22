@@ -131,7 +131,7 @@ LEDGER EVIDENCE (mst-ledger adapter):
 Answers one question: does the execution policy embedded in this statement
 equal the policy the ledger's attested nodes are enforcing?
 
-The ledger under appraisal is the one named by `ledger.host` in the policy —
+The ledger under appraisal is named by `adapters.mst-ledger.target.host` in the policy —
 which is usually *not* the transparency service that issued the receipt. A
 production transparency service notarises builds for many deployments; the
 statement describes one of them. Evidence from anywhere else is refused rather
@@ -492,7 +492,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     // checked what they were deploying.
     if artifact.is_some() && binding_mode.is_evidence() {
         return Err(
-            "--binding-mode saved-evidence and live-evidence appraise ledger evidence and make \
+            "--binding-mode saved-evidence and live-evidence appraise adapter evidence and make \
              no claim about an artifact, so --artifact would be ignored. Run the artifact \
              binding as a separate invocation."
                 .into(),

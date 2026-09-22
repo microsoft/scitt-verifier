@@ -174,6 +174,46 @@ check('four assertions were evaluated', satisfied.assertions.length, 4);
 check('all outcomes are pass', satisfied.assertions.every((a) => a.outcome === 'pass'), true);
 check('no verdict field is exposed', satisfied.verdict, undefined);
 
+const adapterPolicy = {
+  policyId: 'harness/adapter-required',
+  policyVersion: '1',
+  assertions: { receiptCount: 1 },
+  adapters: {
+    'mst-ledger': {
+      target: { host: 'ledger.example' },
+      trust: {
+        uvmIssuer: 'did:x509:0:sha256:abc',
+        uvmEku: '1.3.6.1.4.1.311.76.59.1.2',
+      },
+      binding: {
+        path: ['security-policy-base64'],
+        encoding: 'base64',
+        nodeCoverage: 'all-enumerated',
+        uvmFeed: 'ContainerPlat-AMD-UVM',
+        minUvmSvn: 104,
+        minimumTcb: [{ generation: 'genoa', reportedTcb: '0x541700000000000a' }],
+      },
+    },
+  },
+};
+for (const statementRules of [true, false]) {
+  const input = {
+    ...adapterPolicy,
+    assertions: statementRules ? adapterPolicy.assertions : {},
+  };
+  const result = JSON.parse(evaluatePolicy(
+    genuine, keys, new TextEncoder().encode(JSON.stringify(input)), AT_REGISTRATION,
+  ));
+  const label = statementRules ? 'statement plus adapter' : 'adapter only';
+  check(`${label}: cannot silently accept`, result.satisfied, false);
+  check(`${label}: missing evidence is not failure`, result.failed, false);
+  check(`${label}: missing adapter evidence is reported`, result.unevaluable, true);
+  check(`${label}: exact outcomes`, result.assertions.map((a) => [a.name, a.outcome]),
+    statementRules
+      ? [['receiptCount', 'pass'], ['adapters.mst-ledger', 'cannotEvaluate']]
+      : [['adapters.mst-ledger', 'cannotEvaluate']]);
+}
+
 // A policy naming a transparency service this statement was not registered
 // with. The receipt still verifies — the signature was never the question.
 const wrongIssuer = JSON.parse(evaluatePolicy(genuine, keys, policy('wrong-issuer.json'), AT_REGISTRATION));

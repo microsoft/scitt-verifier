@@ -22,12 +22,10 @@
 //! The crate takes no clock. `now` is passed in, so evaluation is reproducible
 //! and testable.
 
+pub mod adapters;
 pub mod claim;
-pub mod ledger;
 
-pub use ledger::{
-    BindLedgerPolicy, Encoding, LedgerTarget, NodeCoverage, TcbFloorEntry, TrustInputs,
-};
+pub use adapters::Adapters;
 
 use scitt_receipt::cbor;
 use scitt_receipt::chain::Outcome as ChainOutcome;
@@ -47,17 +45,9 @@ pub struct Policy {
     pub policy_version: String,
     #[serde(default)]
     pub description: Option<String>,
-    /// The ledger this policy is about, when it configures ledger appraisal.
-    ///
-    /// Present only for policies that use `assertions.bindLedgerPolicy`, and
-    /// required by those. Kept at the top level rather than inside the
-    /// assertion because it identifies the subject of the whole document, not
-    /// one rule within it.
+    /// Optional requirements that need evidence beyond statement facts.
     #[serde(default)]
-    pub ledger: Option<LedgerTarget>,
-    /// Trust inputs the consumer supplies independently of the evidence.
-    #[serde(default)]
-    pub trust: Option<TrustInputs>,
+    pub adapters: Adapters,
     pub assertions: Assertions,
 }
 
@@ -241,22 +231,6 @@ pub struct Assertions {
     /// witnessed the whole thing at registration.
     #[serde(default)]
     pub external_signatures: Option<Vec<ExternalSignature>>,
-    /// Bind the execution policy embedded in the statement to the policy the
-    /// ledger's nodes are actually enforcing.
-    ///
-    /// Unlike every other assertion here, this one cannot be evaluated from
-    /// the statement alone: it needs attestation evidence from the ledger. It
-    /// is therefore not checked by `Policy::evaluate`, which sees only
-    /// statement facts. The orchestrator runs it separately and contributes
-    /// its findings as adapter checks.
-    ///
-    /// It lives in the policy document rather than in adapter-specific
-    /// configuration because it is a relying-party requirement like any other,
-    /// and because keeping the target ledger in a reviewed, committed file is
-    /// what stops a pipeline definition redirecting the check at a ledger that
-    /// would attest to its own policy.
-    #[serde(default)]
-    pub bind_ledger_policy: Option<BindLedgerPolicy>,
 }
 
 /// One detached signature to verify.
@@ -1333,43 +1307,7 @@ impl Policy {
                 ));
             }
         }
-        // The ledger section, the trust inputs and the assertion are one
-        // configuration in three places, so they are required to arrive
-        // together. Each is useless alone, and an incomplete set is the shape
-        // most likely to be read as "configured" during review: trust inputs
-        // with no assertion enforce nothing, and an assertion with no trust
-        // inputs cannot be enforced.
-        let bind = policy.assertions.bind_ledger_policy.as_ref();
-        match (bind, &policy.ledger, &policy.trust) {
-            (Some(bind), Some(ledger), Some(trust)) => {
-                ledger.validate()?;
-                trust.validate()?;
-                bind.validate()?;
-            }
-            (Some(_), None, _) => {
-                return Err(
-                    "assertions.bindLedgerPolicy requires a top-level 'ledger' section \
-                            naming the ledger it is about"
-                        .into(),
-                )
-            }
-            (Some(_), _, None) => {
-                return Err(
-                    "assertions.bindLedgerPolicy requires a top-level 'trust' section; \
-                            without independently supplied trust inputs the evidence would be \
-                            checked only against itself"
-                        .into(),
-                )
-            }
-            (None, Some(_), _) | (None, _, Some(_)) => {
-                return Err(
-                    "'ledger' and 'trust' configure assertions.bindLedgerPolicy, which \
-                            this policy does not declare; as written they enforce nothing"
-                        .into(),
-                )
-            }
-            (None, None, None) => {}
-        }
+        policy.adapters.validate()?;
         Ok(policy)
     }
 
@@ -1382,7 +1320,7 @@ impl Policy {
     fn is_empty(&self) -> bool {
         match serde_json::to_value(&self.assertions) {
             Ok(serde_json::Value::Object(fields)) => {
-                fields.values().all(serde_json::Value::is_null)
+                fields.values().all(serde_json::Value::is_null) && self.adapters.is_empty()
             }
             _ => false,
         }
@@ -1390,11 +1328,25 @@ impl Policy {
 
     /// Evaluate the policy against verified facts.
     ///
+    /// Adapter requirements yield `CannotEvaluate`: this API has no adapter
+    /// evidence and must not report success for requirements it did not check.
+    ///
     /// `now` is a Unix timestamp supplied by the caller. Passing it in rather
     /// than reading the clock keeps the same inputs producing the same decision
     /// on every machine, which matters when a build agent and a human are
     /// arguing about why a gate failed.
     pub fn evaluate(&self, facts: &StatementFacts, now: i64) -> PolicyDecision {
+        let mut decision = self.evaluate_statement(facts, now);
+        decision.results.extend(self.adapters.unavailable_results());
+        decision
+    }
+
+    /// Evaluate only statement assertions, as the first stage of orchestration.
+    ///
+    /// This is not a decision on the whole policy: callers must separately
+    /// evaluate every requested adapter before accepting it. With no statement
+    /// assertions, the decision has no results and is not satisfied.
+    pub fn evaluate_statement(&self, facts: &StatementFacts, now: i64) -> PolicyDecision {
         let mut results = Vec::new();
         let a = &self.assertions;
 

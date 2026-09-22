@@ -296,7 +296,7 @@ fn acquisition_json(a: &Acquisition) -> Value {
     })
 }
 
-fn provenance_json(p: &scitt_acquire::Provenance, acquired: bool) -> Value {
+fn provenance_json(p: &scitt_network::Provenance, acquired: bool) -> Value {
     json!({
         "issuer": p.issuer,
         "acquired": acquired,

@@ -1,6 +1,6 @@
 //! Collecting ledger evidence from the ledger itself.
 //!
-//! The counterpart to [`crate::evidence`], and the reason online acquisition
+//! The counterpart to [`super::load`], and the reason online acquisition
 //! is worth building at all. A saved bundle supplies its own
 //! `service.pem` — the very certificate identity binding is checked against —
 //! so a self-consistent bundle produced by somebody else's ledger satisfies
@@ -8,7 +8,7 @@
 //! question about the wrong service.
 //!
 //! Here the anchor cannot come from the evidence. It comes from
-//! [`scitt_acquire::bootstrap`], which asks the public identity service which
+//! [`scitt_network::bootstrap`], which asks the public identity service which
 //! certificate that ledger must present, over the public web PKI, and the
 //! connection that carries the node reports is then pinned to exactly that
 //! certificate. Substituting a ledger no longer substitutes the anchor with
@@ -26,11 +26,11 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use scitt_acquire::{http, limits, provider};
-use scitt_attest::{EvidenceBundle, NodeEvidence};
+use scitt_adapter_mst_ledger::{EvidenceBundle, NodeEvidence};
+use scitt_network::limits;
 use serde::Deserialize;
 
-use crate::evidence::BundleMetadata;
+use super::load::BundleMetadata;
 
 /// One node's attestation, as `/node/quotes` reports it.
 #[derive(Debug, Deserialize)]
@@ -71,52 +71,32 @@ struct NodesResponse {
 /// Collect evidence from a live ledger, anchored outside the ledger.
 ///
 /// `host` must be the host the policy named. It is validated through
-/// [`provider::route_for`], which refuses anything that is not a bare hostname
+/// [`scitt_network::provider::route_for`], which refuses anything that is not a bare hostname
 /// a shipped provider covers — deliberately stricter than the lenient
 /// comparison used to match a saved bundle's recorded name, because this
 /// string decides where a request goes.
 ///
-/// `deadline` is shared with any other acquisition in the same run, so a
-/// verification that also fetches receipt keys does not silently take twice
-/// the time an operator was told it could.
+/// `deadline` bounds this evidence collection, including both endpoint requests.
 pub fn fetch(host: &str, deadline: Instant) -> Result<(EvidenceBundle, BundleMetadata), String> {
     let observed_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let route = provider::route_for(host).map_err(|e| e.detail)?;
-
-    // The anchor, established before the ledger is contacted and never from
-    // anything the ledger sends.
-    let identity = scitt_acquire::bootstrap(host, deadline).map_err(|f| f.error.detail)?;
-
-    let agent = http::pinned_agent(
-        &identity.service_cert,
-        scitt_acquire::budget(deadline, host).map_err(|e| e.detail)?,
-    );
-    let quotes_body = http::get_bounded(&agent, &route.quotes_url, limits::MAX_QUOTES_BYTES)
-        .map_err(|e| format!("{}: {e}", route.quotes_url))?;
-
-    // A second agent, because the budget is recomputed per request: the first
-    // response may already have spent most of it.
-    let agent = http::pinned_agent(
-        &identity.service_cert,
-        scitt_acquire::budget(deadline, host).map_err(|e| e.detail)?,
-    );
-    let nodes_body = http::get_bounded(&agent, &route.nodes_url, limits::MAX_NODES_BYTES)
-        .map_err(|e| format!("{}: {e}", route.nodes_url))?;
+        .map_err(|e| format!("could not timestamp evidence acquisition: {e}"))?;
+    let observed_at = i64::try_from(observed_at.as_secs())
+        .map_err(|e| format!("evidence acquisition time is out of range: {e}"))?;
+    let collected = scitt_network::mst_ledger::collect(host, deadline)
+        .map_err(|e| format!("ledger evidence acquisition failed: {e}"))?;
 
     let bundle = assemble(
-        &quotes_body,
-        &nodes_body,
-        crate::evidence::pem_block(&identity.service_cert_der).as_bytes(),
+        &collected.quotes,
+        &collected.nodes,
+        super::load::pem_block(&collected.service_certificate_der).as_bytes(),
     )?;
     let node_count = bundle.nodes.len();
 
     Ok((
         bundle,
         BundleMetadata {
-            ledger: route.issuer,
+            ledger: collected.host,
             collected_at: Some(rfc3339(observed_at)),
             node_count,
             observed: true,
@@ -345,7 +325,7 @@ mod tests {
         -----END CERTIFICATE-----\n";
 
     fn quotes_json(node_id: &str) -> String {
-        let endorsements = crate::evidence::base64_encode(PEM.as_bytes());
+        let endorsements = crate::adapters::load::base64_encode(PEM.as_bytes());
         format!(
             r#"{{"quotes":[{{"node_id":"{node_id}","raw":"0a0b0c0d",
                "endorsements":"{endorsements}","uvm_endorsements":"0a0b"}}]}}"#
@@ -399,7 +379,7 @@ mod tests {
     #[test]
     fn a_repeated_node_is_refused_rather_than_counted_twice() {
         let id = "c".repeat(64);
-        let endorsements = crate::evidence::base64_encode(PEM.as_bytes());
+        let endorsements = crate::adapters::load::base64_encode(PEM.as_bytes());
         let node = format!(
             r#"{{"node_id":"{id}","raw":"0a0b0c0d","endorsements":"{endorsements}","uvm_endorsements":"0a0b"}}"#
         );

@@ -121,6 +121,28 @@ apart has no other way to tell them apart.
 for whoever opens the policy file, so put anything an auditor needs into
 `policyId` and `policyVersion` instead.
 
+### Optional adapter requirements
+
+`assertions` contains statement rules only. Resource-specific requirements are
+namespaced under `adapters`, currently with one supported key:
+
+```text
+adapters.mst-ledger.target   The ledger being appraised (host).
+adapters.mst-ledger.trust    UVM endorsement trust inputs.
+adapters.mst-ledger.binding  Execution-policy claim and node requirements.
+```
+
+See [adapters](adapters.md#policy-shape) for the complete JSON shape and field
+reference. The unpublished top-level `ledger`/`trust` and
+`assertions.bindLedgerPolicy` form is removed, not accepted as an alias.
+Unknown adapters and unknown fields are errors.
+
+Adapter requirements are mandatory when present, not metadata. The CLI first
+evaluates statement assertions, then explicitly runs the selected adapter.
+The library's `Policy::evaluate` fails closed if those requirements cannot run;
+statement-only evaluation must not be mistaken for acceptance of the whole
+policy. A missing feature or evidence cannot silently drop the adapter checks.
+
 ## How assertions combine
 
 Every assertion in the object must pass. They are ANDed; there is no `anyOf`,
@@ -134,8 +156,10 @@ Within a single assertion the story differs, and the difference is deliberate:
   "one of these is fine".
 * Everything else takes one value.
 
-A policy is satisfied only when at least one assertion ran and every assertion
-that ran passed. That first clause is not redundant — see
+A statement policy decision is satisfied only when at least one assertion ran
+and every required assertion passed. Adapter requirements, when present, must
+also be evaluated separately before the overall run can pass.
+That first clause is not redundant — see
 `requireKidBoundToKey` below for the policy that parses and asserts nothing.
 
 ## Assertions
@@ -160,8 +184,13 @@ that ran passed. That first clause is not redundant — see
 | `payloadJson` | `object[]` | Assertions on claims inside the signed JSON payload, by path |
 | `externalSignatures` | `object[]` | Cryptographically verify a detached signature carried in a protected header |
 
-An empty `assertions` object is rejected: a policy that asserts nothing accepts
-everything, which is almost never what someone meant to write.
+A policy with neither statement assertions nor adapter requirements is rejected.
+The `assertions` field is required, but `{}` is accepted when valid adapter
+requirements are present. That produces an empty, unsatisfied statement
+decision, not a pass. `Policy::evaluate` additionally reports the adapter
+requirement as `CannotEvaluate` because that API has no adapter evidence.
+The CLI also requires a non-empty statement decision before appraisal; an
+adapter-only policy must not become an implicit acceptance of every signer.
 
 ### `issuer`
 
@@ -426,7 +455,7 @@ made no decision". Omit the field rather than setting it to `false`.
 }
 ```
 
-The chain is always validated: every certificate must be signed by the next,
+For supported chains, every certificate must be signed by the next,
 and the path must end at a self-issued anchor. What `--trusted-roots` changes is
 *which* anchor is allowed — a CA from the PEM file you supplied, rather than
 whatever root the statement itself carried.
@@ -1005,11 +1034,11 @@ matching can establish. Its ceiling is the same one the certificate assertions
 hit: the external chain is not validated to a root, so it identifies a key, not
 a party.
 
-`signerSubjectContains` and `signerIssuerContains` read the leaf certificate,
-which is **not validated to a trusted root** — see
-[limitations](limitations.md#certificate-chain-validation-to-a-trusted-root).
-Anyone who can sign a statement chooses those strings. Use them to catch an
-honest mistake, never as a defence against forgery.
+`signerSubjectContains` and `signerIssuerContains` read the leaf certificate.
+Without independent roots or root pinning, even a validated chain can be
+self-issued by an attacker who chose those strings. Use substring rules to
+catch an honest mistake, not as a substitute for authenticating the signer.
+See [limitations](limitations.md#certificate-chain-validation-without---trusted-roots).
 
 ## Three outcomes, not two
 

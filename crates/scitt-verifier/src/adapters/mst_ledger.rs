@@ -19,71 +19,45 @@
 //! has no opinion about where its requirements came from, and cannot acquire
 //! one by reading the file.
 
+use scitt_policy::adapters::mst_ledger::MstLedgerPolicy;
 #[cfg(feature = "adapter-mst-ledger")]
-use scitt_policy::ledger::Encoding;
-use scitt_policy::ledger::{BindLedgerPolicy, LedgerTarget, TrustInputs};
+use scitt_policy::adapters::mst_ledger::{BindLedgerPolicy, Encoding, TrustInputs};
 #[cfg(feature = "adapter-mst-ledger")]
 use scitt_receipt::base64::Alphabet;
 use scitt_receipt::Sign1;
 
-use crate::cli::Adapter;
+use super::{AdapterAssessment, EvidenceSource};
 use crate::outcome::{AdapterCheck, CheckState};
 
-/// What an adapter run established, and what it could not.
-pub struct ResourceAppraisal {
-    pub checks: Vec<AdapterCheck>,
-    /// Whether every check required for a scoped pass held.
-    ///
-    /// Not a verdict. The caller may narrow on the strength of it; nothing
-    /// here can widen one.
-    pub scoped_pass: bool,
-    /// The scope the caller must state alongside any pass.
-    pub scope: String,
-    /// Which decisive checks did not pass, by human label.
-    ///
-    /// Empty exactly when `scoped_pass` is true. Carried rather than derived
-    /// by the caller, because which checks are decisive is the adapter's rule:
-    /// two of the checks it reports can never pass and deliberately do not
-    /// block, and a caller that filtered on "did not pass" would send an
-    /// operator to investigate them.
-    pub blocking: Vec<String>,
-    /// Diagnostics to surface, most consequential first.
-    pub notes: Vec<String>,
+pub fn not_attempted(reason: impl Into<String>) -> AdapterAssessment {
+    let reason = reason.into();
+    let checks = check_names()
+        .into_iter()
+        .map(|(name, label)| AdapterCheck {
+            name: name.to_string(),
+            label: label.to_string(),
+            state: CheckState::CannotEvaluate,
+            detail: reason.clone(),
+        })
+        .collect();
+    AdapterAssessment {
+        checks,
+        required_checks: required_checks(),
+        scope: "no evidence was appraised".to_string(),
+        notes: vec![reason],
+    }
 }
 
-impl ResourceAppraisal {
-    /// An appraisal that did not happen, with the reason.
-    ///
-    /// Public because the reasons an appraisal cannot start — an unaccepted
-    /// statement, a policy with no ledger section — are known to the caller,
-    /// not to this module. Every check is still named and still reported as
-    /// `CannotEvaluate`: a run that silently omitted them would be
-    /// indistinguishable from one where they did not apply.
-    pub fn not_attempted(reason: impl Into<String>) -> Self {
-        let reason = reason.into();
-        let checks = scitt_attest_names()
-            .into_iter()
-            .map(|(name, label)| AdapterCheck {
-                name: name.to_string(),
-                label: label.to_string(),
-                state: CheckState::CannotEvaluate,
-                detail: reason.clone(),
-            })
-            .collect();
-        Self {
-            checks,
-            scoped_pass: false,
-            scope: "no evidence was appraised".to_string(),
-            // Every decisive check, because none of them were reached. The
-            // first four names are the ones `scoped_pass` consults.
-            blocking: scitt_attest_names()
-                .into_iter()
-                .take(4)
-                .map(|(_, label)| label.to_string())
-                .collect(),
-            notes: vec![reason],
-        }
-    }
+fn required_checks() -> Vec<String> {
+    [
+        "ledger-identity-binding",
+        "snp-uvm-validation",
+        "cce-policy-host-data",
+        "node-coverage",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
 }
 
 /// The check names an appraisal reports, whether or not one ran.
@@ -93,12 +67,12 @@ impl ResourceAppraisal {
 /// a run that omitted them entirely would be indistinguishable from one where
 /// they were never relevant.
 #[cfg(feature = "adapter-mst-ledger")]
-fn scitt_attest_names() -> Vec<(&'static str, &'static str)> {
-    scitt_attest::CHECK_NAMES.to_vec()
+fn check_names() -> Vec<(&'static str, &'static str)> {
+    scitt_adapter_mst_ledger::CHECK_NAMES.to_vec()
 }
 
 #[cfg(not(feature = "adapter-mst-ledger"))]
-fn scitt_attest_names() -> Vec<(&'static str, &'static str)> {
+fn check_names() -> Vec<(&'static str, &'static str)> {
     vec![
         ("ledger-identity-binding", "Ledger identity/key binding"),
         ("snp-uvm-validation", "SNP and UVM validation"),
@@ -109,46 +83,20 @@ fn scitt_attest_names() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
-/// Where an appraisal's evidence comes from.
-///
-/// The two differ in one way that matters to the reader: a saved bundle
-/// supplies its own service certificate, so the subject of the appraisal also
-/// supplies the anchor the appraisal checks against. A bundle that is
-/// internally consistent therefore passes whether or not it came from the
-/// ledger the policy names. Live acquisition takes the anchor from the public
-/// identity service instead, so the ledger cannot vouch for itself.
-#[derive(Debug, Clone, Copy)]
-// A build without the adapter still has to accept the argument so that one
-// call site serves both, but it never reads it. Naming that rather than
-// deleting the fields keeps the two builds' signatures identical.
-#[cfg_attr(not(feature = "adapter-mst-ledger"), allow(dead_code))]
-pub enum EvidenceSource<'a> {
-    /// A bundle recorded earlier, read from disk.
-    Saved(&'a std::path::Path),
-    /// Collected by this run from the ledger the policy names.
-    Live {
-        /// Where to write the collected evidence, if the run asked for a copy.
-        save_to: Option<&'a std::path::Path>,
-    },
-}
-
 /// Appraise ledger evidence against an accepted statement.
 ///
 /// `statement` is the parsed statement that already passed acceptance.
 #[cfg(not(feature = "adapter-mst-ledger"))]
 pub fn appraise_evidence(
-    _adapter: Adapter,
     _source: EvidenceSource<'_>,
     _statement: &Sign1,
-    _bind: &BindLedgerPolicy,
-    _trust: &TrustInputs,
-    _ledger: &LedgerTarget,
-) -> ResourceAppraisal {
+    _policy: &MstLedgerPolicy,
+) -> AdapterAssessment {
     // Not an error and not a failure: the question was asked and this binary
     // cannot answer it. Reported as `CannotEvaluate` so it exits 3 rather than
     // 0, because a build that silently skipped the appraisal would let a gate
     // pass on the strength of a check that never ran.
-    ResourceAppraisal::not_attempted(
+    not_attempted(
         "this build was compiled without the mst-ledger adapter, so no ledger evidence can be \
          appraised. Rebuild with --features adapter-mst-ledger.",
     )
@@ -157,18 +105,19 @@ pub fn appraise_evidence(
 /// Appraise ledger evidence against an accepted statement.
 #[cfg(feature = "adapter-mst-ledger")]
 pub fn appraise_evidence(
-    adapter: Adapter,
     source: EvidenceSource<'_>,
     statement: &Sign1,
-    bind: &BindLedgerPolicy,
-    trust: &TrustInputs,
-    ledger: &LedgerTarget,
-) -> ResourceAppraisal {
-    let Adapter::MstLedger = adapter;
+    policy: &MstLedgerPolicy,
+) -> AdapterAssessment {
+    let MstLedgerPolicy {
+        target: ledger,
+        trust,
+        binding: bind,
+    } = policy;
 
     let requirements = match requirements(bind, trust) {
         Ok(r) => r,
-        Err(why) => return ResourceAppraisal::not_attempted(why),
+        Err(why) => return not_attempted(why),
     };
 
     // The reference digest, from the statement that was accepted.
@@ -180,7 +129,7 @@ pub fn appraise_evidence(
         match scitt_policy::claim::encoded_claim_bytes(statement, &bind.path, alphabet) {
             Ok(b) => b,
             Err(e) => {
-                return ResourceAppraisal::not_attempted(format!(
+                return not_attempted(format!(
                     "the statement's execution policy could not be read: {}",
                     e.describe()
                 ))
@@ -188,7 +137,7 @@ pub fn appraise_evidence(
         };
     if let Some(max) = bind.max_decoded_bytes {
         if policy_bytes.len() > max {
-            return ResourceAppraisal::not_attempted(format!(
+            return not_attempted(format!(
                 "the statement's execution policy is {} bytes, above the {max} the policy \
                  allows; its digest is not reported, because a claim this far from what was \
                  expected is more likely a wrong path than a large policy",
@@ -206,7 +155,7 @@ pub fn appraise_evidence(
     if let Some(expected) = &bind.expect_policy_sha256 {
         let actual = hex(&policy_digest);
         if !actual.eq_ignore_ascii_case(expected) {
-            let mut appraisal = ResourceAppraisal::not_attempted(format!(
+            let mut appraisal = not_attempted(format!(
                 "the statement's execution policy digest is {actual}, but the policy pins \
                  {expected}. This statement is for a different build."
             ));
@@ -226,18 +175,18 @@ pub fn appraise_evidence(
 
     let loaded = match source {
         EvidenceSource::Saved(dir) => {
-            crate::evidence::load(dir).map_err(|e| format!("the evidence bundle is unusable: {e}"))
+            super::load::load(dir).map_err(|e| format!("the evidence bundle is unusable: {e}"))
         }
         EvidenceSource::Live { save_to } => {
             // One deadline for the whole acquisition, started here. Reaching
             // an unreachable ledger is an inability, never a finding: the
             // question was asked and nothing answered it, which is not the
             // same as a node that answered badly.
-            let deadline = std::time::Instant::now() + scitt_acquire::limits::TOTAL_DEADLINE;
-            crate::live::fetch(&ledger.host, deadline)
+            let deadline = std::time::Instant::now() + scitt_network::limits::TOTAL_DEADLINE;
+            super::live::fetch(&ledger.host, deadline)
                 .map_err(|e| format!("evidence could not be collected from {}: {e}", ledger.host))
                 .and_then(|(bundle, metadata)| match save_to {
-                    Some(dir) => crate::evidence::save(dir, &bundle, &metadata)
+                    Some(dir) => super::load::save(dir, &bundle, &metadata)
                         .map(|()| (bundle, metadata))
                         .map_err(|e| {
                             // Refused rather than appraised-and-not-saved. A
@@ -252,7 +201,7 @@ pub fn appraise_evidence(
     };
     let (bundle, metadata) = match loaded {
         Ok(b) => b,
-        Err(e) => return ResourceAppraisal::not_attempted(e),
+        Err(e) => return not_attempted(e),
     };
 
     // The policy names the ledger it is about. Until this check existed the
@@ -271,7 +220,7 @@ pub fn appraise_evidence(
     let expected = normalise_host(&ledger.host);
     let found = normalise_host(&metadata.ledger);
     if expected != found {
-        let mut appraisal = ResourceAppraisal::not_attempted(format!(
+        let mut appraisal = not_attempted(format!(
             "the policy is about {}, but this evidence was collected from {}. The \
              statement's execution policy describes one deployment; nothing can be \
              concluded by holding a different service's nodes to it.",
@@ -293,7 +242,7 @@ pub fn appraise_evidence(
     // this a truncated bundle and a smaller ledger are the same thing.
     if let Some(expected) = bind.expect_node_count {
         if metadata.node_count != expected {
-            return ResourceAppraisal::not_attempted(format!(
+            return not_attempted(format!(
                 "the evidence enumerates {} node(s), but the policy expects {expected}. \
                  Coverage is only ever over the nodes the evidence names, so a bundle with \
                  nodes missing cannot be told from a smaller ledger.",
@@ -302,13 +251,10 @@ pub fn appraise_evidence(
         }
     }
 
-    let appraisal = match scitt_attest::appraise(&bundle, &policy_digest, &requirements) {
+    let appraisal = match scitt_adapter_mst_ledger::appraise(&bundle, &policy_digest, &requirements)
+    {
         Ok(a) => a,
-        Err(e) => {
-            return ResourceAppraisal::not_attempted(format!(
-                "the evidence could not be appraised: {e}"
-            ))
-        }
+        Err(e) => return not_attempted(format!("the evidence could not be appraised: {e}")),
     };
 
     let checks = appraisal
@@ -367,15 +313,10 @@ pub fn appraise_evidence(
         )
     };
 
-    ResourceAppraisal {
+    AdapterAssessment {
         checks,
-        scoped_pass: appraisal.scoped_pass(),
+        required_checks: required_checks(),
         scope,
-        blocking: appraisal
-            .blocking()
-            .into_iter()
-            .map(|(_, label)| label.to_string())
-            .collect(),
         notes,
     }
 }
@@ -404,15 +345,15 @@ fn normalise_host(raw: &str) -> String {
 fn requirements(
     bind: &BindLedgerPolicy,
     trust: &TrustInputs,
-) -> Result<scitt_attest::Requirements, String> {
+) -> Result<scitt_adapter_mst_ledger::Requirements, String> {
     let mut min_tcb = Vec::with_capacity(bind.minimum_tcb.len());
     for entry in &bind.minimum_tcb {
-        min_tcb.push(scitt_attest::TcbFloor {
+        min_tcb.push(scitt_adapter_mst_ledger::TcbFloor {
             generation: entry.generation.clone(),
             reported_tcb: entry.value()?,
         });
     }
-    Ok(scitt_attest::Requirements {
+    Ok(scitt_adapter_mst_ledger::Requirements {
         uvm_did_x509: trust.uvm_issuer.clone(),
         uvm_feed: bind.uvm_feed.clone(),
         uvm_eku: trust.uvm_eku.clone(),
@@ -427,12 +368,12 @@ fn requirements(
 /// vocabulary precisely so it does not depend on this binary. A `From` in
 /// either crate would recreate the coupling the split exists to avoid.
 #[cfg(feature = "adapter-mst-ledger")]
-fn map_state(state: scitt_attest::CheckState) -> CheckState {
+fn map_state(state: scitt_adapter_mst_ledger::CheckState) -> CheckState {
     match state {
-        scitt_attest::CheckState::Pass => CheckState::Pass,
-        scitt_attest::CheckState::Fail => CheckState::Fail,
-        scitt_attest::CheckState::NotChecked => CheckState::NotChecked,
-        scitt_attest::CheckState::CannotEvaluate => CheckState::CannotEvaluate,
+        scitt_adapter_mst_ledger::CheckState::Pass => CheckState::Pass,
+        scitt_adapter_mst_ledger::CheckState::Fail => CheckState::Fail,
+        scitt_adapter_mst_ledger::CheckState::NotChecked => CheckState::NotChecked,
+        scitt_adapter_mst_ledger::CheckState::CannotEvaluate => CheckState::CannotEvaluate,
     }
 }
 
@@ -456,9 +397,9 @@ mod tests {
     /// unanswered question stays visible.
     #[test]
     fn an_appraisal_that_did_not_run_names_every_check_and_passes_none() {
-        let a = ResourceAppraisal::not_attempted("no adapter");
+        let a = not_attempted("no adapter");
         assert_eq!(a.checks.len(), 6);
-        assert!(!a.scoped_pass);
+        assert!(!a.scoped_pass());
         for check in &a.checks {
             assert_eq!(check.state, CheckState::CannotEvaluate);
             assert!(!check.detail.is_empty());
@@ -504,7 +445,7 @@ mod tests {
     /// The names must match the adapter's, in both build configurations.
     #[test]
     fn the_check_names_are_stable_across_builds() {
-        let names: Vec<&str> = scitt_attest_names().iter().map(|(n, _)| *n).collect();
+        let names: Vec<&str> = check_names().iter().map(|(n, _)| *n).collect();
         assert_eq!(
             names,
             vec![

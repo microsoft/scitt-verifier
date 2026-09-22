@@ -780,7 +780,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "scitt-acquire"
+name = "scitt-adapter-mst-ledger"
+version = "0.4.0"
+dependencies = [
+ "scitt-receipt",
+ "tee-attestation-verification-caci",
+ "tee-attestation-verification-crypto",
+]
+
+[[package]]
+name = "scitt-network"
 version = "0.4.0"
 dependencies = [
  "rustls",
@@ -790,15 +799,6 @@ dependencies = [
  "serde_json",
  "ureq",
  "webpki-roots",
-]
-
-[[package]]
-name = "scitt-attest"
-version = "0.4.0"
-dependencies = [
- "scitt-receipt",
- "tee-attestation-verification-caci",
- "tee-attestation-verification-crypto",
 ]
 
 [[package]]
@@ -823,8 +823,8 @@ dependencies = [
 name = "scitt-verifier"
 version = "0.4.0"
 dependencies = [
- "scitt-acquire",
- "scitt-attest",
+ "scitt-adapter-mst-ledger",
+ "scitt-network",
  "scitt-policy",
  "scitt-receipt",
  "serde",

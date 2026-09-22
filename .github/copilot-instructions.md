@@ -2,8 +2,10 @@
 
 ## What this repository is
 
-`scitt-verifier` decides whether a SCITT transparent statement is trustworthy,
-offline, and returns an exit code that pipelines branch on. It is a security
+`scitt-verifier` verifies SCITT transparent statements and evaluates the relying
+party's policy, offline by default. Artifact binding and resource adapters are
+optional; a deployed ledger is not the general subject of verification. Receipt
+proof support is currently CCF VDS only. It returns pipeline exit codes and is a security
 gate. The failure that matters is not a crash — it is a `PASS` printed for
 something nobody actually checked, because that answer is believed and acted on.
 
@@ -34,9 +36,10 @@ means "did not run" and must not be collapsed into success. Absent input yields
 `CONTRIBUTING.md`.
 
 Exit code 3 (`cannot-evaluate`) is **not** a pass. It means the tool could not
-answer. Code 0 is the only success, and it carries two distinct verdicts:
+answer. Code 0 is the only success, and it carries distinct verdicts:
 `artifact-transparent` (an artifact was supplied and matched) and
-`statement-transparent` (no artifact was checked). Do not blur them.
+`statement-transparent` (no artifact was checked), or `resource-transparent`
+(the selected adapter's scoped requirements held). Do not blur them.
 
 An unimplemented flag or assertion exits 4 with an explanation. Accepting and
 skipping it reports success for work nobody did.
@@ -46,8 +49,11 @@ skipping it reports success for work nobody did.
 Output, docs, and comments describe what this build actually does — not what is
 planned, and not what a reader might assume. Two live examples:
 
-* The signing certificate chain is **not** validated to a trusted root, and
-  revocation is never checked. Both appear in `appraisal.notChecked` at runtime.
+* Supported signing certificate chains are validated. Without independent
+  `--trusted-roots` or a policy pin to an independently selected root, an
+  embedded anchor establishes internal consistency, not external trust.
+  Unsupported chain checks and absent external anchoring are reported;
+  revocation is never checked.
 * A header this build does not interpret is printed and marked
   `(not interpreted)`. It is rendered so it can be audited, not because its
   contents were understood.
@@ -95,11 +101,20 @@ resolve the tension by committing the original.
 | Path | Role |
 |---|---|
 | `crates/scitt-receipt` | Core: parsing, crypto, receipts, binding. Embeddable — no I/O, no clock, no verdicts, no dependency on the other crates. CI's `boundary` job enforces this by grep |
-| `crates/scitt-policy` | Relying-party policy: parsing and evaluation |
-| `crates/scitt-verifier` | The CLI: argument handling, reporting, exit codes |
+| `crates/scitt-policy` | Statement assertions and typed requirements in `src/adapters/{mod.rs,mst_ledger.rs}`; no I/O |
+| `crates/scitt-network` | Network acquisition of receipt keys and resource evidence; no policy decisions |
+| `adapters/mst-ledger` | `scitt-adapter-mst-ledger`: pure MST appraisal; no I/O, no CLI verdicts |
+| `crates/scitt-verifier` | CLI arguments, reporting, exit codes; `src/adapters/` owns dispatch, MST orchestration, bundle loading and acquisition orchestration |
 | `crates/scitt-wasm` | Browser bindings and the demo page |
 | `corpus/` | Real fixtures and example policies |
-| `docs/` | `policy.md`, `output.md`, `trust-material.md`, `limitations.md`, `architecture.md`, `distribution.md` |
+| `docs/` | `policy.md`, `adapters.md`, `output.md`, `trust-material.md`, `limitations.md`, `architecture.md`, `distribution.md` |
+
+Policy JSON separates `assertions` from
+`adapters.mst-ledger.{target,trust,binding}`. The old top-level `ledger`/`trust`
+and `assertions.bindLedgerPolicy` shape is not supported.
+`Policy::evaluate` must not pass when required adapters cannot run; the CLI
+evaluates statement assertions and then adapters explicitly. Keep SNP/UVM
+types MST-specific. There is no generic attestation crate or plugin framework.
 
 Crypto and CBOR come from `tav-cose` / `tav-crypto`
 (microsoft/TEE-Attestation-Verification), pinned to an exact git revision. An

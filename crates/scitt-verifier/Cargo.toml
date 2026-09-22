@@ -15,12 +15,12 @@ path = "src/main.rs"
 [dependencies]
 scitt-receipt = { path = "../scitt-receipt", default-features = false }
 scitt-policy = { path = "../scitt-policy", default-features = false }
-scitt-acquire = { path = "../scitt-acquire", default-features = false }
+scitt-network = { path = "../scitt-network", default-features = false }
 # Optional: the attestation appraiser. Optional because it pulls in the AMD and
 # COSE verification stack, which is dead weight for the offline statement path
 # that most runs take. Enabling it adds a binding mode; it changes nothing about
 # how a statement is verified.
-scitt-attest = { path = "../scitt-attest", default-features = false, optional = true }
+scitt-adapter-mst-ledger = { path = "../../adapters/mst-ledger", default-features = false, optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
@@ -29,13 +29,13 @@ default = ["crypto_pure_rust"]
 crypto_pure_rust = [
     "scitt-receipt/crypto_pure_rust",
     "scitt-policy/crypto_pure_rust",
-    "scitt-attest?/crypto_pure_rust",
+    "scitt-adapter-mst-ledger?/crypto_pure_rust",
 ]
 crypto_openssl = [
     "scitt-receipt/crypto_openssl",
     "scitt-policy/crypto_openssl",
-    "scitt-attest?/crypto_openssl",
+    "scitt-adapter-mst-ledger?/crypto_openssl",
 ]
-# The mst-ledger adapter: appraise a saved evidence bundle from an Azure
-# Confidential Ledger against the execution policy a statement embeds.
-adapter-mst-ledger = ["dep:scitt-attest", "scitt-attest/mst-ledger"]
+# The mst-ledger adapter: appraise saved or explicitly acquired ledger evidence
+# against the execution policy an accepted statement embeds.
+adapter-mst-ledger = ["dep:scitt-adapter-mst-ledger", "scitt-adapter-mst-ledger/mst-ledger"]

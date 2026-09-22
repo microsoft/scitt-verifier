@@ -9,7 +9,7 @@
 //! scoping: making sure a key acquired from one ledger can never verify a
 //! receipt attributed to another, even when both name the same `kid`.
 
-use scitt_acquire::{limits, route_for, validate_host, Acquired, Failed, Outcome};
+use scitt_network::{limits, route_for, validate_host, Acquired, Failed, Outcome};
 use scitt_policy::Policy;
 use scitt_receipt::{
     describe_receipt, verify_statement, verify_statement_with, KeyLookup, LedgerKeySet,
@@ -321,8 +321,7 @@ mod tests {
             policy_id: "test".into(),
             policy_version: "1".into(),
             description: None,
-            ledger: None,
-            trust: None,
+            adapters: Default::default(),
             assertions: Default::default(),
         };
         p.assertions.issuer = issuers.map(|v| v.into_iter().map(String::from).collect());
