@@ -27,9 +27,60 @@ use scitt_receipt::base64::Alphabet;
 use scitt_receipt::Sign1;
 
 use super::{AdapterAssessment, EvidenceSource};
-#[cfg(feature = "adapter-mst-ledger")]
 use crate::outcome::AdapterFinding;
 use crate::outcome::{AdapterCheck, CheckState};
+use crate::progress::Presentation;
+use crate::progress::{Event, Sink, Stage, State};
+
+pub fn check_event(check: &AdapterCheck, detail: String, findings: &[AdapterFinding]) -> Event {
+    let mut event = Event::finding(
+        Stage::Adapter,
+        &check.name,
+        None,
+        crate::progress_state(check.state),
+        detail,
+    );
+    if compact_limitation(check, findings).is_some() {
+        event.presentation = Presentation::FinalLimitation;
+        return event;
+    }
+    let count = findings
+        .iter()
+        .filter(|finding| finding.check == "cce-policy-host-data")
+        .count();
+    if count == 0 {
+        return event;
+    }
+    match check.name.as_str() {
+        "ledger-identity-binding" | "snp-uvm-validation" => event.detail(),
+        "cce-policy-host-data" => event.brief(format!(
+            "All {count} assessed nodes match expected policy commitment"
+        )),
+        "node-coverage" => event.brief("Required coverage of assessed snapshot satisfied"),
+        _ => event,
+    }
+}
+
+/// Only excluded, unevaluable checks after node appraisal are moved to the
+/// final limitations. Prerequisite errors and future required checks stay visible.
+pub fn compact_limitation(
+    check: &AdapterCheck,
+    findings: &[AdapterFinding],
+) -> Option<&'static str> {
+    if check.state != CheckState::CannotEvaluate
+        || required_checks().contains(&check.name)
+        || !findings
+            .iter()
+            .any(|finding| finding.check == "cce-policy-host-data")
+    {
+        return None;
+    }
+    match check.name.as_str() {
+        "freshness" => Some("Report freshness was not established."),
+        "connection-binding" => Some("Binding to the serving connection was not established."),
+        _ => None,
+    }
+}
 
 pub fn not_attempted(reason: impl Into<String>) -> AdapterAssessment {
     let reason = reason.into();
@@ -94,11 +145,22 @@ pub fn appraise_evidence(
     _source: EvidenceSource<'_>,
     _statement: &Sign1,
     _policy: &MstLedgerPolicy,
+    progress: &mut dyn Sink,
 ) -> AdapterAssessment {
     // Not an error and not a failure: the question was asked and this binary
     // cannot answer it. Reported as `CannotEvaluate` so it exits 3 rather than
     // 0, because a build that silently skipped the appraisal would let a gate
     // pass on the strength of a check that never ran.
+    progress.emit(Event::stage(
+        Stage::Evidence,
+        State::NotRun,
+        "This build has no mst-ledger adapter",
+    ));
+    progress.emit(Event::stage(
+        Stage::Adapter,
+        State::NotRun,
+        "Rebuild with --features adapter-mst-ledger",
+    ));
     not_attempted(
         "this build was compiled without the mst-ledger adapter, so no ledger evidence can be \
          appraised. Rebuild with --features adapter-mst-ledger.",
@@ -111,6 +173,7 @@ pub fn appraise_evidence(
     source: EvidenceSource<'_>,
     statement: &Sign1,
     policy: &MstLedgerPolicy,
+    progress: &mut dyn Sink,
 ) -> AdapterAssessment {
     let MstLedgerPolicy {
         target: ledger,
@@ -124,6 +187,11 @@ pub fn appraise_evidence(
     };
 
     // The reference digest, from the statement that was accepted.
+    progress.emit(Event::stage(
+        Stage::Policy,
+        State::Started,
+        "Extracting embedded CCE policy and hashing exact decoded bytes...",
+    ));
     let alphabet = match bind.encoding {
         Encoding::Base64 => Alphabet::Standard,
         Encoding::Base64url => Alphabet::UrlSafe,
@@ -149,6 +217,11 @@ pub fn appraise_evidence(
         }
     }
     let policy_digest = scitt_receipt::sha256(&policy_bytes);
+    progress.emit(Event::stage(
+        Stage::Policy,
+        State::Done,
+        "Expected policy commitment derived",
+    ));
 
     let mut notes = Vec::new();
 
@@ -178,6 +251,14 @@ pub fn appraise_evidence(
 
     let loaded = match source {
         EvidenceSource::Saved(dir) => {
+            progress.emit(Event::stage(
+                Stage::Evidence,
+                State::Started,
+                format!(
+                    "Loading saved evidence from {} (not a live connection)...",
+                    dir.display()
+                ),
+            ));
             super::load::load(dir).map_err(|e| format!("the evidence bundle is unusable: {e}"))
         }
         EvidenceSource::Live { save_to } => {
@@ -186,26 +267,70 @@ pub fn appraise_evidence(
             // question was asked and nothing answered it, which is not the
             // same as a node that answered badly.
             let deadline = std::time::Instant::now() + scitt_network::limits::TOTAL_DEADLINE;
-            super::live::fetch(&ledger.host, deadline)
+            super::live::fetch(&ledger.host, deadline, progress)
                 .map_err(|e| format!("evidence could not be collected from {}: {e}", ledger.host))
-                .and_then(|(bundle, metadata)| match save_to {
-                    Some(dir) => super::load::save(dir, &bundle, &metadata)
-                        .map(|()| (bundle, metadata))
-                        .map_err(|e| {
-                            // Refused rather than appraised-and-not-saved. A
-                            // run asked for a copy of what it judged; a
-                            // verdict with no such copy is not the run that
-                            // was requested.
-                            format!("the collected evidence could not be saved: {e}")
-                        }),
-                    None => Ok((bundle, metadata)),
+                .and_then(|(bundle, metadata)| {
+                    progress.emit(Event::stage(
+                        Stage::Evidence,
+                        State::Done,
+                        format!(
+                            "Collected evidence for {} candidate nodes",
+                            bundle.nodes.len()
+                        ),
+                    ));
+                    match save_to {
+                        Some(dir) => {
+                            progress.emit(Event::stage(
+                                Stage::Evidence,
+                                State::Started,
+                                format!("Saving collected evidence to {}...", dir.display()),
+                            ));
+                            super::load::save(dir, &bundle, &metadata)
+                                .map(|()| {
+                                    progress.emit(Event::stage(
+                                        Stage::Evidence,
+                                        State::Done,
+                                        format!("Saved evidence to {}", dir.display()),
+                                    ));
+                                    (bundle, metadata)
+                                })
+                                .map_err(|e| {
+                                    // A run asked for a copy of what it judged;
+                                    // appraising without that copy is a different run.
+                                    format!("the collected evidence could not be saved: {e}")
+                                })
+                        }
+                        None => Ok((bundle, metadata)),
+                    }
                 })
         }
     };
     let (bundle, metadata) = match loaded {
         Ok(b) => b,
-        Err(e) => return not_attempted(e),
+        Err(e) => {
+            progress.emit(Event::stage(
+                Stage::Evidence,
+                State::CannotEvaluate,
+                e.clone(),
+            ));
+            progress.emit(Event::stage(
+                Stage::Adapter,
+                State::NotRun,
+                "Evidence acquisition did not complete",
+            ));
+            return not_attempted(e);
+        }
     };
+    if !metadata.observed {
+        progress.emit(Event::stage(
+            Stage::Evidence,
+            State::Done,
+            format!(
+                "Loaded saved evidence for {} candidate nodes",
+                bundle.nodes.len()
+            ),
+        ));
+    }
 
     // The policy names the ledger it is about. Until this check existed the
     // name was recorded and never enforced, so a bundle captured from one
@@ -254,8 +379,47 @@ pub fn appraise_evidence(
         }
     }
 
-    let appraisal = match scitt_adapter_mst_ledger::appraise(&bundle, &policy_digest, &requirements)
-    {
+    let ids: Vec<_> = bundle
+        .nodes
+        .iter()
+        .map(|node| node.node_id.as_str())
+        .collect();
+    let labels = node_labels(&ids);
+    let mut checklist = Event::stage(
+        Stage::Adapter,
+        State::Started,
+        "Appraising each candidate node...",
+    );
+    checklist.presentation = Presentation::Checklist {
+        checks: vec![
+            "Authenticate SNP report using AMD endorsement certificates".into(),
+            "Verify UVM endorsement and binding to reported measurement".into(),
+            "Apply configured platform, TCB and UVM version requirements".into(),
+            "Bind attested node key to target service identity".into(),
+            "Compare policy commitment with statement-derived hash".into(),
+        ],
+        columns: vec![
+            "Service binding".into(),
+            "SNP / UVM".into(),
+            "Policy match".into(),
+        ],
+        subject_width: labels
+            .iter()
+            .map(|label| label.chars().count())
+            .max()
+            .unwrap_or(21),
+    };
+    progress.emit(checklist);
+    let mut index = 0;
+    let appraisal = match scitt_adapter_mst_ledger::appraise_with(
+        &bundle,
+        &policy_digest,
+        &requirements,
+        &mut |node| {
+            emit_node(node, &labels[index], progress);
+            index += 1;
+        },
+    ) {
         Ok(a) => a,
         Err(e) => return not_attempted(format!("the evidence could not be appraised: {e}")),
     };
@@ -324,6 +488,73 @@ pub fn appraise_evidence(
         scope,
         notes,
     }
+}
+
+#[cfg(feature = "adapter-mst-ledger")]
+fn emit_node(node: &scitt_adapter_mst_ledger::NodeOutcome, label: &str, progress: &mut dyn Sink) {
+    let mut row = Event::stage(Stage::Adapter, State::Done, label);
+    row.presentation = Presentation::Row(vec![
+        crate::progress_state(map_state(node.identity_binding)),
+        crate::progress_state(map_state(node.attestation)),
+        crate::progress_state(map_state(node.host_data_match)),
+    ]);
+    progress.emit(row);
+    for finding in node_findings(std::slice::from_ref(node)) {
+        progress.emit(node_event(finding, label));
+    }
+}
+
+#[cfg(feature = "adapter-mst-ledger")]
+fn node_event(finding: AdapterFinding, label: &str) -> Event {
+    let summarized = matches!(
+        finding.check.as_str(),
+        "ledger-identity-binding" | "snp-uvm-validation" | "cce-policy-host-data"
+    );
+    let event = Event::finding_with_values(
+        Stage::Adapter,
+        finding.check,
+        Some(finding.subject),
+        crate::progress_state(finding.state),
+        finding.detail,
+        finding.expected,
+        finding.observed,
+    )
+    .subject_label(label);
+    if summarized {
+        event.detail()
+    } else {
+        event
+    }
+}
+
+#[cfg(feature = "adapter-mst-ledger")]
+fn node_labels(ids: &[&str]) -> Vec<String> {
+    ids.iter()
+        .enumerate()
+        .map(|(index, id)| {
+            let chars: Vec<_> = id.chars().collect();
+            let mut length = 8.min(chars.len());
+            while length < chars.len()
+                && ids.iter().enumerate().any(|(other, candidate)| {
+                    other != index
+                        && candidate
+                            .chars()
+                            .take(length)
+                            .eq(chars[..length].iter().copied())
+                })
+            {
+                length += 1;
+            }
+            let prefix: String = chars[..length].iter().collect();
+            let label = if length < chars.len() {
+                format!("{prefix}...")
+            } else {
+                prefix
+            };
+            // Very long or identical IDs still get distinct bounded row references.
+            format!("#{} {}", index + 1, crate::progress::safe_text(&label, 72))
+        })
+        .collect()
 }
 
 #[cfg(feature = "adapter-mst-ledger")]
@@ -426,6 +657,180 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_only_defers_known_excluded_inabilities_after_appraisal() {
+        let findings = [AdapterFinding {
+            check: "cce-policy-host-data".into(),
+            subject: "node".into(),
+            state: CheckState::Pass,
+            detail: "matched".into(),
+            expected: None,
+            observed: None,
+        }];
+        for name in [
+            "freshness",
+            "connection-binding",
+            "unknown-check",
+            "node-coverage",
+        ] {
+            for state in [
+                CheckState::Pass,
+                CheckState::Fail,
+                CheckState::CannotEvaluate,
+                CheckState::NotChecked,
+            ] {
+                let check = AdapterCheck {
+                    name: name.into(),
+                    label: name.into(),
+                    state,
+                    detail: "original detail".into(),
+                };
+                let deferred = matches!(name, "freshness" | "connection-binding")
+                    && state == CheckState::CannotEvaluate;
+                assert_eq!(compact_limitation(&check, &findings).is_some(), deferred);
+                assert_eq!(
+                    check_event(&check, check.detail.clone(), &findings).presentation
+                        == Presentation::FinalLimitation,
+                    deferred
+                );
+                assert!(
+                    compact_limitation(&check, &[]).is_none(),
+                    "prerequisite reasons must remain visible"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_and_nonpass_aggregate_checks_are_never_hidden() {
+        for state in [
+            CheckState::Pass,
+            CheckState::Fail,
+            CheckState::CannotEvaluate,
+            CheckState::NotChecked,
+        ] {
+            let check = AdapterCheck {
+                name: "future-check".into(),
+                label: "Future check".into(),
+                state,
+                detail: "important".into(),
+            };
+            let event = check_event(&check, check.detail.clone(), &[]);
+            assert_eq!(event.presentation, crate::progress::Presentation::Normal);
+            assert_eq!(event.message, "important");
+            assert_eq!(event.state, crate::progress_state(state));
+        }
+    }
+
+    #[cfg(feature = "adapter-mst-ledger")]
+    #[test]
+    fn node_labels_are_visibly_shortened_unique_and_bounded() {
+        let ids = ["12345678aaaa0000", "12345678aaab0000", "short", "short"];
+        let labels = node_labels(&ids);
+        assert_eq!(labels[0], "#1 12345678aaaa...");
+        assert_eq!(labels[1], "#2 12345678aaab...");
+        assert_eq!(labels[2], "#3 short");
+        assert_eq!(labels[3], "#4 short");
+        let long = "x".repeat(200);
+        let labels = node_labels(&[&long, &long]);
+        assert_ne!(labels[0], labels[1]);
+        assert!(labels
+            .iter()
+            .all(|label| label.len() < 80 && label.ends_with("...")));
+    }
+
+    #[cfg(feature = "adapter-mst-ledger")]
+    fn test_node() -> scitt_adapter_mst_ledger::NodeOutcome {
+        use scitt_adapter_mst_ledger::{CheckState::Pass, NodeOutcome};
+        NodeOutcome {
+            node_id: "12345678abcdef0123456789".into(),
+            identity_binding: Pass,
+            attestation: Pass,
+            host_data_match: Pass,
+            expected_policy_digest: Some("expected-full-hash".into()),
+            observed_host_data: Some("expected-full-hash".into()),
+            detail: "measurement full-measurement".into(),
+        }
+    }
+
+    #[cfg(feature = "adapter-mst-ledger")]
+    #[test]
+    fn successful_node_is_one_row_without_hashes_but_verbose_keeps_evidence() {
+        let node = test_node();
+        let mut bytes = Vec::new();
+        let mut sink = crate::progress::Text::compact(
+            &mut bytes,
+            false,
+            vec![(Stage::Adapter, "Appraise node evidence".into())],
+        );
+        emit_node(&node, "#1 12345678...", &mut sink);
+        sink.finish().unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert_eq!(text.lines().count(), 3, "{text}");
+        assert_eq!(text.matches("PASS").count(), 3);
+        assert!(text.contains("#1 12345678..."));
+        for value in [
+            "measurement",
+            "expected-full-hash",
+            "Expected:",
+            "Observed:",
+            &node.node_id,
+        ] {
+            assert!(!text.contains(value), "{text}");
+        }
+        let mut bytes = Vec::new();
+        let mut sink = crate::progress::Text::new(&mut bytes, false);
+        emit_node(&node, "#1 12345678...", &mut sink);
+        sink.finish().unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains(&node.node_id));
+        assert!(text.contains("measurement full-measurement"));
+        assert!(text.contains("Expected: expected-full-hash"));
+        assert!(text.contains("Observed: expected-full-hash"));
+    }
+
+    #[cfg(feature = "adapter-mst-ledger")]
+    #[test]
+    fn node_mismatch_expands_values_and_unevaluated_checks() {
+        use scitt_adapter_mst_ledger::CheckState;
+        let mut node = test_node();
+        node.host_data_match = CheckState::Fail;
+        node.attestation = CheckState::CannotEvaluate;
+        node.observed_host_data = Some("different-full-hash".into());
+        node.detail = "authenticated commitment differs; platform requirements not reached".into();
+        let mut bytes = Vec::new();
+        let mut sink = crate::progress::Text::compact(
+            &mut bytes,
+            false,
+            vec![(Stage::Adapter, "Appraise".into())],
+        );
+        emit_node(&node, "#1 12345678...", &mut sink);
+        sink.finish().unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains("FAIL cce-policy-host-data [#1 12345678...]"));
+        assert!(text.contains("CANNOT EVALUATE snp-uvm-validation"));
+        assert!(text.contains("platform requirements not reached"));
+        assert!(text.contains("Expected: expected-full-hash"));
+        assert!(text.contains("Observed: different-full-hash"));
+    }
+
+    #[cfg(feature = "adapter-mst-ledger")]
+    #[test]
+    fn new_node_findings_are_not_silently_absorbed_by_the_row() {
+        let finding = AdapterFinding {
+            check: "new-domain-check".into(),
+            subject: "node".into(),
+            state: CheckState::Pass,
+            detail: "new result".into(),
+            expected: None,
+            observed: None,
+        };
+        assert_eq!(
+            node_event(finding, "#1 node").presentation,
+            Presentation::Normal
+        );
+    }
 
     /// Every check must be named even when no appraisal ran.
     ///

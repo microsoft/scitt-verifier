@@ -10,8 +10,26 @@ for every addition would make the version say nothing about compatibility.
 
 `verify` produces exactly one verdict.
 
-Text output is an append-only verification transcript followed by a concise
-verdict block. `--verbose` additionally prints the completed evidence report.
+Text output defaults to a compact, append-only explanatory transcript followed
+by the verdict, its claim, scope, and limitations. `--verbose` (or `-v`) retains
+detailed progress and the completed evidence report, including successful
+measurements, certificate subjects, full node identities, and matching digests.
+No new flag is needed:
+
+```console
+scitt-verifier verify --statement statement.cose --scitt-keys keys.cbor --policy policy.json
+scitt-verifier verify --statement statement.cose --scitt-keys keys.cbor --policy policy.json --verbose
+scitt-verifier verify --statement statement.cose --scitt-keys keys.cbor --policy policy.json --format json
+```
+
+The compact transcript numbers the stages actually requested: inputs, statement
+verification (including receipt-key acquisition when online), optional artifact
+binding, relying-party policy, and optional resource evidence collection and
+appraisal. Resource mode does not add an artifact stage; the omitted binding is
+disclosed once in the limitations. Saved evidence is labelled as loading a
+bundle, never as an authenticated live connection. Missing prerequisites leave
+later stages visibly `NOT RUN`.
+
 Progress is emitted at the execution boundary of each stage; it is not
 reconstructed from the final result. Stage order and display numbering are
 presentation details, not an acceptance contract. The verdict, checks, and
@@ -21,23 +39,47 @@ an issuer, path, or remote diagnostic cannot forge another displayed line.
 Individual receipt outcomes and policy assertion results are emitted during
 their respective stages; the later report remains a completed evidence view,
 not the source from which the transcript is reconstructed.
-After execution, an assessment-summary stage lists trust limitations,
-diagnostics, and intentionally omitted checks as typed notices. This stage
-summarizes the completed assessment; it does not participate in deriving it.
-A diagnostic keeps its severity here: one that decided the verdict is shown as
-a failure, not as a notice beside the trust limitations. Where one cause blocks
-several adapter checks, the reason is given once and the remaining checks name
-the check that carries it; every state is still reported in full.
+The compact final block does not repeat the completed check list. It retains
+diagnostics (including output-write errors), trust limitations, and omitted
+checks. Verbose progress also has an assessment-summary stage. Neither view
+participates in deriving the verdict. Diagnostics retain their severity; a
+failure must not read like a notice. Where one cause blocks several adapter
+checks, its reason is given once and the remaining checks refer to that check.
+
+Compact rendering explains work once, summarizes each subject, and expands
+exceptions. The MST checklist is printed **before** node appraisal. Each row is
+emitted only when that node completes, with separate service binding, SNP/UVM,
+and policy-match states. This is not a sequence of fleet-wide crypto passes.
+Node labels use a visibly shortened unique prefix plus a row number; the row
+number disambiguates identical IDs or prefixes too long to display safely.
+Row numbers are display references, not evidence of distinct authenticated nodes.
+Successes omit measurements and matching expected/observed values. Failures,
+cannot-evaluate findings, and other nonpassing states retain their details and
+available expected/observed values. Unknown adapter checks remain visible.
+After MST node appraisal, its two known excluded `cannot-evaluate` checks
+(report freshness and serving-connection binding) appear once as concise human
+sentences under the final `Limitations`, rather than again beneath the node
+table. Failures, prerequisite errors, and unknown checks are not filtered this
+way. Verbose output and JSON retain the full original findings.
+
+An authenticated-target success is emitted only after a pinned HTTPS request
+succeeds, not after constructing a TLS client. Collection/save completion is
+shown only after the corresponding operation succeeds. A resource pass covers
+the assessed snapshot, not full service membership. Existing TCB, coverage,
+report-freshness, and serving-connection-binding limitations are unchanged.
+Signature text distinguishes internal consistency with an embedded root from
+anchoring to supplied trust roots. Receipt-issuer acceptance does not establish
+independent publisher authorization.
 
 Human timestamps are labelled UTC and include both Unix seconds and an RFC 3339
 instant. JSON keeps the original numeric values. Identity labels distinguish
 the statement issuer and subject, signing-certificate subject, receipt issuer
 and key ID, acquisition ledger, and appraised ledger node.
 
-Repeated receipt, acquisition-ledger, and adapter-node findings are grouped
-under their subject instead of repeating the identity on every row. The final
-result is separated into a `Verdict` block so its scope, primary diagnostic,
-and required action remain clear when copied independently.
+Detailed receipt, acquisition-ledger, and adapter-node findings are grouped under
+their subject. Compact output uses short receipt results and node rows instead.
+The final verdict is separated by a blank line; verbose output additionally
+labels its completed assessment `Verdict`.
 
 When stdout is an interactive terminal, state and verdict tokens use restrained
 ANSI color. Redirected output, `TERM=dumb`, `NO_COLOR`, and JSON output remain
@@ -156,10 +198,11 @@ Saving a live bundle does not preserve independently verifiable acquisition
 provenance: offline replay trusts the supplied bundle's origin. File digests
 detect changes relative to its unsigned manifest, not substitution of both.
 
-The scope sentence distinguishes the two, and is the only place the difference
-is visible in the output. A live run reports the nodes as *observed at* a time
-this run knows; a replay reports them as *recorded at* a time the collector
-asserted. Freshness and connection binding are `cannot-evaluate` either way.
+The scope sentence and acquisition stage distinguish the two. The detailed
+report/record names nodes and records live evidence as *observed at* a time this
+run knows, or saved evidence as *recorded at* a collector-asserted time. Compact
+scope states the provenance without repeating full node IDs. Freshness and
+connection binding are `cannot-evaluate` either way.
 
 A ledger that could not be reached yields `cannot-evaluate`, not a failure: a
 service that did not answer is not a service that answered badly.

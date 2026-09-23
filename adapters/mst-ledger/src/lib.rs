@@ -331,6 +331,18 @@ pub fn appraise(
     policy_digest: &[u8; 32],
     requirements: &Requirements,
 ) -> Result<Appraisal, AppraisalError> {
+    appraise_with(bundle, policy_digest, requirements, &mut |_| {})
+}
+
+/// Observe completed nodes in execution order, before the next node runs.
+/// The observer cannot alter the evidence, requirements, or returned findings.
+#[cfg(feature = "mst-ledger")]
+pub fn appraise_with(
+    bundle: &EvidenceBundle,
+    policy_digest: &[u8; 32],
+    requirements: &Requirements,
+    completed: &mut dyn FnMut(&NodeOutcome),
+) -> Result<Appraisal, AppraisalError> {
     if bundle.nodes.is_empty() {
         return Err(AppraisalError::EmptyBundle);
     }
@@ -433,6 +445,9 @@ pub fn appraise(
                     detail: why.clone(),
                 });
             }
+        }
+        if let Some(outcome) = appraisal.nodes.last() {
+            completed(outcome);
         }
     }
 
@@ -949,6 +964,44 @@ mod tests {
                 reported_tcb: 0x5417_0000_0000_000a,
             }],
         }
+    }
+
+    #[cfg(feature = "mst-ledger")]
+    #[test]
+    fn observer_sees_each_completed_node_without_changing_findings() {
+        let bundle = EvidenceBundle {
+            service_certificate_pem: Vec::new(),
+            nodes: ["first", "second"]
+                .into_iter()
+                .map(|id| NodeEvidence {
+                    node_id: id.into(),
+                    certificate_pem: Vec::new(),
+                    snp_report: Vec::new(),
+                    amd_endorsements: Vec::new(),
+                    uvm_endorsement: Vec::new(),
+                })
+                .collect(),
+        };
+        let mut seen = Vec::new();
+        let observed = appraise_with(&bundle, &[0; 32], &requirements(), &mut |node| {
+            assert_eq!(node.attestation, CheckState::Fail);
+            assert_eq!(node.host_data_match, CheckState::CannotEvaluate);
+            seen.push(node.node_id.clone());
+        })
+        .unwrap();
+        assert_eq!(seen, ["first", "second"]);
+        let plain = appraise(&bundle, &[0; 32], &requirements()).unwrap();
+        assert_eq!(format!("{observed:?}"), format!("{plain:?}"));
+        let empty = EvidenceBundle {
+            service_certificate_pem: Vec::new(),
+            nodes: Vec::new(),
+        };
+        assert!(
+            appraise_with(&empty, &[0; 32], &requirements(), &mut |_| panic!(
+                "no node ran"
+            ))
+            .is_err()
+        );
     }
 
     // ---- aggregation rules -------------------------------------------------

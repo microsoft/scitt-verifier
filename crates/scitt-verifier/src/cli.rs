@@ -72,8 +72,9 @@ VERIFY OPTIONS:
     --artifact <FILE>        The artifact the statement should describe.
     --binding-mode <MODE>    none | payload-bytes | payload-digest         [default: none]
     --format <FORMAT>        text | json                                   [default: text]
-    --verbose, -v            Include the completed evidence report after the
-                             text transcript and verdict block.
+    --verbose, -v            Show detailed progress, full evidence values, and
+                             the completed evidence report. Default text is
+                             a compact explanatory transcript; JSON is unchanged.
     --result <FILE>          Write the verification record to a file. This is
                              byte-for-byte the same document --format json
                              prints to stdout; the flag chooses the sink, not

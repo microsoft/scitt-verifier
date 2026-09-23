@@ -72,15 +72,37 @@ pub fn not_attempted(adapter: Adapter, reason: impl Into<String>) -> AdapterAsse
     }
 }
 
+pub fn check_event(
+    adapter: Adapter,
+    check: &AdapterCheck,
+    detail: String,
+    findings: &[AdapterFinding],
+) -> crate::progress::Event {
+    match adapter {
+        Adapter::MstLedger => mst_ledger::check_event(check, detail, findings),
+    }
+}
+
+pub fn compact_limitation(
+    adapter: Adapter,
+    check: &AdapterCheck,
+    findings: &[AdapterFinding],
+) -> Option<&'static str> {
+    match adapter {
+        Adapter::MstLedger => mst_ledger::compact_limitation(check, findings),
+    }
+}
+
 pub fn appraise(
     adapter: Adapter,
     source: EvidenceSource<'_>,
     statement: &Sign1,
     policy: &Policy,
+    progress: &mut dyn crate::progress::Sink,
 ) -> AdapterAssessment {
     match adapter {
         Adapter::MstLedger => match &policy.adapters.mst_ledger {
-            Some(config) => mst_ledger::appraise_evidence(source, statement, config),
+            Some(config) => mst_ledger::appraise_evidence(source, statement, config, progress),
             None => not_attempted(adapter, "policy.adapters.mst-ledger is missing"),
         },
     }

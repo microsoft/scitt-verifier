@@ -80,7 +80,7 @@ fn a_genuine_statement_without_an_artifact_is_only_statement_transparent() {
     let r = verify(&[]);
     assert_eq!(r.code, 0, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
     assert!(
-        r.stdout.starts_with("Read inputs\n"),
+        r.stdout.starts_with("Verifying ") && r.stdout.contains("[1/3] Read inputs\n"),
         "text verification must report work as it happens: {}",
         r.stdout
     );
@@ -100,20 +100,24 @@ fn a_genuine_statement_without_an_artifact_is_only_statement_transparent() {
         r.stdout
     );
     assert!(
-        transcript(&r.stdout).contains("statement-signature")
+        transcript(&r.stdout)
+            .contains("PASS Signature valid; chain consistent with its embedded root")
             && transcript(&r.stdout).contains("ArtifactBindingNotRequested"),
         "statement facts and omitted checks must precede the completed report: {}",
         r.stdout
     );
     assert!(
-        r.stdout.contains("signing certificate subject:")
-            && r.stdout.contains("statement issuer:")
-            && r.stdout.contains("registered at UTC"),
-        "human identity and timestamp labels must name what they describe: {}",
+        !r.stdout.contains("signing certificate subject:")
+            && !r.stdout.contains("claim digest")
+            && !r.stdout.contains("receipt key id"),
+        "compact successes must not dump raw evidence identities and hashes: {}",
         r.stdout
     );
     assert!(
-        has_line(&r.stdout, "Verdict") && has_line(&r.stdout, "-------"),
+        r.stdout.contains("\n\nPASS statement-transparent\n")
+            && !r.stdout.contains("Statement signature:")
+            && !r.stdout.contains("Receipt inclusion:")
+            && r.stdout.lines().count() <= 36,
         "the scoped result must be visually separated as the final verdict block: {}",
         r.stdout
     );
@@ -136,6 +140,13 @@ fn verbose_text_retains_the_completed_evidence_report() {
     assert!(
         r.stdout.contains("[pass] issuer"),
         "verbose output must retain per-assertion evidence: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("signing certificate subject:")
+            && r.stdout.contains("statement issuer:")
+            && r.stdout.contains("registered at UTC"),
+        "detailed identity and timestamp labels remain available: {}",
         r.stdout
     );
 }
@@ -1335,6 +1346,10 @@ fn a_vacuous_subject_match_is_refused_before_anything_is_verified() {
 
 /// Run a policy whose only assertion is a `protectedHeaders` list.
 fn verify_with_header_policy(name: &str, list: &str) -> Run {
+    verify_with_header_policy_options(name, list, &[])
+}
+
+fn verify_with_header_policy_options(name: &str, list: &str, extra: &[&str]) -> Run {
     let dir = std::env::temp_dir().join(format!("scitt-verifier-headers-{name}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -1349,15 +1364,18 @@ fn verify_with_header_policy(name: &str, list: &str) -> Run {
 
     let statement = corpus(&["fixtures", "transparent-statement.cose"]);
     let keys = corpus(&["fixtures", "mst-test-scitt-keys.cbor"]);
-    let r = run(&[
+    let policy_path = policy.display().to_string();
+    let mut args = vec![
         "verify",
         "--statement",
         &statement,
         "--scitt-keys",
         &keys,
         "--policy",
-        &policy.display().to_string(),
-    ]);
+        &policy_path,
+    ];
+    args.extend_from_slice(extra);
+    let r = run(&args);
     let _ = std::fs::remove_dir_all(&dir);
     r
 }
@@ -1630,9 +1648,10 @@ fn an_algorithm_name_read_from_inspect_can_be_pasted_into_a_policy() {
         .expect("a name precedes the parenthesised value");
     assert_eq!(name, "PS256", "read straight off the inspect line");
 
-    let r = verify_with_header_policy(
+    let r = verify_with_header_policy_options(
         "pasted-alg",
         &format!(r#"[{{"path":[1],"alg":{{"equals":"{name}"}}}}]"#),
+        &["--verbose"],
     );
     assert_eq!(r.code, 0, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
     assert!(

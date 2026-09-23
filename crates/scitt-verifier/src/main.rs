@@ -179,9 +179,15 @@ fn run_verify(args: &VerifyArgs, out: &mut impl std::io::Write, color: bool) -> 
 
     let assessment = match args.format {
         Format::Text => {
-            let mut progress = progress::Text::new(out, color);
+            let mut progress = if args.verbose {
+                progress::Text::new(out, color)
+            } else {
+                progress::Text::compact(out, color, progress_plan(args))
+            };
             let assessment = evaluate(args, now, &mut progress);
-            emit_assessment_summary(&assessment, &mut progress);
+            if args.verbose {
+                emit_assessment_summary(&assessment, &mut progress);
+            }
             let _ = progress.finish();
             assessment
         }
@@ -191,6 +197,31 @@ fn run_verify(args: &VerifyArgs, out: &mut impl std::io::Write, color: bool) -> 
         }
     };
     emit(args, assessment, now, out, color)
+}
+
+fn progress_plan(args: &VerifyArgs) -> Vec<(progress::Stage, String)> {
+    use progress::Stage::*;
+    let mut plan = vec![
+        (Inputs, "Read inputs".into()),
+        (Statement, "Verify transparent statement".into()),
+    ];
+    if args.artifact.is_some() {
+        plan.push((ArtifactBinding, "Check artifact binding".into()));
+    }
+    plan.push((Policy, "Evaluate relying-party policy".into()));
+    if args.adapter.is_some() {
+        plan.push((
+            Evidence,
+            if args.binding_mode == BindingMode::LiveEvidence {
+                "Authenticate target and collect evidence"
+            } else {
+                "Load saved evidence"
+            }
+            .into(),
+        ));
+        plan.push((Adapter, "Appraise node evidence".into()));
+    }
+    plan
 }
 
 /// The real clock, in Unix seconds.
@@ -216,10 +247,14 @@ fn wall_clock() -> i64 {
 /// describe boundaries already crossed; they do not influence the assessment.
 fn evaluate(args: &VerifyArgs, now: i64, progress: &mut dyn progress::Sink) -> Assessment {
     let trust = Trust::unsigned_key_set();
+    progress.emit(progress::Event::context(
+        "Verifying",
+        args.statement.display().to_string(),
+    ));
     progress.emit(progress::Event::stage(
         progress::Stage::Inputs,
         progress::State::Started,
-        format!("statement {}", args.statement.display()),
+        "Reading the transparent statement and relying-party policy...",
     ));
 
     let statement_bytes = match read(&args.statement) {
@@ -293,6 +328,21 @@ fn evaluate(args: &VerifyArgs, now: i64, progress: &mut dyn progress::Sink) -> A
         }
     };
 
+    progress.emit(progress::Event::context(
+        "Policy",
+        format!("{} v{}", policy.policy_id, policy.policy_version),
+    ));
+    if let Some(adapter) = args.adapter {
+        progress.emit(progress::Event::context("Adapter", adapter.as_str()));
+        if let Some(config) = &policy.adapters.mst_ledger {
+            progress.emit(progress::Event::context("Target", &config.target.host));
+        }
+        progress.emit(progress::Event::stage(
+            progress::Stage::Inputs,
+            progress::State::Started,
+            "Checking adapter configuration...",
+        ));
+    }
     if let Err(reason) = adapters::validate_request(args.adapter, &policy) {
         progress.emit(progress::Event::finding(
             progress::Stage::Inputs,
@@ -331,12 +381,14 @@ fn evaluate(args: &VerifyArgs, now: i64, progress: &mut dyn progress::Sink) -> A
             return Assessment::incomplete(Verdict::UsageError, trust, d, gaps(args, None, None));
         }
     };
-    progress.emit(progress::Event::finding(
+    progress.emit(progress::Event::stage(
         progress::Stage::Inputs,
-        "policy",
-        None,
         progress::State::Done,
-        format!("{} v{}", policy.policy_id, policy.policy_version),
+        match args.binding_mode {
+            BindingMode::LiveEvidence => "Inputs loaded; live-evidence appraisal requested",
+            BindingMode::SavedEvidence => "Inputs loaded; saved-evidence appraisal requested",
+            _ => "Inputs loaded",
+        },
     ));
 
     // Trust material is resolved after the policy because the policy is what
@@ -346,7 +398,11 @@ fn evaluate(args: &VerifyArgs, now: i64, progress: &mut dyn progress::Sink) -> A
     progress.emit(progress::Event::stage(
         progress::Stage::Statement,
         progress::State::Started,
-        "checking the signature and receipt inclusion",
+        if matches!(args.trust, TrustSource::Online { .. }) {
+            "Resolving allowed receipt-key sources..."
+        } else {
+            "Checking signature, signing certificate chain and receipt inclusion..."
+        },
     ));
     let resolved = match resolve_trust(args, &policy, &statement_bytes, &options, progress) {
         Ok(r) => r,
@@ -374,30 +430,13 @@ fn evaluate(args: &VerifyArgs, now: i64, progress: &mut dyn progress::Sink) -> A
     let acquisition_diagnostics = resolved.diagnostics;
     emit_statement_progress(&facts, progress);
     emit_receipt_progress(&facts, progress);
-    let statement_state = if signature_state(&facts) == CheckState::Pass
-        && receipt_state(&facts) == CheckState::Pass
-    {
-        progress::State::Pass
-    } else if signature_state(&facts) == CheckState::Fail {
-        progress::State::Fail
-    } else {
-        progress::State::CannotEvaluate
-    };
-    progress.emit(progress::Event::stage(
-        progress::Stage::Statement,
-        statement_state,
-        format!(
-            "signature {}; receipt inclusion {}",
-            signature_state(&facts).as_str(),
-            receipt_state(&facts).as_str()
-        ),
-    ));
-
-    progress.emit(progress::Event::stage(
-        progress::Stage::ArtifactBinding,
-        progress::State::Started,
-        "checking the selected binding mode",
-    ));
+    if args.artifact.is_some() {
+        progress.emit(progress::Event::stage(
+            progress::Stage::ArtifactBinding,
+            progress::State::Started,
+            "Comparing the supplied artifact with the statement...",
+        ));
+    }
     let binding = match check_binding(args, &statement_bytes) {
         Ok(b) => b,
         Err(e) => {
@@ -435,31 +474,51 @@ fn evaluate(args: &VerifyArgs, now: i64, progress: &mut dyn progress::Sink) -> A
             return a;
         }
     };
-    progress.emit(progress::Event::stage(
-        progress::Stage::ArtifactBinding,
-        progress_state(binding.state()),
-        binding.detail.clone(),
-    ));
+    if args.artifact.is_some() {
+        progress.emit(progress::Event::stage(
+            progress::Stage::ArtifactBinding,
+            progress_state(binding.state()),
+            binding.detail.clone(),
+        ));
+    }
 
     progress.emit(progress::Event::stage(
         progress::Stage::Policy,
         progress::State::Started,
-        format!("evaluating {} v{}", policy.policy_id, policy.policy_version),
+        format!(
+            "Checking statement facts against {} v{}...",
+            policy.policy_id, policy.policy_version
+        ),
     ));
     let decision = policy.evaluate_statement(&facts, now);
     for result in &decision.results {
-        progress.emit(progress::Event::finding(
-            progress::Stage::Policy,
-            result.name.clone(),
-            None,
-            assertion_progress_state(result.outcome),
-            result.detail.clone(),
-        ));
+        progress.emit(
+            progress::Event::finding(
+                progress::Stage::Policy,
+                result.name.clone(),
+                None,
+                assertion_progress_state(result.outcome),
+                result.detail.clone(),
+            )
+            .brief(if result.name == "issuer" {
+                "Receipt issuer is allowed".to_string()
+            } else {
+                format!("{} satisfied", result.name)
+            }),
+        );
     }
     progress.emit(progress::Event::stage(
         progress::Stage::Policy,
         progress_state(policy_state(&decision)),
-        format!("{} assertion(s) evaluated", decision.results.len()),
+        format!(
+            "{} statement assertion(s) {}",
+            decision.results.len(),
+            if decision.satisfied() {
+                "satisfied"
+            } else {
+                "evaluated; policy not satisfied"
+            }
+        ),
     ));
     let verdict = decide(
         &facts,
@@ -473,35 +532,15 @@ fn evaluate(args: &VerifyArgs, now: i64, progress: &mut dyn progress::Sink) -> A
     // policy has ruled on it. Appraising node evidence against a statement
     // nobody has authenticated would compare a number to another number.
     let resource = if let Some(adapter) = args.adapter {
-        progress.emit(progress::Event::stage(
-            progress::Stage::Adapter,
-            progress::State::Started,
-            format!("running {}", adapter.as_str()),
-        ));
-        let resource = run_adapter(args, &policy, &statement_bytes, verdict);
+        let resource = run_adapter(args, &policy, &statement_bytes, verdict, progress);
         if let Some(result) = &resource {
-            for finding in &result.findings {
-                progress.emit(progress::Event::finding_with_values(
+            if result.findings.is_empty() {
+                progress.emit(progress::Event::stage(
                     progress::Stage::Adapter,
-                    finding.check.clone(),
-                    Some(finding.subject.clone()),
-                    progress_state(finding.state),
-                    finding.detail.clone(),
-                    finding.expected.clone(),
-                    finding.observed.clone(),
+                    progress::State::NotRun,
+                    "No node appraisal completed; see prerequisite findings below",
                 ));
             }
-            let state = if result.scoped_pass() {
-                progress::State::Pass
-            } else if result
-                .checks
-                .iter()
-                .any(|check| check.state == CheckState::Fail)
-            {
-                progress::State::Fail
-            } else {
-                progress::State::CannotEvaluate
-            };
             // The aggregate checks, not only the per-node findings. An
             // appraisal that stopped before reaching any node produces no
             // findings at all, so without these the transcript closed on a
@@ -509,22 +548,13 @@ fn evaluate(args: &VerifyArgs, now: i64, progress: &mut dyn progress::Sink) -> A
             // appraisal failed and had to scroll to the verdict to learn
             // why it had not run.
             for (check, detail) in result.checks.iter().zip(collapsed_details(&result.checks)) {
-                progress.emit(progress::Event::finding(
-                    progress::Stage::Adapter,
-                    check.name.clone(),
-                    None,
-                    progress_state(check.state),
+                progress.emit(adapters::check_event(
+                    adapter,
+                    check,
                     detail,
+                    &result.findings,
                 ));
             }
-            progress.emit(progress::Event::stage(
-                progress::Stage::Adapter,
-                state,
-                // Labelled, because the scope is a statement about what the
-                // result covers and reads as a description of the outcome
-                // when it stands alone.
-                format!("scope: {}", result.scope),
-            ));
         }
         resource
     } else {
@@ -801,7 +831,10 @@ fn resolve_online(
     progress.emit(progress::Event::stage(
         progress::Stage::ReceiptKeys,
         progress::State::Started,
-        format!("contacting {} selected ledger(s)", selected.len()),
+        format!(
+            "Acquiring receipt verification keys from {} allowed transparency service(s)...",
+            selected.len()
+        ),
     ));
     // The real clock, never `--now`: this records when the fetch happened, and
     // `--now` answers a different question entirely.
@@ -875,6 +908,8 @@ fn resolve_online(
     // would leave a record that does not mention the network activity this run
     // performed, and would leave --save-trust with nothing to write after a
     // successful fetch.
+    progress.emit(progress::Event::stage(progress::Stage::Statement, progress::State::Started,
+        "Checking statement signature, signing certificate chain, receipt signature and inclusion proof..."));
     let facts = verify_or_fail(
         args,
         statement_bytes,
@@ -901,28 +936,34 @@ struct AcquisitionProgress<'a> {
 
 impl scitt_network::Observer for AcquisitionProgress<'_> {
     fn started(&mut self, issuer: &str) {
-        self.progress.emit(progress::Event::finding(
-            progress::Stage::ReceiptKeys,
-            "acquisition",
-            Some(issuer.to_string()),
-            progress::State::Started,
-            "resolving service identity and fetching the key set",
-        ));
+        self.progress.emit(
+            progress::Event::finding(
+                progress::Stage::ReceiptKeys,
+                "acquisition",
+                Some(issuer.to_string()),
+                progress::State::Started,
+                "resolving service identity and fetching the key set",
+            )
+            .detail(),
+        );
     }
 
     fn finished(&mut self, issuer: &str, outcome: &scitt_network::Outcome) {
         match outcome {
-            Ok(acquired) => self.progress.emit(progress::Event::finding(
-                progress::Stage::ReceiptKeys,
-                "acquisition",
-                Some(issuer.to_string()),
-                progress::State::Done,
-                format!(
-                    "{} key set acquired at UTC {}",
-                    acquired.provenance.provider,
-                    display::timestamp(acquired.provenance.acquired_at)
-                ),
-            )),
+            Ok(acquired) => self.progress.emit(
+                progress::Event::finding(
+                    progress::Stage::ReceiptKeys,
+                    "acquisition",
+                    Some(issuer.to_string()),
+                    progress::State::Done,
+                    format!(
+                        "{} key set acquired at UTC {}",
+                        acquired.provenance.provider,
+                        display::timestamp(acquired.provenance.acquired_at)
+                    ),
+                )
+                .brief("Keys acquired through identity-service-backed TLS"),
+            ),
             Err(failed) => self.progress.emit(progress::Event::finding(
                 progress::Stage::ReceiptKeys,
                 "acquisition",
@@ -1198,7 +1239,11 @@ fn emit(
             let _ = writeln!(out, "{:#}", record::build(args, &assessment, now));
         }
         Format::Text => {
-            let _ = report::verify(out, &assessment, args.verbose, color);
+            if args.verbose {
+                let _ = report::verify(out, &assessment, true, color);
+            } else {
+                let _ = report::compact(out, &assessment, args, color);
+            }
         }
     }
 
@@ -1260,48 +1305,71 @@ fn emit_statement_progress(facts: &StatementFacts, progress: &mut dyn progress::
         .alg
         .map(scitt_receipt::labels::alg::name)
         .unwrap_or_else(|| "(algorithm unavailable)".into());
-    progress.emit(progress::Event::finding(
-        progress::Stage::Statement,
-        "statement-signature",
-        facts
-            .leaf_subject
-            .as_ref()
-            .map(|value| format!("signing certificate subject: {value}")),
-        progress_state(signature_state(facts)),
-        format!(
-            "{algorithm}; {} signed bytes; claim digest {}",
-            facts.signed_statement_len, facts.claim_digest
-        ),
-    ));
-    if let Some(issuer) = &facts.cwt.iss {
-        progress.emit(progress::Event::finding(
+    progress.emit(
+        progress::Event::finding(
             progress::Stage::Statement,
-            "statement-issuer",
-            None,
-            progress::State::Done,
-            format!("statement issuer: {issuer}"),
-        ));
+            "statement-signature",
+            facts
+                .leaf_subject
+                .as_ref()
+                .map(|value| format!("signing certificate subject: {value}")),
+            progress_state(signature_state(facts)),
+            format!(
+                "{algorithm}; {} signed bytes; claim digest {}",
+                facts.signed_statement_len, facts.claim_digest
+            ),
+        )
+        .brief(match facts.signature_valid {
+            Some(true) => match &facts.chain_outcome {
+                Some(ChainOutcome::Valid(details)) if details.anchored_externally => {
+                    "Signature valid; chain anchored to supplied trust roots"
+                }
+                Some(ChainOutcome::Valid(_)) => {
+                    "Signature valid; chain consistent with its embedded root"
+                }
+                _ => "Signature valid; signing certificate chain not established",
+            },
+            _ => "Statement signature not established",
+        }),
+    );
+    if let Some(issuer) = &facts.cwt.iss {
+        progress.emit(
+            progress::Event::finding(
+                progress::Stage::Statement,
+                "statement-issuer",
+                None,
+                progress::State::Done,
+                format!("statement issuer: {issuer}"),
+            )
+            .detail(),
+        );
     }
     if let Some(subject) = &facts.cwt.sub {
-        progress.emit(progress::Event::finding(
-            progress::Stage::Statement,
-            "statement-subject",
-            None,
-            progress::State::Done,
-            format!("statement subject: {subject}"),
-        ));
+        progress.emit(
+            progress::Event::finding(
+                progress::Stage::Statement,
+                "statement-subject",
+                None,
+                progress::State::Done,
+                format!("statement subject: {subject}"),
+            )
+            .detail(),
+        );
     }
 }
 
 fn emit_receipt_progress(facts: &StatementFacts, progress: &mut dyn progress::Sink) {
     if facts.receipts_present == 0 {
-        progress.emit(progress::Event::finding(
-            progress::Stage::Statement,
-            "receipt-inclusion",
-            None,
-            progress::State::CannotEvaluate,
-            "the statement contains no receipt",
-        ));
+        progress.emit(
+            progress::Event::finding(
+                progress::Stage::Statement,
+                "receipt-inclusion",
+                None,
+                progress::State::CannotEvaluate,
+                "the statement contains no receipt",
+            )
+            .detail(),
+        );
     }
 
     for receipt in &facts.receipts {
@@ -1314,41 +1382,50 @@ fn emit_receipt_progress(facts: &StatementFacts, progress: &mut dyn progress::Si
             // of the statement; it leaves inclusion unevaluated.
             progress::State::CannotEvaluate
         };
-        progress.emit(progress::Event::finding(
-            progress::Stage::Statement,
-            "receipt-identity",
-            Some(subject.clone()),
-            progress::State::Done,
-            format!(
-                "receipt issuer {}",
-                receipt.issuer.as_deref().unwrap_or("(unavailable)")
-            ),
-        ));
-        progress.emit(progress::Event::finding(
-            progress::Stage::Statement,
-            "receipt-key",
-            Some(subject.clone()),
-            key_lookup_progress_state(receipt.key_lookup.as_ref()),
-            format!(
-                "key lookup {}; receipt key id {}",
-                key_lookup_word(receipt.key_lookup.as_ref()),
-                receipt.kid.as_deref().unwrap_or("(unavailable)")
-            ),
-        ));
-        progress.emit(progress::Event::finding(
-            progress::Stage::Statement,
-            "registration-time",
-            Some(subject.clone()),
-            if receipt.registered_at.is_some() {
-                progress::State::Done
-            } else {
-                progress::State::CannotEvaluate
-            },
-            format!(
-                "registered at UTC {}",
-                display::optional_timestamp(receipt.registered_at)
-            ),
-        ));
+        progress.emit(
+            progress::Event::finding(
+                progress::Stage::Statement,
+                "receipt-identity",
+                Some(subject.clone()),
+                progress::State::Done,
+                format!(
+                    "receipt issuer {}",
+                    receipt.issuer.as_deref().unwrap_or("(unavailable)")
+                ),
+            )
+            .detail(),
+        );
+        progress.emit(
+            progress::Event::finding(
+                progress::Stage::Statement,
+                "receipt-key",
+                Some(subject.clone()),
+                key_lookup_progress_state(receipt.key_lookup.as_ref()),
+                format!(
+                    "key lookup {}; receipt key id {}",
+                    key_lookup_word(receipt.key_lookup.as_ref()),
+                    receipt.kid.as_deref().unwrap_or("(unavailable)")
+                ),
+            )
+            .detail(),
+        );
+        progress.emit(
+            progress::Event::finding(
+                progress::Stage::Statement,
+                "registration-time",
+                Some(subject.clone()),
+                if receipt.registered_at.is_some() {
+                    progress::State::Done
+                } else {
+                    progress::State::CannotEvaluate
+                },
+                format!(
+                    "registered at UTC {}",
+                    display::optional_timestamp(receipt.registered_at)
+                ),
+            )
+            .detail(),
+        );
         let mut detail = format!(
             "root signature {}; statement binding {}",
             check_word(receipt.root_signature_valid),
@@ -1358,13 +1435,21 @@ fn emit_receipt_progress(facts: &StatementFacts, progress: &mut dyn progress::Si
             detail.push_str("; ");
             detail.push_str(&receipt.problems.join("; "));
         }
-        progress.emit(progress::Event::finding(
+        let event = progress::Event::finding(
             progress::Stage::Statement,
             "receipt-inclusion",
             Some(subject),
             state,
             detail,
-        ));
+        );
+        progress.emit(if receipt.problems.is_empty() {
+            event.brief(format!(
+                "Receipt #{}: statement inclusion verified",
+                receipt.index + 1
+            ))
+        } else {
+            event
+        });
     }
 
     // Some receipt blobs fail before ReceiptFacts can be constructed. Keep
@@ -2080,6 +2165,7 @@ fn run_adapter(
     policy: &Policy,
     statement_bytes: &[u8],
     statement_verdict: Verdict,
+    progress: &mut dyn progress::Sink,
 ) -> Option<adapters::AdapterAssessment> {
     let adapter = args.adapter?;
     let source = match args.binding_mode {
@@ -2109,6 +2195,16 @@ fn run_adapter(
     // what a node enforces would produce a confident-looking match that
     // establishes nothing about who asked for that policy.
     if !statement_verdict.is_pass() {
+        progress.emit(progress::Event::stage(
+            progress::Stage::Evidence,
+            progress::State::NotRun,
+            "Statement acceptance did not pass; evidence was not collected or loaded",
+        ));
+        progress.emit(progress::Event::stage(
+            progress::Stage::Adapter,
+            progress::State::NotRun,
+            "Statement acceptance did not pass; node evidence was not appraised",
+        ));
         return Some(adapters::not_attempted(
             adapter,
             "the statement did not pass signature, receipt, chain, and relying-party \
@@ -2126,7 +2222,9 @@ fn run_adapter(
         }
     };
 
-    Some(adapters::appraise(adapter, source, &statement, policy))
+    Some(adapters::appraise(
+        adapter, source, &statement, policy, progress,
+    ))
 }
 
 /// Let an adapter narrow a verdict, never widen one.

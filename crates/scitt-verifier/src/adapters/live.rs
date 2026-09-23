@@ -77,14 +77,20 @@ struct NodesResponse {
 /// string decides where a request goes.
 ///
 /// `deadline` bounds this evidence collection, including both endpoint requests.
-pub fn fetch(host: &str, deadline: Instant) -> Result<(EvidenceBundle, BundleMetadata), String> {
+pub fn fetch(
+    host: &str,
+    deadline: Instant,
+    progress: &mut dyn crate::progress::Sink,
+) -> Result<(EvidenceBundle, BundleMetadata), String> {
     let observed_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| format!("could not timestamp evidence acquisition: {e}"))?;
     let observed_at = i64::try_from(observed_at.as_secs())
         .map_err(|e| format!("evidence acquisition time is out of range: {e}"))?;
-    let collected = scitt_network::mst_ledger::collect(host, deadline)
-        .map_err(|e| format!("ledger evidence acquisition failed: {e}"))?;
+    let collected = scitt_network::mst_ledger::collect_with(host, deadline, &mut |step| {
+        progress.emit(collection_event(step));
+    })
+    .map_err(|e| format!("ledger evidence acquisition failed: {e}"))?;
 
     let bundle = assemble(
         &collected.quotes,
@@ -104,6 +110,18 @@ pub fn fetch(host: &str, deadline: Instant) -> Result<(EvidenceBundle, BundleMet
             observed: true,
         },
     ))
+}
+
+fn collection_event(step: scitt_network::mst_ledger::CollectionStep) -> crate::progress::Event {
+    use crate::progress::{Event, Stage, State};
+    use scitt_network::mst_ledger::CollectionStep;
+    let (state, message) = match step {
+        CollectionStep::ResolvingIdentity => (State::Started, "Resolving service certificate through identity service..."),
+        CollectionStep::Connecting => (State::Started, "Connecting using TLS pinned to that certificate; fetching SNP reports and UVM endorsements..."),
+        CollectionStep::Authenticated => (State::Pass, "Connected to authenticated target"),
+        CollectionStep::FetchingNodes => (State::Started, "Fetching node certificates..."),
+    };
+    Event::stage(Stage::Evidence, state, message)
 }
 
 /// Turn two responses into an evidence bundle.
@@ -249,6 +267,21 @@ fn decode_hex(s: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transport_progress_never_claims_authentication_before_a_response() {
+        use scitt_network::mst_ledger::CollectionStep::*;
+        for step in [ResolvingIdentity, Connecting, FetchingNodes] {
+            assert_eq!(
+                collection_event(step).state,
+                crate::progress::State::Started
+            );
+        }
+        let authenticated = collection_event(Authenticated);
+        assert_eq!(authenticated.state, crate::progress::State::Pass);
+        assert_eq!(authenticated.message, "Connected to authenticated target");
+        assert_eq!(authenticated.stage, crate::progress::Stage::Evidence);
+    }
 
     /// Hex wins when a string could be read either way.
     ///

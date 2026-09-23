@@ -9,7 +9,9 @@ use scitt_policy::{Outcome, PolicyDecision};
 use scitt_receipt::{CborValue, KeyLookup, Sign1, StatementFacts};
 use std::io::{self, Write};
 
+use crate::cli::{BindingMode, VerifyArgs};
 use crate::outcome::{Assessment, CheckState, Verdict};
+use crate::progress::safe_text;
 
 /// Text longer than this is summarised unless `--verbose` is given.
 const TEXT_LIMIT: usize = 64;
@@ -20,6 +22,139 @@ pub fn verify(out: &mut impl Write, a: &Assessment, verbose: bool, color: bool) 
     if verbose {
         writeln!(out)?;
         detail(out, a)?;
+    }
+    Ok(())
+}
+
+/// The transcript already carries check results. Keep the final decision and
+/// limitations, including diagnostics added while writing persistent records.
+pub fn compact(
+    out: &mut impl Write,
+    a: &Assessment,
+    args: &VerifyArgs,
+    color: bool,
+) -> io::Result<()> {
+    writeln!(
+        out,
+        "\n{}",
+        styled_verdict(a.verdict.banner(), a.verdict.as_str(), color)
+    )?;
+    let claim = match a.verdict {
+        Verdict::StatementTransparent => "Statement signature and receipt inclusion verified; relying-party policy satisfied.",
+        Verdict::ArtifactTransparent => "Supplied artifact matches the verified statement; relying-party policy satisfied.",
+        Verdict::ResourceTransparent => "Verified statement and assessed node evidence satisfy the scoped resource requirements.",
+        Verdict::CannotEvaluate => "This is not a pass. The tool could not answer the requested question.",
+        _ => "The requested acceptance requirements were not met.",
+    };
+    writeln!(out, "{claim}")?;
+    if a.trust.mode == "no-key-set" {
+        writeln!(out, "Trust material: {}", a.trust.describe())?;
+    }
+    if args.adapter.is_some() {
+        let scope = if a.adapter_findings.is_empty() {
+            "No node evidence was appraised."
+        } else if args.binding_mode == BindingMode::LiveEvidence {
+            "Evidence from the authenticated target during this run; assessed snapshot only, not proof of full service membership or distinct authenticated nodes."
+        } else {
+            "Saved evidence only; bundle origin and service anchor are collector-asserted, not authenticated acquisition provenance. Assessed snapshot only, not proof of full service membership or distinct authenticated nodes."
+        };
+        writeln!(out, "Scope: {scope}")?;
+    }
+
+    for diagnostic in &a.diagnostics {
+        if diagnostic.code == "ResourceAppraisalScoped"
+            || a.not_checked.iter().any(|gap| {
+                gap.code == diagnostic.code
+                    && diagnostic.severity == crate::outcome::Severity::Warning
+            })
+        {
+            continue;
+        }
+        let message = if diagnostic.code == "ResourceAppraisalNote"
+            && diagnostic
+                .message
+                .starts_with("the statement's execution policy matches the pinned digest ")
+        {
+            "Statement-derived policy commitment matches the configured pin."
+        } else {
+            &diagnostic.message
+        };
+        let severity = match diagnostic.severity {
+            crate::outcome::Severity::Error => "FAIL",
+            crate::outcome::Severity::Warning => "NOTICE",
+        };
+        writeln!(
+            out,
+            "{severity} {} {}",
+            diagnostic.code,
+            safe_text(message, 384)
+        )?;
+        if diagnostic.severity == crate::outcome::Severity::Error {
+            writeln!(out, "  Action: {}", safe_text(diagnostic.action, 384))?;
+        }
+    }
+    if let Some(primary) = &a.primary {
+        if !a
+            .diagnostics
+            .iter()
+            .any(|d| d.code == primary.code && d.message == primary.message)
+        {
+            writeln!(
+                out,
+                "FAIL {} {}\n  Action: {}",
+                primary.code,
+                safe_text(&primary.message, 384),
+                safe_text(primary.action, 384)
+            )?;
+        }
+    }
+    writeln!(out, "Limitations:")?;
+    if let Some(adapter) = args.adapter {
+        let mut shown = Vec::new();
+        for check in &a.checks.adapter {
+            if let Some(message) =
+                crate::adapters::compact_limitation(adapter, check, &a.adapter_findings)
+            {
+                if !shown.contains(&message) {
+                    writeln!(out, "  {message}")?;
+                    shown.push(message);
+                }
+            }
+        }
+    }
+    for gap in &a.not_checked {
+        let message = match gap.code {
+            "ArtifactBindingNotRequested" => "artifact binding was not requested; no artifact identity is established.",
+            "CertificateChainNotAnchoredExternally" => "Signing chain is internally consistent with its embedded root, not independently trusted.",
+            "RevocationNotChecked" => "Signing certificate revocation was not checked.",
+            _ => &gap.message,
+        };
+        writeln!(out, "  [{}] {}", gap.code, safe_text(message, 384))?;
+    }
+    if args.binding_mode.is_evidence() {
+        writeln!(
+            out,
+            "  Artifact binding was not requested; this is a resource appraisal."
+        )?;
+    }
+    if !a.facts.as_ref().is_some_and(|facts| {
+        matches!(&facts.chain_outcome,
+        Some(scitt_receipt::chain::Outcome::Valid(details)) if details.anchored_externally)
+    }) && !a.decision.as_ref().is_some_and(|decision| {
+        decision.results.iter().any(|r| {
+            r.name == "requireChainToRootSha256" && r.outcome == scitt_policy::Outcome::Pass
+        })
+    }) {
+        writeln!(out, "  No independent publisher authorization is established by a receipt issuer assertion.")?;
+    }
+    for limitation in &a.trust.limitations {
+        writeln!(out, "  {}", safe_text(limitation, 384))?;
+    }
+    if a.trust.mode == "acquired-key-set" {
+        writeln!(
+            out,
+            "  Receipt-key freshness is not established by acquisition."
+        )?;
     }
     Ok(())
 }
@@ -990,6 +1125,157 @@ fn describe_lookup(lookup: &KeyLookup) -> &'static str {
 mod tests {
     use super::{path_segment, styled_verdict};
     use scitt_receipt::CborValue;
+
+    #[test]
+    fn compact_resource_final_has_one_scope_no_duplicate_checks_and_keeps_distinct_warnings() {
+        use crate::cli::{self, BindingMode, Command};
+        use crate::outcome::{
+            AdapterCheck, AdapterFinding, Assessment, Category, CheckState, Diagnostic, Trust,
+            Verdict,
+        };
+        let args: Vec<_> = [
+            "verify",
+            "--statement",
+            "statement.cose",
+            "--policy",
+            "policy.json",
+            "--online",
+            "--adapter",
+            "mst-ledger",
+            "--binding-mode",
+            "live-evidence",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        let Command::Verify(mut args) = cli::parse(&args).unwrap() else {
+            panic!("verify")
+        };
+        let warning = Diagnostic::warning(
+            "DistinctWarning",
+            Category::Trust,
+            "do not hide this\nwarning",
+            "Read the evidence.",
+        );
+        let mut assessment = Assessment::incomplete(
+            Verdict::ResourceTransparent,
+            Trust::acquired_key_set(),
+            warning,
+            Vec::new(),
+        );
+        assessment.primary = None;
+        assessment.checks.adapter.push(AdapterCheck {
+            name: "ledger-identity-binding".into(),
+            label: "Test binding".into(),
+            state: CheckState::Pass,
+            detail: "full-measurement-must-not-repeat".into(),
+        });
+        assessment.adapter_findings.push(AdapterFinding {
+            check: "cce-policy-host-data".into(),
+            subject: "long-node-id".into(),
+            state: CheckState::Pass,
+            detail: "full-measurement-must-not-repeat".into(),
+            expected: None,
+            observed: None,
+        });
+        for name in [
+            "freshness",
+            "connection-binding",
+            "freshness",
+            "future-excluded-check",
+        ] {
+            assessment.checks.adapter.push(AdapterCheck {
+                name: name.into(),
+                label: name.into(),
+                state: CheckState::CannotEvaluate,
+                detail: format!("full detail for {name}"),
+            });
+        }
+        assessment.diagnostics.push(Diagnostic::warning(
+            "ResourceAppraisalScoped",
+            Category::Binding,
+            "full scope with long-node-id",
+            "Interpret within this scope.",
+        ));
+        for (mode, provenance) in [
+            (
+                BindingMode::LiveEvidence,
+                "Evidence from the authenticated target during this run",
+            ),
+            (
+                BindingMode::SavedEvidence,
+                "bundle origin and service anchor are collector-asserted",
+            ),
+        ] {
+            args.binding_mode = mode;
+            let mut bytes = Vec::new();
+            let mut progress = crate::progress::Text::compact(
+                &mut bytes,
+                false,
+                vec![(
+                    crate::progress::Stage::Adapter,
+                    "Appraise node evidence".into(),
+                )],
+            );
+            for check in &assessment.checks.adapter {
+                crate::progress::Sink::emit(
+                    &mut progress,
+                    crate::adapters::check_event(
+                        args.adapter.unwrap(),
+                        check,
+                        check.detail.clone(),
+                        &assessment.adapter_findings,
+                    ),
+                );
+            }
+            progress.finish().unwrap();
+            super::compact(&mut bytes, &assessment, &args, false).unwrap();
+            let text = String::from_utf8(bytes).unwrap();
+            assert!(text.contains("\nPASS resource-transparent\n"));
+            assert_eq!(text.matches("Scope:").count(), 1);
+            assert!(text.contains(provenance), "{text}");
+            assert!(
+                text.contains("assessed snapshot only") || text.contains("Assessed snapshot only")
+            );
+            assert!(text.contains("NOTICE DistinctWarning do not hide this\\nwarning"));
+            assert!(!text.contains("full-measurement") && !text.contains("long-node-id"));
+            assert!(!text.contains("Test binding:"));
+            assert_eq!(
+                text.matches("Artifact binding was not requested").count(),
+                1
+            );
+            assert!(text.contains("No independent publisher authorization"));
+            let (_, limitations) = text.split_once("Limitations:\n").unwrap();
+            for message in [
+                "Report freshness was not established.",
+                "Binding to the serving connection was not established.",
+            ] {
+                assert_eq!(text.matches(message).count(), 1, "{text}");
+                assert!(limitations.contains(message), "{text}");
+            }
+            assert!(!text.contains("CANNOT EVALUATE freshness"), "{text}");
+            assert!(
+                !text.contains("CANNOT EVALUATE connection-binding"),
+                "{text}"
+            );
+            assert!(
+                text.contains(
+                    "CANNOT EVALUATE future-excluded-check full detail for future-excluded-check"
+                ),
+                "{text}"
+            );
+        }
+        let mut bytes = Vec::new();
+        super::verify(&mut bytes, &assessment, false, false).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains("Test binding:"));
+        assert!(
+            text.contains("full-measurement-must-not-repeat"),
+            "the standalone report remains complete without a transcript"
+        );
+        assert!(text.contains("full detail for freshness"));
+        assert!(text.contains("full detail for connection-binding"));
+    }
 
     /// The bracketed label is meant to be pasted into a policy `path`, so an
     /// integer label must print bare rather than quoted.
