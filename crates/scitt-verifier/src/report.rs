@@ -34,6 +34,17 @@ fn safe(value: &str) -> String {
     safe_text(value, DETAIL_LIMIT)
 }
 
+/// Escape a statement-controlled value without shortening it.
+///
+/// `inspect` promises that `--verbose` prints claims in full, and a length cap
+/// here would quietly break that promise for the one command whose purpose is
+/// to show what a file actually contains. Escaping alone is enough: it expands
+/// a control character into visible text rather than removing it, so nothing
+/// is concealed and nothing reaches the terminal as an instruction.
+fn safe_whole(value: &str) -> String {
+    safe_text(value, usize::MAX)
+}
+
 /// Text longer than this is summarised unless `--verbose` is given.
 const TEXT_LIMIT: usize = 64;
 
@@ -488,6 +499,12 @@ pub fn inspect(
     verbose: bool,
     decoded: Option<&crate::decode::Decoded>,
 ) -> scitt_receipt::Result<()> {
+    // Before the claims, not only after them. Everything below is what the
+    // file says about itself, and a reader who scrolls away at the first
+    // interesting field never reaches a notice placed at the foot. It is
+    // repeated at the end for the reader who does.
+    println!("Inspection only — nothing here has been verified.");
+    println!();
     println!("COSE_Sign1");
     println!("  {:<19} {}", "tagged", statement.was_tagged);
     println!(
@@ -515,7 +532,7 @@ pub fn inspect(
         Some(bytes) => {
             println!("  {:<19} {}", "bytes", bytes.len());
             if let Some(cty) = statement.content_type() {
-                println!("  {:<19} {}", "content type", cty);
+                println!("  {:<19} {}", "content type", safe_whole(&cty));
             }
             // In a hash envelope the payload *is* a digest of something else
             // (RFC 9995). Printing sha-256 of it would be the hash of a hash —
@@ -529,10 +546,10 @@ pub fn inspect(
                 );
                 println!("  {:<19} {}", "digest", scitt_receipt::cbor::hex(bytes));
                 if let Some(cty) = statement.payload_preimage_content_type() {
-                    println!("  {:<19} {}", "preimage cty", cty);
+                    println!("  {:<19} {}", "preimage cty", safe_whole(&cty));
                 }
                 if let Some(loc) = statement.payload_location() {
-                    println!("  {:<19} {}", "preimage at", loc);
+                    println!("  {:<19} {}", "preimage at", safe_whole(&loc));
                 }
             } else {
                 println!("  {:<19} {}", "sha-256", scitt_receipt::sha256_hex(bytes));
@@ -551,8 +568,8 @@ pub fn inspect(
     } else if let Ok(Some((subject, issuer))) = statement.leaf_names() {
         println!();
         println!("Signing certificate");
-        println!("  {:<19} {subject}", "subject");
-        println!("  {:<19} {issuer}", "issuer");
+        println!("  {:<19} {}", "subject", safe_whole(&subject));
+        println!("  {:<19} {}", "issuer", safe_whole(&issuer));
     }
 
     inspect_receipts(statement, verbose);
@@ -660,7 +677,7 @@ fn print_header(key: &CborValue, value: &CborValue, verbose: bool, addressable: 
             Some(name) => (name.to_string(), true),
             None => (i.to_string(), false),
         },
-        CborValue::TextString(s) => (s.clone(), false),
+        CborValue::TextString(s) => (safe_whole(s), false),
         other => (scitt_receipt::cbor::type_name(other).to_string(), false),
     };
 
@@ -717,7 +734,8 @@ fn print_members(value: &CborValue, path: &str, verbose: bool, depth: usize) {
                 // A label that is neither an integer nor text has no `path`
                 // spelling. Render it so it is still visible, but do not
                 // print a path an author cannot type.
-                let segment = path_segment(k).unwrap_or_else(|| scitt_receipt::render_scalar(k));
+                let segment =
+                    path_segment(k).unwrap_or_else(|| safe_whole(&scitt_receipt::render_scalar(k)));
                 (segment, v)
             })
             .collect(),
@@ -763,7 +781,10 @@ fn print_payload_json(statement: &Sign1, bytes: &[u8], verbose: bool) {
         Ok(document) => print_claims(&document, None, verbose, 0),
         // Loud rather than silent: a statement whose content type and payload
         // disagree is a defect, and `payloadJson` will fail against it.
-        Err(why) => println!("    not valid JSON, despite the declared content type: {why}"),
+        Err(why) => println!(
+            "    not valid JSON, despite the declared content type: {}",
+            safe_whole(&why.to_string())
+        ),
     }
 }
 
@@ -779,7 +800,7 @@ fn print_claims(value: &serde_json::Value, path: Option<&str>, verbose: bool, de
             .iter()
             // A key is quoted because that is how it is written in a path; a
             // bare `build` would suggest an identifier rather than a string.
-            .map(|(k, v)| (format!("'{k}'"), v))
+            .map(|(k, v)| (format!("'{}'", safe_whole(k)), v))
             .collect(),
         serde_json::Value::Array(items) => items
             .iter()
@@ -818,9 +839,9 @@ fn json_scalar(value: &serde_json::Value, verbose: bool) -> String {
         serde_json::Value::Number(n) => n.to_string(),
         serde_json::Value::String(s) if !verbose && s.chars().count() > TEXT_LIMIT => {
             let head: String = s.chars().take(32).collect();
-            format!("{} chars: {head}…", s.chars().count())
+            format!("{} chars: {}…", s.chars().count(), safe_whole(&head))
         }
-        serde_json::Value::String(s) => format!("'{s}'"),
+        serde_json::Value::String(s) => format!("'{}'", safe_whole(s)),
         serde_json::Value::Array(items) => format!("array of {}", items.len()),
         serde_json::Value::Object(fields) => format!("object of {}", fields.len()),
     }
@@ -854,7 +875,9 @@ fn header_value_text(key: &CborValue, value: &CborValue, verbose: bool, known: b
             .map(alg_display)
             .unwrap_or_else(|_| scalar(value, verbose, known)),
         // A CCF `kid` is a byte string holding ASCII hex, not raw digest bytes.
-        labels::KID => cbor::as_kid(value).unwrap_or_else(|_| scalar(value, verbose, known)),
+        labels::KID => cbor::as_kid(value)
+            .map(|kid| safe_whole(&kid))
+            .unwrap_or_else(|_| scalar(value, verbose, known)),
         labels::X5T => x5t_text(value).unwrap_or_else(|| scalar(value, verbose, known)),
         labels::X5CHAIN => format!("{} certificate(s)", count_items(value)),
         labels::RECEIPTS => count_items(value).to_string(),
@@ -887,7 +910,7 @@ fn print_cwt_claims(value: &CborValue, verbose: bool, parent: Option<i64>) {
                 Some(name) => (name.to_string(), true),
                 None => (i.to_string(), false),
             },
-            CborValue::TextString(s) => (s.clone(), false),
+            CborValue::TextString(s) => (safe_whole(s), false),
             other => (cbor::type_name(other).to_string(), false),
         };
         let heading = match (parent, path_segment(key)) {
@@ -931,20 +954,27 @@ fn count_items(value: &CborValue) -> usize {
     }
 }
 
-/// A rendering that cannot flood a terminal.
+/// A rendering that cannot flood a terminal, or drive one.
 ///
 /// Only values under labels this build does *not* interpret are summarised. A
 /// field we chose to name is a field somebody came to read: truncating `iss`
 /// would hide the exact string a policy has to match. Unknown fields are the
 /// flood risk — one statement we tested against carries a 684-character
 /// detached signature in a header nothing here interprets.
+///
+/// Every text string is escaped whether or not it was summarised. A statement
+/// is untrusted input here — `inspect` verifies nothing — and its text is
+/// chosen by whoever produced the file. Unescaped, a header value can end a
+/// line and start one that reads exactly like a verdict this command never
+/// reaches, or emit a colour sequence that paints it.
 fn scalar(value: &CborValue, verbose: bool, known: bool) -> String {
     match value {
         CborValue::TextString(s) if !known && !verbose && s.chars().count() > TEXT_LIMIT => {
             let head: String = s.chars().take(32).collect();
-            format!("{} chars: {head}…", s.chars().count())
+            format!("{} chars: {}…", s.chars().count(), safe_whole(&head))
         }
-        other => scitt_receipt::render_scalar(other),
+        CborValue::TextString(s) => safe_whole(s),
+        other => safe_whole(&scitt_receipt::render_scalar(other)),
     }
 }
 
@@ -964,17 +994,25 @@ fn inspect_chain(statement: &Sign1) {
             if cert.index == 0 { "(leaf)" } else { "" }
         );
         if let Some(problem) = &cert.problem {
-            println!("  problem             {problem}");
+            println!("  problem             {}", safe_whole(problem));
             println!("  sha-256             {}", cert.sha256);
             continue;
         }
+        // A distinguished name is chosen by whoever built the certificate, and
+        // `inspect` has established nothing about who that was.
         println!(
             "  subject             {}",
-            cert.subject.as_deref().unwrap_or("(none)")
+            cert.subject
+                .as_deref()
+                .map(safe_whole)
+                .unwrap_or_else(|| "(none)".into())
         );
         println!(
             "  issuer              {}",
-            cert.issuer.as_deref().unwrap_or("(none)")
+            cert.issuer
+                .as_deref()
+                .map(safe_whole)
+                .unwrap_or_else(|| "(none)".into())
         );
         println!(
             "  version             {}",
@@ -1038,7 +1076,7 @@ fn inspect_receipts(statement: &Sign1, verbose: bool) {
         let summary = match scitt_receipt::describe_receipt(bytes) {
             Ok(s) => s,
             Err(e) => {
-                println!("  could not be read    {e}");
+                println!("  could not be read    {}", safe_whole(&e.to_string()));
                 continue;
             }
         };
@@ -1051,15 +1089,27 @@ fn inspect_receipts(statement: &Sign1, verbose: bool) {
         );
         println!(
             "  receipt key id      {}",
-            summary.kid.as_deref().unwrap_or("(none)")
+            summary
+                .kid
+                .as_deref()
+                .map(safe_whole)
+                .unwrap_or_else(|| "(none)".into())
         );
         println!(
             "  receipt issuer      {}",
-            summary.issuer.as_deref().unwrap_or("(none)")
+            summary
+                .issuer
+                .as_deref()
+                .map(safe_whole)
+                .unwrap_or_else(|| "(none)".into())
         );
         println!(
             "  receipt subject     {}",
-            summary.subject.as_deref().unwrap_or("(none)")
+            summary
+                .subject
+                .as_deref()
+                .map(safe_whole)
+                .unwrap_or_else(|| "(none)".into())
         );
         println!(
             "  registered at UTC   {}",
@@ -1075,7 +1125,11 @@ fn inspect_receipts(statement: &Sign1, verbose: bool) {
         );
         println!(
             "  ccf txid            {}",
-            summary.ccf_txid.as_deref().unwrap_or("(none)")
+            summary
+                .ccf_txid
+                .as_deref()
+                .map(safe_whole)
+                .unwrap_or_else(|| "(none)".into())
         );
 
         if verbose {
@@ -1085,7 +1139,7 @@ fn inspect_receipts(statement: &Sign1, verbose: bool) {
         }
 
         for problem in &summary.problems {
-            println!("  problem             {problem}");
+            println!("  problem             {}", safe_whole(problem));
         }
     }
 }
@@ -1101,7 +1155,11 @@ fn print_inclusion_proof(summary: &scitt_receipt::ReceiptSummary) {
     };
     println!("  inclusion proof");
     println!("    {:<17} {}", "write set digest", proof.write_set_digest);
-    println!("    {:<17} {}", "commit evidence", proof.commit_evidence);
+    println!(
+        "    {:<17} {}",
+        "commit evidence",
+        safe_whole(&proof.commit_evidence)
+    );
     println!("    {:<17} {}", "claims digest", proof.claims_digest);
     println!("    {:<17} {} step(s)", "merkle path", proof.path.len());
     for (index, step) in proof.path.iter().enumerate() {
@@ -1118,7 +1176,8 @@ fn print_labels(prefix: &str, labels: &[String]) {
         println!("{prefix} (none)");
         return;
     }
-    println!("{prefix} {}", labels.join(", "));
+    let escaped: Vec<String> = labels.iter().map(|l| safe_whole(l)).collect();
+    println!("{prefix} {}", escaped.join(", "));
 }
 
 fn styled_verdict(banner: &str, verdict: &str, color: bool) -> String {

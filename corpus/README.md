@@ -11,6 +11,7 @@ implementing SCITT receipt verification independently.
 | `tampered-statement.cose` | The same statement with a byte flipped inside the *receipt* — the Issuer's signature over the statement still verifies, but the transparency service's signature over the Merkle root does not |
 | `appended-receipt.cose` | The genuine statement with a second, corrupted receipt appended to the unprotected header — no key required, since nothing signs that bucket |
 | `payload-tampered.cose` | The same statement with a modified payload — the receipt is untouched and still valid *for the original statement* |
+| `hostile-subject.cose` | The same statement with its CWT subject overwritten by terminal control characters, so it tries to write a green `PASS` line of its own into a report. Same length, so every other byte is identical; the Issuer's signature no longer covers it, which does not matter to `inspect` |
 | `artifact.bin` | The 21-byte artifact the genuine statement's payload equals — `Hello from MST Team\r\n`, **CRLF included** |
 | `bad-artifact.bin` | A different artifact, for the negative binding case |
 | `mst-test-scitt-keys.cbor` | The transparency service's signing keys, as a COSE_KeySet |

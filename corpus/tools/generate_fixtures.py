@@ -84,6 +84,15 @@ KEY_SET_NAME = "mst-test-scitt-keys.cbor"
 # exactly, so it is part of the corpus's contract rather than a free choice.
 BASE_SUBJECT = "unknown.intent"
 
+# The same field, filled with the characters a terminal acts on rather than
+# prints. Exactly as long as `BASE_SUBJECT`, so it can be substituted into a
+# finished statement without re-encoding anything around it.
+#
+# A statement is untrusted input, and `inspect` displays it without verifying
+# anything. Unescaped, this value ends the line it is printed on and starts one
+# that reads like a verdict, in the colour the real ones use.
+HOSTILE_SUBJECT = "a\r\n PASS \x1b[32m"
+
 # Certificates outlive the fixtures deliberately. A short-lived certificate
 # would make `inspect` report an expired chain years before anything was
 # actually wrong with the corpus, which trains readers to ignore the field.
@@ -464,6 +473,31 @@ def appended_receipt(statement: bytes) -> bytes:
     return cbor2.dumps(tag)
 
 
+def hostile_subject(statement: bytes) -> bytes:
+    """Overwrite the CWT subject with terminal control characters.
+
+    Substituted into the finished bytes rather than signed, for the same
+    reason as the other derived fixtures: every other byte of the file stays
+    identical, so a diff shows exactly the region that changed. The issuer's
+    signature no longer verifies over it, which costs nothing here -- this
+    fixture exists for `inspect`, which authenticates nothing and displays
+    the field regardless.
+
+    Nobody needs a key to produce this. A statement is a file, and a file
+    arrives from wherever it arrived from.
+    """
+    needle = cbor2.dumps(BASE_SUBJECT)
+    replacement = cbor2.dumps(HOSTILE_SUBJECT)
+    if len(needle) != len(replacement):
+        raise SystemExit("hostile subject must encode to the same length")
+    at = statement.find(needle)
+    if at < 0:
+        raise SystemExit("could not locate the subject to overwrite")
+    if statement.find(needle, at + 1) >= 0:
+        raise SystemExit("subject to overwrite is ambiguous")
+    return statement[:at] + replacement + statement[at + len(needle) :]
+
+
 # --------------------------------------------------------------------------
 # driver
 # --------------------------------------------------------------------------
@@ -518,6 +552,7 @@ def main() -> int:
     emit("tampered-statement.cose", tampered_receipt(transparent))
     emit("payload-tampered.cose", tampered_payload(transparent))
     emit("appended-receipt.cose", appended_receipt(transparent))
+    emit("hostile-subject.cose", hostile_subject(transparent))
 
     emit("cbor-header.cose", register(client, cbor_header_statement()))
     emit("nested-sign1.cose", register(client, nested_sign1_statement()))

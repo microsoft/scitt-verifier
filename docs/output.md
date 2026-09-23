@@ -39,6 +39,11 @@ an issuer, path, or remote diagnostic cannot forge another displayed line.
 The completed `--verbose` report applies the same escaping and bounding to
 every value it did not originate itself, at a larger limit because that report
 exists to be read in full.
+`inspect` escapes on the same principle, and for a stronger reason: it
+authenticates nothing, so every value it shows is chosen by whoever produced
+the file. It does not shorten what it escapes — a control character becomes
+visible text rather than disappearing — so `--verbose` still prints claims in
+full.
 Individual receipt outcomes and policy assertion results are emitted during
 their respective stages; the later report remains a completed evidence view,
 not the source from which the transcript is reconstructed.

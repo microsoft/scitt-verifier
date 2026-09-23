@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### `inspect` no longer lets a statement drive the terminal
+
+Every value `inspect` printed came straight from the file, unescaped, and
+`inspect` verifies nothing — so a crafted statement could end the line it was
+printed on and write a line reading `PASS statement-transparent`, in the colour
+a real verdict uses. Header names and values, JSON claim keys and values, CWT
+claims, certificate subjects and issuers, receipt fields and decode errors are
+now escaped, as `verify` already escaped them. Nothing is shortened by this:
+control characters are expanded into visible text, so `--verbose` still prints
+claims in full. `corpus/fixtures/hostile-subject.cose` pins it.
+
+### `inspect` says what it is before it says what it found
+
+The notice that inspection verifies nothing was printed only after the claims,
+where a reader who stopped at the first interesting field never saw it. It now
+appears first as well as last.
+
+### Policy diagnostics summarise a long observed value
+
+A `protectedHeaders` or `payloadJson` text rule echoed the whole matched value
+into its detail, in the terminal and in the record: against a real statement, a
+`startsWith` rule on a detached signature printed all 684 characters of base64.
+Observed values longer than 64 characters are now summarised with their length.
+The policy's own literal is never shortened — it is the string an operator
+compares against.
+
 ### The ledger adapter is now named `azure-confidential-ledger` (breaking)
 
 The adapter appraises a deployed Azure Confidential Ledger. It was named after
