@@ -14,6 +14,33 @@ azure-confidential-ledger`, and the build feature
 rejected by `deny_unknown_fields` rather than silently reinterpreted, and must
 be updated.
 
+### Node coverage counts attested keys, not names
+
+Every aggregate rule asks whether all N nodes agreed, and `node_id` is a label
+the collector chose. A saved bundle is unsigned, so one agreeing node copied
+under three names satisfied a requirement for three nodes. Coverage now counts
+distinct attested keys — the SHA-256 of the node's own public key that CCF
+places in `REPORT_DATA`, which the hardware signature authenticates — and fails
+when fewer distinct keys were attested than nodes were presented. Live
+acquisition was never affected; this closes the saved-evidence path.
+
+### Saved bundles are read within fixed bounds
+
+A bundle supplied on the command line is untrusted input that was read without
+limit, and its paths were checked lexically, so a component named entirely
+normally could still leave the directory through a link. Manifest, per-file and
+total sizes and the node count are now capped, and every path is canonicalised
+and required to remain inside the bundle before its bytes are read.
+
+### `relyingPartyPolicy.satisfied` accounts for adapter checks
+
+The field reported only whether the statement assertions held, so it could read
+`true` on a run where a required adapter check failed or could not run. It now
+requires both, and the narrower fact is retained as `assertionsSatisfied`. The
+verdict and exit code are unchanged — they were already correct — but the
+record no longer disagrees with them. `schemaVersion` stays `v0`, which is
+still moving by design.
+
 ### A TCB floor is now required to cover the node it appraises
 
 The attestation library compares a minimum TCB only against a node of the same

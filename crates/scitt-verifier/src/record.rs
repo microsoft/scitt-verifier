@@ -48,7 +48,8 @@ use serde_json::{json, Map, Value};
 
 use crate::cli::{BindingMode, TrustSource, VerifyArgs};
 use crate::outcome::{
-    Acquisition, AdapterCheck, AdapterFinding, Assessment, Binding, Checks, Diagnostic, Gap, Trust,
+    Acquisition, AdapterCheck, AdapterFinding, Assessment, Binding, CheckState, Checks, Diagnostic,
+    Gap, Trust,
 };
 
 /// The full record: observations, rules, and decision.
@@ -489,13 +490,33 @@ fn binding_json(args: &VerifyArgs, assessment: &Assessment) -> Value {
 /// reserves "Registration Policy" for the transparency service's own admission
 /// rules. Someone reading `policy` in a SCITT context will reasonably assume
 /// the latter. Populated from the `--policy` document.
+///
+/// `satisfied` answers "was the relying party's policy met", and the policy
+/// document configures adapter requirements as well as statement assertions.
+/// It therefore cannot be the assertion outcome alone: a required adapter check
+/// that failed, or that could not run, means the document was not satisfied
+/// however well the statement itself read. The narrower fact is not lost —
+/// `assertionsSatisfied` keeps it, and `assertions` still lists each result —
+/// but the field a gate is most likely to read is the one that accounts for
+/// everything the policy asked for.
 fn policy_json(assessment: &Assessment) -> Value {
+    // Every adapter check the run produced must pass. `NotChecked` counts
+    // against it too: a required appraisal that never ran leaves the policy
+    // unmet, not satisfied by default. A run that selected no adapter has an
+    // empty list, so this is vacuously true and the field keeps its old
+    // meaning for the default case.
+    let adapters_satisfied = assessment
+        .checks
+        .adapter
+        .iter()
+        .all(|check| check.state == CheckState::Pass);
     match &assessment.decision {
         Some(d) => json!({
             "status": EVALUATED,
             "policyId": d.policy_id,
             "policyVersion": d.policy_version,
-            "satisfied": d.satisfied(),
+            "satisfied": d.satisfied() && adapters_satisfied,
+            "assertionsSatisfied": d.satisfied(),
             "assertions": d.results,
         }),
         None => json!({
@@ -503,6 +524,7 @@ fn policy_json(assessment: &Assessment) -> Value {
             "policyId": null,
             "policyVersion": null,
             "satisfied": null,
+            "assertionsSatisfied": null,
             "assertions": [],
         }),
     }
@@ -705,6 +727,64 @@ mod tests {
         assert_eq!(finding["state"], "fail");
         assert_eq!(finding["expected"], "expected");
         assert_eq!(finding["observed"], "observed");
+    }
+
+    /// A policy document configures adapter requirements as well as statement
+    /// assertions, so its `satisfied` may not report only the latter.
+    ///
+    /// A gate reading the record is the primary consumer, and a field that
+    /// says the relying party's policy was met while a required appraisal
+    /// failed is a trap — the more so because the verdict and exit code are
+    /// correct, so the record disagrees with the process that wrote it.
+    #[test]
+    fn a_failed_adapter_check_leaves_the_policy_unsatisfied() {
+        use scitt_policy::{AssertionResult, Outcome, PolicyDecision};
+
+        let satisfied_assertions = || PolicyDecision {
+            policy_id: "p".into(),
+            policy_version: "1".into(),
+            results: vec![AssertionResult {
+                name: "issuer".into(),
+                outcome: Outcome::Pass,
+                detail: "d".into(),
+            }],
+        };
+
+        let with_adapter = |state: Option<CheckState>| {
+            let mut assessment = incomplete();
+            assessment.decision = Some(satisfied_assertions());
+            if let Some(state) = state {
+                assessment.checks.adapter.push(AdapterCheck {
+                    name: "cce-policy-host-data".into(),
+                    label: "CCE policy / HOST_DATA".into(),
+                    state,
+                    detail: "d".into(),
+                });
+            }
+            build(&args(), &assessment, 0)
+        };
+
+        // With no adapter selected the meaning is unchanged.
+        let record = with_adapter(None);
+        assert_eq!(record["relyingPartyPolicy"]["satisfied"], true);
+        assert_eq!(record["relyingPartyPolicy"]["assertionsSatisfied"], true);
+
+        for state in [
+            CheckState::Fail,
+            CheckState::CannotEvaluate,
+            CheckState::NotChecked,
+        ] {
+            let record = with_adapter(Some(state));
+            assert_eq!(
+                record["relyingPartyPolicy"]["satisfied"], false,
+                "an adapter check in state {state:?} must not read as a satisfied policy"
+            );
+            // The narrower fact survives rather than being overwritten.
+            assert_eq!(record["relyingPartyPolicy"]["assertionsSatisfied"], true);
+        }
+
+        let record = with_adapter(Some(CheckState::Pass));
+        assert_eq!(record["relyingPartyPolicy"]["satisfied"], true);
     }
 
     /// The four core checks are the compatibility surface. Adding adapter

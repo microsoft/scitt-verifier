@@ -36,6 +36,27 @@ const MANIFEST: &str = "snapshot.json";
 /// what was recorded.
 const SUPPORTED_VERSION: u32 = 1;
 
+/// Bounds on what a bundle directory may cost to read.
+///
+/// A saved bundle is untrusted input: the manifest names the files and this
+/// build reads them, so without a ceiling a bundle decides how much memory
+/// this process allocates. The limits are generous against real evidence — an
+/// SNP report is 1184 bytes, an AMD chain a few kilobytes, a UVM endorsement
+/// tens of kilobytes — and exist to refuse the absurd, not to constrain the
+/// plausible. Exceeding one is an error, never a finding: a bundle too large
+/// to read was not appraised and unacceptable, it was not appraised at all.
+mod limits {
+    /// The manifest is JSON parsed into memory before anything is validated.
+    pub const MANIFEST_BYTES: u64 = 1 << 20;
+    /// One file named by the manifest.
+    pub const FILE_BYTES: u64 = 4 << 20;
+    /// Every file in the bundle together, so many small files cost no more
+    /// than one large one.
+    pub const TOTAL_BYTES: u64 = 64 << 20;
+    /// Enumerated nodes. A CCF service is a consortium, not a cloud region.
+    pub const NODES: usize = 1024;
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct Manifest {
@@ -101,9 +122,15 @@ pub struct BundleMetadata {
 
 /// Read a bundle directory into memory.
 pub fn load(dir: &Path) -> Result<(EvidenceBundle, BundleMetadata), String> {
-    let manifest_path = dir.join(MANIFEST);
-    let raw =
-        std::fs::read(&manifest_path).map_err(|e| format!("{}: {e}", manifest_path.display()))?;
+    // Resolved once, so that every later containment check compares against a
+    // real location rather than the spelling the caller used. Without this a
+    // bundle reached through a symlinked directory would compare its files
+    // against a root that does not exist on disk.
+    let root = std::fs::canonicalize(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let mut budget = Budget::new();
+
+    let manifest_path = root.join(MANIFEST);
+    let raw = read_capped(&manifest_path, limits::MANIFEST_BYTES)?;
     let manifest: Manifest = serde_json::from_slice(&raw)
         .map_err(|e| format!("{} is not a usable manifest: {e}", manifest_path.display()))?;
 
@@ -126,6 +153,16 @@ pub fn load(dir: &Path) -> Result<(EvidenceBundle, BundleMetadata), String> {
         return Err(format!(
             "{} enumerates no nodes; evidence about no node establishes nothing",
             manifest_path.display()
+        ));
+    }
+    // Checked before any file is opened, because the cost of reading a bundle
+    // is decided by this number and the manifest is untrusted.
+    if manifest.nodes.len() > limits::NODES {
+        return Err(format!(
+            "{} enumerates {} nodes, and this build reads at most {}",
+            manifest_path.display(),
+            manifest.nodes.len(),
+            limits::NODES
         ));
     }
 
@@ -151,17 +188,29 @@ pub fn load(dir: &Path) -> Result<(EvidenceBundle, BundleMetadata), String> {
     }
 
     let service_certificate_pem = match &manifest.service_certificate {
-        Some(rel) => read_within(dir, rel)?,
+        Some(rel) => read_within(&root, rel, &mut budget)?,
         None => Vec::new(),
     };
 
     let mut nodes = Vec::with_capacity(manifest.nodes.len());
     for node in &manifest.nodes {
-        let snp_report = read_ref(dir, &node.report, &node.id, "report")?;
-        let amd_pem = read_ref(dir, &node.amd_endorsements, &node.id, "amdEndorsements")?;
-        let uvm_endorsement = read_ref(dir, &node.uvm_endorsement, &node.id, "uvmEndorsement")?;
+        let snp_report = read_ref(&root, &node.report, &node.id, "report", &mut budget)?;
+        let amd_pem = read_ref(
+            &root,
+            &node.amd_endorsements,
+            &node.id,
+            "amdEndorsements",
+            &mut budget,
+        )?;
+        let uvm_endorsement = read_ref(
+            &root,
+            &node.uvm_endorsement,
+            &node.id,
+            "uvmEndorsement",
+            &mut budget,
+        )?;
         let certificate_pem = match &node.certificate {
-            Some(r) => read_ref(dir, r, &node.id, "certificate")?,
+            Some(r) => read_ref(&root, r, &node.id, "certificate", &mut budget)?,
             None => Vec::new(),
         };
 
@@ -325,9 +374,15 @@ pub fn base64_encode(bytes: &[u8]) -> String {
     out
 }
 
-fn read_ref(dir: &Path, file: &FileRef, node_id: &str, field: &str) -> Result<Vec<u8>, String> {
-    let bytes =
-        read_within(dir, &file.path).map_err(|e| format!("node {node_id}, {field}: {e}"))?;
+fn read_ref(
+    root: &Path,
+    file: &FileRef,
+    node_id: &str,
+    field: &str,
+    budget: &mut Budget,
+) -> Result<Vec<u8>, String> {
+    let bytes = read_within(root, &file.path, budget)
+        .map_err(|e| format!("node {node_id}, {field}: {e}"))?;
     if let Some(expected) = &file.sha256 {
         let actual = hex(&scitt_receipt::sha256(&bytes));
         if !actual.eq_ignore_ascii_case(expected) {
@@ -343,12 +398,77 @@ fn read_ref(dir: &Path, file: &FileRef, node_id: &str, field: &str) -> Result<Ve
     Ok(bytes)
 }
 
+/// What is left of the bundle-wide read allowance.
+struct Budget {
+    remaining: u64,
+}
+
+impl Budget {
+    fn new() -> Self {
+        Self {
+            remaining: limits::TOTAL_BYTES,
+        }
+    }
+
+    fn spend(&mut self, bytes: u64, path: &Path) -> Result<(), String> {
+        self.remaining = self.remaining.checked_sub(bytes).ok_or_else(|| {
+            format!(
+                "reading {} would exceed the {} byte bundle limit",
+                path.display(),
+                limits::TOTAL_BYTES
+            )
+        })?;
+        Ok(())
+    }
+}
+
+/// Read one file, refusing one larger than `max`.
+///
+/// The length is taken from the open handle rather than from a prior `metadata`
+/// call, and the read is capped regardless of what the length said: a file can
+/// grow between the two, and on some platforms a length is a hint. The cap is
+/// what bounds the allocation; the length check only avoids reading megabytes
+/// to discover that.
+fn read_capped(path: &Path, max: u64) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let len = file
+        .metadata()
+        .map_err(|e| format!("{}: {e}", path.display()))?
+        .len();
+    if len > max {
+        return Err(format!(
+            "{} is {len} bytes, and this build reads at most {max}",
+            path.display()
+        ));
+    }
+    let mut bytes = Vec::with_capacity(len.min(max) as usize);
+    let read = file
+        .take(max + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    if read as u64 > max {
+        return Err(format!(
+            "{} is larger than the {max} bytes this build reads",
+            path.display()
+        ));
+    }
+    Ok(bytes)
+}
+
 /// Read a manifest-named file, refusing any path that leaves the bundle.
 ///
 /// A manifest is untrusted input. Without this, a bundle could name
 /// `../../.ssh/id_rsa` and have its contents read, or an absolute path
 /// anywhere on the machine.
-fn read_within(dir: &Path, relative: &str) -> Result<Vec<u8>, String> {
+///
+/// The lexical component check is not sufficient on its own, and is kept only
+/// because it names the problem precisely: `node/../../secret` is refused for
+/// what it says rather than for where it landed. A path made entirely of
+/// ordinary components can still leave the directory by following a symlink,
+/// so where it resolves to is checked as well — that check is the one that
+/// holds, and it is made before the bytes are read.
+fn read_within(root: &Path, relative: &str, budget: &mut Budget) -> Result<Vec<u8>, String> {
     let candidate = Path::new(relative);
     // `has_root` as well as `is_absolute`, because they disagree across
     // platforms: `/etc/passwd` is absolute on Unix but merely rooted on
@@ -371,8 +491,18 @@ fn read_within(dir: &Path, relative: &str) -> Result<Vec<u8>, String> {
             }
         }
     }
-    let path: PathBuf = dir.join(candidate);
-    std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))
+    let path: PathBuf = root.join(candidate);
+    let resolved = std::fs::canonicalize(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if !resolved.starts_with(root) {
+        return Err(format!(
+            "{relative:?} resolves to {}, which is outside the bundle directory; a link may \
+             not take a manifest somewhere its own path could not",
+            resolved.display()
+        ));
+    }
+    let bytes = read_capped(&resolved, limits::FILE_BYTES)?;
+    budget.spend(bytes.len() as u64, &resolved)?;
+    Ok(bytes)
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -487,6 +617,89 @@ mod tests {
         let (_d, got) = bundle(&manifest);
         let err = got.unwrap_err();
         assert!(err.contains("absolute"), "{err}");
+    }
+
+    /// A path made only of ordinary components can still leave the directory.
+    ///
+    /// The lexical check passes `escape.bin` without complaint; where it
+    /// resolves to is the question. Skipped where the platform will not let
+    /// this process create a symlink at all — on Windows that needs developer
+    /// mode or elevation — because a test that cannot build the attack cannot
+    /// report anything about the defence either way.
+    #[test]
+    fn a_link_that_leaves_the_bundle_is_refused() {
+        let outside = tempdir::Dir::new();
+        write(outside.path(), "secret", b"not yours");
+
+        let dir = tempdir::Dir::new();
+        let manifest = one_node().replace(r#""n1-report.bin""#, r#""escape.bin""#);
+        write(dir.path(), MANIFEST, manifest.as_bytes());
+        write(dir.path(), "n1-amd.pem", PEM.as_bytes());
+        write(dir.path(), "n1-uvm.cose", b"uvm");
+
+        let target = outside.path().join("secret");
+        let link = dir.path().join("escape.bin");
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_file(&target, &link).is_ok();
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(&target, &link).is_ok();
+        if !made {
+            return;
+        }
+
+        let err = load(dir.path()).unwrap_err();
+        assert!(err.contains("outside the bundle"), "{err}");
+    }
+
+    /// The manifest decides how much this process reads, and it is untrusted.
+    #[test]
+    fn a_file_larger_than_the_limit_is_refused() {
+        let dir = tempdir::Dir::new();
+        write(dir.path(), MANIFEST, one_node().as_bytes());
+        write(
+            dir.path(),
+            "n1-report.bin",
+            &vec![0u8; (limits::FILE_BYTES + 1) as usize],
+        );
+        write(dir.path(), "n1-amd.pem", PEM.as_bytes());
+        write(dir.path(), "n1-uvm.cose", b"uvm");
+        let err = load(dir.path()).unwrap_err();
+        assert!(err.contains("reads at most"), "{err}");
+    }
+
+    /// Refused before a single file is opened: the count is what decides the
+    /// cost, so it is checked where it is read.
+    #[test]
+    fn more_nodes_than_the_limit_are_refused() {
+        let entries: Vec<String> = (0..=limits::NODES)
+            .map(|i| {
+                format!(
+                    r#"{{ "id": "n{i}", "report": {{ "path": "n1-report.bin" }},
+                       "amdEndorsements": {{ "path": "n1-amd.pem" }},
+                       "uvmEndorsement": {{ "path": "n1-uvm.cose" }} }}"#
+                )
+            })
+            .collect();
+        let manifest = format!(
+            r#"{{ "version": 1, "ledger": "l.example", "nodes": [{}] }}"#,
+            entries.join(",")
+        );
+        let (_d, got) = bundle(&manifest);
+        let err = got.unwrap_err();
+        assert!(err.contains("reads at most"), "{err}");
+    }
+
+    /// The manifest itself is parsed into memory, so it is bounded too.
+    #[test]
+    fn a_manifest_larger_than_the_limit_is_refused() {
+        let dir = tempdir::Dir::new();
+        write(
+            dir.path(),
+            MANIFEST,
+            &vec![b' '; (limits::MANIFEST_BYTES + 1) as usize],
+        );
+        let err = load(dir.path()).unwrap_err();
+        assert!(err.contains("reads at most"), "{err}");
     }
 
     #[test]

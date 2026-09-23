@@ -240,6 +240,15 @@ pub struct NodeOutcome {
     pub expected_policy_digest: Option<String>,
     /// Authenticated `HOST_DATA` read from this node's report.
     pub observed_host_data: Option<String>,
+    /// The identity the hardware attested: `sha256(SubjectPublicKeyInfo)` of
+    /// the node's own key, as the report commits to it in `REPORT_DATA`.
+    ///
+    /// `None` when the report did not authenticate, because an attacker-chosen
+    /// number is not an identity. This, not [`NodeOutcome::node_id`], is what
+    /// makes two entries different nodes: the id is a label the collector
+    /// wrote down, so copying one node's evidence under three names would
+    /// otherwise present one machine as a fleet.
+    pub attested_key: Option<String>,
     pub detail: String,
 }
 
@@ -423,6 +432,11 @@ pub fn appraise_with(
                     },
                     expected_policy_digest: Some(hex(policy_digest)),
                     observed_host_data: Some(hex(&v.host_data)),
+                    // The report authenticated, so the key it commits to is
+                    // attested rather than asserted. CCF puts `sha256(SPKI)`
+                    // in the first 32 bytes; the rest is padding and carries
+                    // no identity.
+                    attested_key: Some(hex(&v.report_data[..32])),
                     detail,
                 });
             }
@@ -442,6 +456,9 @@ pub fn appraise_with(
                     host_data_match: CheckState::CannotEvaluate,
                     expected_policy_digest: None,
                     observed_host_data: None,
+                    // Nothing authenticated, so this node contributed no
+                    // identity — not even a distinct one.
+                    attested_key: None,
                     detail: why.clone(),
                 });
             }
@@ -706,10 +723,42 @@ fn aggregate(outcomes: &[NodeOutcome]) -> Aggregate {
         .count();
 
     let node_coverage = if assessable == total {
-        Check::new(
-            CheckState::Pass,
-            format!("every node in the assessed snapshot ({total}) produced usable evidence"),
-        )
+        // Coverage counts nodes, and until here "node" meant a manifest
+        // entry. Entries are labels the collector wrote down, so N entries
+        // are N nodes only if they attested N different keys. Copying one
+        // agreeing node's evidence under three ids would otherwise report a
+        // three-node fleet in unanimous agreement on the strength of one
+        // machine — and every rule above, being of the form "all N agreed",
+        // would confirm it.
+        let mut keys: Vec<&str> = outcomes
+            .iter()
+            .filter_map(|n| n.attested_key.as_deref())
+            .collect();
+        keys.sort_unstable();
+        let distinct = {
+            let mut d = keys.clone();
+            d.dedup();
+            d.len()
+        };
+        if distinct != keys.len() {
+            Check::new(
+                CheckState::Fail,
+                format!(
+                    "the {total} enumerated node(s) attested only {distinct} distinct key(s); \
+                     repeated evidence from one node cannot establish what several would. \
+                     Node identifiers are collector-supplied labels, so the identity counted \
+                     here is the key the hardware attested."
+                ),
+            )
+        } else {
+            Check::new(
+                CheckState::Pass,
+                format!(
+                    "every node in the assessed snapshot ({total}) produced usable evidence, \
+                     attesting {distinct} distinct key(s)"
+                ),
+            )
+        }
     } else {
         Check::new(
             CheckState::Fail,
@@ -845,7 +894,10 @@ mod tests {
         for (_, _, check) in a.checks() {
             assert_eq!(check.state, CheckState::CannotEvaluate);
         }
-        assert!(a.cce_policy_host_data.detail.contains("azure-confidential-ledger"));
+        assert!(a
+            .cce_policy_host_data
+            .detail
+            .contains("azure-confidential-ledger"));
     }
 
     /// Evidence that cannot authenticate must not produce a HOST_DATA finding.
@@ -1020,6 +1072,13 @@ mod tests {
             host_data_match: host,
             expected_policy_digest: None,
             observed_host_data: None,
+            // Distinct per id by default, so the existing cases keep asking
+            // what they were written to ask. A test that wants two entries to
+            // be the same machine says so explicitly.
+            attested_key: match host {
+                CheckState::CannotEvaluate => None,
+                _ => Some(format!("key-of-{node_id}")),
+            },
             detail: format!("{node_id} detail"),
         }
     }
@@ -1116,6 +1175,40 @@ mod tests {
         );
     }
 
+    /// One machine's evidence, replayed under three names, is one machine.
+    ///
+    /// Node ids come from the collector and a saved bundle is unsigned, so the
+    /// cheapest forgery available is to copy an agreeing node and rename the
+    /// copies. Every agreement rule is of the form "all N agreed" and would
+    /// confirm it. The identity that counts is the key the hardware attested.
+    #[test]
+    fn repeated_evidence_from_one_node_is_not_a_fleet() {
+        let one = |id: &str| NodeOutcome {
+            attested_key: Some("the-same-key".into()),
+            ..bound(id)
+        };
+        let a = aggregate(&[one("a"), one("b"), one("c")]);
+        assert_eq!(
+            a.node_coverage.state,
+            CheckState::Fail,
+            "three copies of one node must not read as three nodes"
+        );
+        assert!(a.node_coverage.detail.contains("1 distinct key"));
+        // The point of the check: the fleet-wide agreement rules still say
+        // everyone agreed, because from their side everyone did.
+        assert_eq!(a.cce_policy_host_data.state, CheckState::Pass);
+        assert_eq!(a.ledger_identity_binding.state, CheckState::Pass);
+    }
+
+    /// The count that appears in a passing coverage message is the count of
+    /// attested keys, so a reader is told what was actually established.
+    #[test]
+    fn coverage_reports_how_many_distinct_keys_were_attested() {
+        let a = aggregate(&[agreeing("a"), agreeing("b")]);
+        assert_eq!(a.node_coverage.state, CheckState::Pass);
+        assert!(a.node_coverage.detail.contains("2 distinct key"));
+    }
+
     #[test]
     fn a_fully_agreeing_fleet_passes_every_aggregate_check() {
         let a = aggregate(&[agreeing("a"), agreeing("b"), agreeing("c")]);
@@ -1195,11 +1288,17 @@ mod tests {
     /// later that admits some other combination would be a silent weakening.
     #[test]
     fn every_aggregate_check_passes_only_when_every_node_authenticated_and_agreed() {
-        let kinds = [agreeing("n"), dissenting("n"), unusable("n")];
+        // Distinct ids per position, so each arrangement is three different
+        // nodes. Three copies of one node is a separate rule, tested above.
+        let kinds = |id: &str| [agreeing(id), dissenting(id), unusable(id)];
         for i in 0..3usize {
             for j in 0..3usize {
                 for k in 0..3usize {
-                    let nodes = [kinds[i].clone(), kinds[j].clone(), kinds[k].clone()];
+                    let nodes = [
+                        kinds("a")[i].clone(),
+                        kinds("b")[j].clone(),
+                        kinds("c")[k].clone(),
+                    ];
                     let a = aggregate(&nodes);
                     let all_pass = a.snp_uvm_validation.state.is_pass()
                         && a.cce_policy_host_data.state.is_pass()

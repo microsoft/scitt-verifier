@@ -126,6 +126,14 @@ the wrong execution policy.
 Coverage is over the nodes enumerated by the evidence. It is not proof that
 no other nodes exist; choose `expectNodeCount` when your policy knows the count.
 
+Coverage counts **distinct attested keys**, not `node_id` values. `node_id` is
+a label the collector chose, and a saved bundle is unsigned, so the cheapest
+way to appear to satisfy a three-node requirement is to present one agreeing
+node three times under different names. The key counted is the SHA-256 of the
+node's own public key that CCF places in the first 32 bytes of `REPORT_DATA`,
+which the hardware signature authenticates; coverage fails when fewer distinct
+keys were attested than nodes were presented.
+
 ## Live evidence
 
 ```console
@@ -179,6 +187,12 @@ live acquisition does not create a signed provenance record. During offline
 replay, the verifier cannot re-establish that the saved service certificate
 came from the public identity service. Protecting the captured bundle's origin
 and integrity remains the relying party's responsibility.
+
+Because the bundle is untrusted input, reading it is bounded: the manifest,
+each evidence file, and the bundle's total size have fixed ceilings, as does
+the number of nodes — checked before any file is opened. Every path named by
+the manifest is canonicalised and must remain inside the bundle directory, so a
+link out of it is refused before its bytes are read.
 
 ## What a success means
 

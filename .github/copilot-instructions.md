@@ -61,6 +61,19 @@ planned, and not what a reader might assume. Two live examples:
 If a change means something is no longer verified, add it to
 `appraisal.notChecked`. Runtime, not just documentation.
 
+## The report is part of the verdict
+
+Every value drawn from a statement, a policy or a bundle is untrusted text.
+Escape it on **every** path that reaches a terminal — the compact transcript,
+the verbose report and anything added later — or a crafted node label can emit
+newlines and terminal controls that scroll a failure away or forge a verdict
+line. `safe()` in `crates/scitt-verifier/src/report.rs` does the escaping; use
+it rather than formatting the value directly.
+
+A verdict that was not written was not delivered. Writing to stdout and
+flushing can fail, and the caller must handle the error rather than discard it;
+a pass whose record is missing or truncated is demoted, not reported as 0.
+
 ## Fixtures are real bytes
 
 Everything in `corpus/fixtures/` came from a real transparency service. Do not
@@ -116,6 +129,19 @@ and `assertions.bindLedgerPolicy` shape is not supported.
 evaluates statement assertions and then adapters explicitly. Keep SNP/UVM
 types specific to the Azure Confidential Ledger adapter. There is no generic
 attestation crate or plugin framework.
+
+A requirement that does not apply to the evidence is not satisfied by it. A
+minimum TCB configured for one processor generation says nothing about a
+report from another, so the adapter demands a floor covering the generation it
+actually authenticated rather than letting an inapplicable minimum stand in
+for one. The same reasoning governs counting: node coverage counts distinct
+attested keys, because a saved bundle is unsigned and the cheapest forgery is
+one agreeing node copied under several names.
+
+Saved evidence is attacker-supplied input. `src/adapters/load.rs` bounds what
+it will read — file, manifest and total sizes, and node count — and refuses any
+path that leaves the bundle directory after canonicalisation, not just one that
+says `..`.
 
 Crypto and CBOR come from `tav-cose` / `tav-crypto`
 (microsoft/TEE-Attestation-Verification), pinned to an exact git revision. An

@@ -154,7 +154,7 @@ pub fn appraise_evidence(
     progress.emit(Event::stage(
         Stage::Evidence,
         State::NotRun,
-        "This build has no azure-confidential-ledger adapter",
+        "This build has no Azure Confidential Ledger adapter",
     ));
     progress.emit(Event::stage(
         Stage::Adapter,
@@ -162,7 +162,7 @@ pub fn appraise_evidence(
         "Rebuild with --features adapter-azure-confidential-ledger",
     ));
     not_attempted(
-        "this build was compiled without the azure-confidential-ledger adapter, so no ledger evidence can be \
+        "this build was compiled without the Azure Confidential Ledger adapter, so no ledger evidence can be \
          appraised. Rebuild with --features adapter-azure-confidential-ledger.",
     )
 }
@@ -411,15 +411,10 @@ pub fn appraise_evidence(
     };
     progress.emit(checklist);
     let mut index = 0;
-    let appraisal = match acl::appraise_with(
-        &bundle,
-        &policy_digest,
-        &requirements,
-        &mut |node| {
-            emit_node(node, &labels[index], progress);
-            index += 1;
-        },
-    ) {
+    let appraisal = match acl::appraise_with(&bundle, &policy_digest, &requirements, &mut |node| {
+        emit_node(node, &labels[index], progress);
+        index += 1;
+    }) {
         Ok(a) => a,
         Err(e) => return not_attempted(format!("the evidence could not be appraised: {e}")),
     };
@@ -508,7 +503,7 @@ fn emit_node(node: &acl::NodeOutcome, label: &str, progress: &mut dyn Sink) {
 fn node_event(finding: AdapterFinding, label: &str) -> Event {
     let summarized = matches!(
         finding.check.as_str(),
-        "ledger-identity-binding" | "snp-uvm-validation" | "cce-policy-host-data"
+        "ledger-identity-binding" | "snp-uvm-validation" | "cce-policy-host-data" | "node-coverage"
     );
     let event = Event::finding_with_values(
         Stage::Adapter,
@@ -585,6 +580,28 @@ fn node_findings(nodes: &[acl::NodeOutcome]) -> Vec<AdapterFinding> {
             expected: node.expected_policy_digest.clone(),
             observed: node.observed_host_data.clone(),
         });
+        // The identity the hardware attested, recorded per node so that a
+        // reader of the record can see for themselves how many distinct
+        // machines the enumeration amounted to. The subject is the
+        // collector-supplied label; this is what it turned out to denote.
+        findings.push(AdapterFinding {
+            check: "node-coverage".into(),
+            subject: node.node_id.clone(),
+            state: match node.attested_key {
+                Some(_) => CheckState::Pass,
+                None => CheckState::CannotEvaluate,
+            },
+            detail: match node.attested_key {
+                Some(_) => "the node attested a key, which is the identity counted for \
+                            coverage"
+                    .into(),
+                None => "no report authenticated, so this entry contributed no attested \
+                         identity"
+                    .into(),
+            },
+            expected: None,
+            observed: node.attested_key.clone(),
+        });
     }
     findings
 }
@@ -610,10 +627,7 @@ fn normalise_host(raw: &str) -> String {
 
 /// Translate policy into the adapter's typed requirements.
 #[cfg(feature = "adapter-azure-confidential-ledger")]
-fn requirements(
-    bind: &BindLedgerPolicy,
-    trust: &TrustInputs,
-) -> Result<acl::Requirements, String> {
+fn requirements(bind: &BindLedgerPolicy, trust: &TrustInputs) -> Result<acl::Requirements, String> {
     let mut min_tcb = Vec::with_capacity(bind.minimum_tcb.len());
     for entry in &bind.minimum_tcb {
         min_tcb.push(acl::TcbFloor {
@@ -750,6 +764,7 @@ mod tests {
             host_data_match: Pass,
             expected_policy_digest: Some("expected-full-hash".into()),
             observed_host_data: Some("expected-full-hash".into()),
+            attested_key: Some("attested-key-hash".into()),
             detail: "measurement full-measurement".into(),
         }
     }
@@ -788,6 +803,9 @@ mod tests {
         assert!(text.contains("measurement full-measurement"));
         assert!(text.contains("Expected: expected-full-hash"));
         assert!(text.contains("Observed: expected-full-hash"));
+        // The identity counted for coverage is the attested key, and a
+        // verbose reader is shown which one this entry turned out to be.
+        assert!(text.contains("attested-key-hash"), "{text}");
     }
 
     #[cfg(feature = "adapter-azure-confidential-ledger")]
@@ -911,6 +929,7 @@ mod tests {
             host_data_match: acl::CheckState::Fail,
             expected_policy_digest: Some("expected".into()),
             observed_host_data: Some("observed".into()),
+            attested_key: Some("attested".into()),
             detail: "different commitments".into(),
         }]);
         let policy = findings
@@ -921,5 +940,13 @@ mod tests {
         assert_eq!(policy.state, CheckState::Fail);
         assert_eq!(policy.expected.as_deref(), Some("expected"));
         assert_eq!(policy.observed.as_deref(), Some("observed"));
+
+        // The attested identity travels into the record too, so a reader can
+        // count distinct machines rather than take the enumeration's word.
+        let coverage = findings
+            .iter()
+            .find(|finding| finding.check == "node-coverage")
+            .unwrap();
+        assert_eq!(coverage.observed.as_deref(), Some("attested"));
     }
 }

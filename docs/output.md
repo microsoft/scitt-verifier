@@ -621,6 +621,15 @@ The policy is `relyingPartyPolicy`, named for *whose* rules they are, because
 RFC 9943 §3 reserves "Registration Policy" for the transparency service's own
 admission rules. It is populated from the `--policy` document.
 
+`relyingPartyPolicy.satisfied` answers whether the whole document was met, so
+it requires both the statement assertions and every configured adapter check to
+have passed; a check that did not run counts against it. The narrower fact —
+whether the assertions alone held — is kept as `assertionsSatisfied`. Both are
+`null` when no policy was supplied. The verdict and exit code are unaffected:
+this changes what the record says, not what the tool decided. The change of
+meaning would ordinarily move `schemaVersion`, but the schema is `v0` and still
+moving by design.
+
 Every observation block carries a `provenance` object and a `status`.
 
 ## Sections
