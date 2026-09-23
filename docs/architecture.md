@@ -39,8 +39,9 @@ failed, or unevaluated required checks block success. Other checks still report
 scope limitations; they cannot stand in for a required check.
 
 There is no generic `scitt-attest` crate, plugin loader, or universal SNP
-evidence model. SNP and UVM concepts belong to the MST adapter. A future image,
-hardware, or MAA adapter could use this separation, but none is implemented
+evidence model. SNP and UVM concepts belong to the Azure Confidential Ledger
+adapter. A future image, hardware, or MAA adapter could use this separation,
+but none is implemented
 by the existence of the dispatch seam.
 
 ## Where the network is, and is not

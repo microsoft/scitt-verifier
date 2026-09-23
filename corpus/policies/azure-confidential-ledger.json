@@ -1,7 +1,7 @@
 {
   "policyId": "example/ledger-policy-gate",
   "policyVersion": "1",
-  "description": "Illustrative MST adapter schema for documentation and regression tests, not a production policy. The all-zero UVM root fingerprint and all other acceptance values must be replaced with independently approved values.",
+  "description": "Illustrative Azure Confidential Ledger adapter schema for documentation and regression tests, not a production policy. The all-zero UVM root fingerprint and all other acceptance values must be replaced with independently approved values.",
   "assertions": {
     "issuer": ["example-log.confidential-ledger.azure.com"],
     "statementSubject": { "equals": "example-execution-policy" },
