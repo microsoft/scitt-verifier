@@ -268,6 +268,7 @@ pub fn save(dir: &Path, bundle: &EvidenceBundle, metadata: &BundleMetadata) -> R
     };
 
     let mut nodes = Vec::with_capacity(bundle.nodes.len());
+    let mut used_stems: Vec<String> = Vec::with_capacity(bundle.nodes.len());
     for node in &bundle.nodes {
         // The node id is a ledger-supplied string that becomes a filename, so
         // it is reduced to characters that cannot escape the directory or
@@ -286,6 +287,22 @@ pub fn save(dir: &Path, bundle: &EvidenceBundle, metadata: &BundleMetadata) -> R
                 node.node_id
             ));
         }
+        // Reducing is not injective: dropped characters and the length cap
+        // both merge distinct ids, and the second node would then overwrite
+        // the first's files while the manifest went on naming two. The bundle
+        // would be internally consistent, replay cleanly, and no longer
+        // contain the evidence that was appraised. Refused instead, because
+        // renaming one of them would put a name in the manifest that is not
+        // the id the ledger gave.
+        if used_stems.contains(&stem) {
+            return Err(format!(
+                "node ids {:?} and an earlier one both reduce to the filename stem {stem:?}; \
+                 refusing to write a bundle in which one node's evidence would overwrite \
+                 another's",
+                node.node_id
+            ));
+        }
+        used_stems.push(stem.clone());
 
         let mut entry = serde_json::Map::new();
         entry.insert("id".into(), node.node_id.clone().into());
@@ -838,6 +855,33 @@ mod tests {
         save(dir.path(), &bundle, &meta).expect("save");
         // The separators are gone, so nothing was written outside the bundle.
         assert!(dir.path().join("etc-report.bin").exists());
+    }
+
+    /// Reducing a node id to a filename is not injective, so two distinct
+    /// nodes can land on one stem. Writing both would leave a bundle that
+    /// reloads cleanly while holding one node's evidence twice.
+    #[test]
+    fn two_node_ids_that_reduce_to_one_filename_are_refused() {
+        let node = |id: &str, report: &[u8]| NodeEvidence {
+            node_id: id.into(),
+            certificate_pem: Vec::new(),
+            snp_report: report.to_vec(),
+            amd_endorsements: Vec::new(),
+            uvm_endorsement: b"u".to_vec(),
+        };
+        let bundle = EvidenceBundle {
+            service_certificate_pem: Vec::new(),
+            nodes: vec![node("ab", b"first"), node("a/b", b"second")],
+        };
+        let meta = BundleMetadata {
+            ledger: "l".into(),
+            collected_at: None,
+            node_count: 2,
+            observed: true,
+        };
+        let dir = tempdir::Dir::new();
+        let err = save(dir.path(), &bundle, &meta).expect_err("collision must be refused");
+        assert!(err.contains("overwrite"), "{err}");
     }
 
     /// A tiny scratch directory, removed on drop.

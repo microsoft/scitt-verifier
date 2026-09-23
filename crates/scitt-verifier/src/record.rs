@@ -48,8 +48,8 @@ use serde_json::{json, Map, Value};
 
 use crate::cli::{BindingMode, TrustSource, VerifyArgs};
 use crate::outcome::{
-    Acquisition, AdapterCheck, AdapterFinding, Assessment, Binding, CheckState, Checks, Diagnostic,
-    Gap, Trust,
+    required_checks_pass, Acquisition, AdapterCheck, AdapterFinding, Assessment, Binding, Checks,
+    Diagnostic, Gap, Trust,
 };
 
 /// The full record: observations, rules, and decision.
@@ -500,16 +500,22 @@ fn binding_json(args: &VerifyArgs, assessment: &Assessment) -> Value {
 /// but the field a gate is most likely to read is the one that accounts for
 /// everything the policy asked for.
 fn policy_json(assessment: &Assessment) -> Value {
-    // Every adapter check the run produced must pass. `NotChecked` counts
-    // against it too: a required appraisal that never ran leaves the policy
-    // unmet, not satisfied by default. A run that selected no adapter has an
-    // empty list, so this is vacuously true and the field keeps its old
-    // meaning for the default case.
-    let adapters_satisfied = assessment
-        .checks
-        .adapter
-        .iter()
-        .all(|check| check.state == CheckState::Pass);
+    // Every check the adapter declared *required* must have passed. Its other
+    // checks are excluded deliberately: an adapter reports findings that bound
+    // a claim as well as ones that decide it, and `freshness` against CCF can
+    // never pass, so reading "every reported check passed" here would make
+    // every genuine `resource-transparent` run report an unsatisfied policy.
+    //
+    // The rule is `required_checks_pass`, the same one the verdict is derived
+    // from, so this field cannot come to disagree with the exit code beside it.
+    // A run that selected no adapter has no contract and no results, and keeps
+    // the old meaning.
+    let adapters_satisfied = assessment.checks.adapter.is_empty()
+        && assessment.checks.adapter_required.is_empty()
+        || required_checks_pass(
+            &assessment.checks.adapter,
+            &assessment.checks.adapter_required,
+        );
     match &assessment.decision {
         Some(d) => json!({
             "status": EVALUATED,
@@ -760,6 +766,7 @@ mod tests {
                     state,
                     detail: "d".into(),
                 });
+                assessment.checks.adapter_required = vec!["cce-policy-host-data".into()];
             }
             build(&args(), &assessment, 0)
         };
@@ -785,6 +792,53 @@ mod tests {
 
         let record = with_adapter(Some(CheckState::Pass));
         assert_eq!(record["relyingPartyPolicy"]["satisfied"], true);
+    }
+
+    /// The regression this field invited: the adapter reports checks that can
+    /// never pass, and counting those would make every real success look like
+    /// an unsatisfied policy.
+    #[test]
+    fn a_check_outside_the_contract_does_not_unsatisfy_the_policy() {
+        use scitt_policy::{AssertionResult, Outcome, PolicyDecision};
+
+        let mut assessment = incomplete();
+        assessment.decision = Some(PolicyDecision {
+            policy_id: "p".into(),
+            policy_version: "1".into(),
+            results: vec![AssertionResult {
+                name: "issuer".into(),
+                outcome: Outcome::Pass,
+                detail: "d".into(),
+            }],
+        });
+        let check = |name: &str, state: CheckState| AdapterCheck {
+            name: name.into(),
+            label: name.into(),
+            state,
+            detail: "d".into(),
+        };
+        assessment.checks.adapter = vec![
+            check("cce-policy-host-data", CheckState::Pass),
+            // Permanently unevaluable against CCF, and deliberately not in the
+            // contract below.
+            check("freshness", CheckState::CannotEvaluate),
+        ];
+        assessment.checks.adapter_required = vec!["cce-policy-host-data".into()];
+
+        let record = build(&args(), &assessment, 0);
+        assert_eq!(
+            record["relyingPartyPolicy"]["satisfied"], true,
+            "a check the adapter never required must not decide the policy"
+        );
+
+        // A contract naming a check the adapter did not report is unmet: the
+        // appraisal is incomplete, not satisfied by omission.
+        assessment
+            .checks
+            .adapter_required
+            .push("node-coverage".into());
+        let record = build(&args(), &assessment, 0);
+        assert_eq!(record["relyingPartyPolicy"]["satisfied"], false);
     }
 
     /// The four core checks are the compatibility surface. Adding adapter

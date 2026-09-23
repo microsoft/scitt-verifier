@@ -196,14 +196,18 @@ mod tests {
     use super::*;
 
     /// A real CCF node certificate and the service identity that signed it,
-    /// fetched from a live Azure Confidential Ledger on 2026-09-22 via
-    /// `/gov/service/nodes` and the publicly-trusted identity service.
+    /// from `mst-test-scitt-verifier`, the throwaway ledger that also backs the
+    /// conformance corpus, fetched via `/gov/service/nodes` and the publicly
+    /// trusted identity service.
     ///
-    /// Both are public TLS material and contain no secret. They are committed
-    /// rather than synthesised because the property under test — that CCF
-    /// commits `sha256(SPKI)` to `REPORT_DATA` and that the service signs each
-    /// node certificate — is a fact about CCF, and a hand-built pair would
-    /// only test that this file agrees with itself.
+    /// Both are public TLS material and contain no secret, and the ledger is
+    /// ours: evidence from a production service belonging to another team must
+    /// not be committed here, however public its certificate is.
+    ///
+    /// They are committed rather than synthesised because the DER this parses
+    /// and the ECDSA P-384 issuer signature it verifies are what CCF actually
+    /// emits, and a hand-built pair would only test that this file agrees with
+    /// itself.
     const SERVICE_PEM: &str = include_str!("../tests/fixtures/service-identity.pem");
     const NODE_PEM: &str = include_str!("../tests/fixtures/node.pem");
 

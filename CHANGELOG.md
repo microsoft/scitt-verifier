@@ -36,7 +36,10 @@ and required to remain inside the bundle before its bytes are read.
 
 The field reported only whether the statement assertions held, so it could read
 `true` on a run where a required adapter check failed or could not run. It now
-requires both, and the narrower fact is retained as `assertionsSatisfied`. The
+requires both, and the narrower fact is retained as `assertionsSatisfied`. What
+"both" means is the adapter's own contract — the checks it declares as required
+— so the two checks it can never perform against CCF, freshness and connection
+binding, do not make every successful appraisal read as unsatisfied. The
 verdict and exit code are unchanged — they were already correct — but the
 record no longer disagrees with them. `schemaVersion` stays `v0`, which is
 still moving by design.
@@ -50,6 +53,15 @@ refuses a node whose generation the configured floor does not name, once the
 report has authenticated and its generation is a fact rather than a claim.
 This is reported as cannot-evaluate rather than a node failure: nothing about
 the node is at fault, the policy simply configured no floor applicable to it.
+
+### Two node ids can no longer write one evidence file
+
+`--save-evidence` reduces a ledger-supplied node id to a filename, which is not
+a reversible step: dropped characters and the length cap can map two distinct
+ids onto one stem, and the second node's files then replaced the first while
+the manifest went on naming both. The bundle reloaded cleanly and no longer
+held the evidence that was appraised. A collision is now refused before
+anything is written.
 
 ### Records can no longer be written over saved evidence
 

@@ -30,7 +30,7 @@ pub struct AdapterAssessment {
 
 impl AdapterAssessment {
     pub fn scoped_pass(&self) -> bool {
-        !self.required_checks.is_empty() && self.blocking().is_empty()
+        crate::outcome::required_checks_pass(&self.checks, &self.required_checks)
     }
 
     pub fn blocking(&self) -> Vec<String> {

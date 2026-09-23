@@ -294,6 +294,40 @@ pub struct Checks {
     pub policy: CheckState,
     /// Empty for every run that selected no adapter, which is the default.
     pub adapter: Vec<AdapterCheck>,
+    /// The names in `adapter` that had to pass for the adapter's claim to
+    /// hold, as the adapter itself declared them.
+    ///
+    /// Carried alongside the results because the list of checks alone cannot
+    /// answer whether the policy was met: an adapter may report a check it
+    /// knows can never pass — `freshness` against CCF, say — which bounds the
+    /// claim rather than deciding it. Reading "every check passed" off the
+    /// results would make every genuine success look like a failure.
+    pub adapter_required: Vec<String>,
+}
+
+/// Whether every required check ran exactly once and passed.
+///
+/// The one place this rule lives. `AdapterAssessment::blocking` decides the
+/// verdict with it and the record reports it, and those two answers disagreeing
+/// would mean the document contradicts the exit code that accompanied it.
+///
+/// An empty contract is not satisfaction. An adapter that declared nothing
+/// required has established nothing, and treating that as a pass would let a
+/// stub adapter authorise a deployment.
+pub fn required_checks_pass(checks: &[AdapterCheck], required: &[String]) -> bool {
+    if required.is_empty() {
+        return false;
+    }
+    required.iter().all(|name| {
+        let mut matches = checks.iter().filter(|check| check.name == *name);
+        // A duplicate is refused rather than resolved: two entries under one
+        // name mean the adapter contradicted itself, and picking either would
+        // be this code deciding which of them to believe.
+        matches!(
+            (matches.next(), matches.next()),
+            (Some(check), None) if check.state == CheckState::Pass
+        )
+    })
 }
 
 impl Checks {
@@ -306,6 +340,7 @@ impl Checks {
             artifact_binding: CheckState::NotChecked,
             policy: CheckState::NotChecked,
             adapter: Vec::new(),
+            adapter_required: Vec::new(),
         }
     }
 }

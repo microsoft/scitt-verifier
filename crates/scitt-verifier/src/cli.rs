@@ -70,7 +70,8 @@ VERIFY OPTIONS:
                              but only against the root the statement carries —
                              internally consistent, not externally trusted.
     --artifact <FILE>        The artifact the statement should describe.
-    --binding-mode <MODE>    none | payload-bytes | payload-digest         [default: none]
+    --binding-mode <MODE>    none | payload-bytes | payload-digest. Builds with
+                             a ledger adapter offer more — see below. [default: none]
     --format <FORMAT>        text | json                                   [default: text]
     --verbose, -v            Show detailed progress, full evidence values, and
                              the completed evidence report. Default text is
@@ -104,7 +105,7 @@ EXIT CODES:
     3  could not be evaluated — missing trust material or unsupported feature
     4  usage or input error
 
-VERDICTS (exit 0 is two different claims — see docs/output.md):
+VERDICTS (exit 0 is more than one claim — see docs/output.md):
     artifact-transparent   the artifact you supplied is the one that was registered
     statement-transparent  the statement is transparent, but no artifact was checked
 

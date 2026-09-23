@@ -573,6 +573,10 @@ fn evaluate(args: &VerifyArgs, now: i64, progress: &mut dyn progress::Sink) -> A
             .as_ref()
             .map(|r| r.checks.clone())
             .unwrap_or_default(),
+        adapter_required: resource
+            .as_ref()
+            .map(|r| r.required_checks.clone())
+            .unwrap_or_default(),
     };
 
     // The adapter can only ever narrow. It is handed a verdict that has
