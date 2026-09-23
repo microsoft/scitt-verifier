@@ -29,13 +29,13 @@ use serde::{Deserialize, Serialize};
 /// Requirements for appraisal by the MST ledger adapter.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct MstLedgerPolicy {
+pub struct AzureConfidentialLedgerPolicy {
     pub target: LedgerTarget,
     pub trust: TrustInputs,
     pub binding: BindLedgerPolicy,
 }
 
-impl MstLedgerPolicy {
+impl AzureConfidentialLedgerPolicy {
     pub fn validate(&self) -> Result<(), String> {
         self.target.validate()?;
         self.trust.validate()?;
@@ -303,7 +303,7 @@ mod tests {
             r#"{{
               "policyId": "p", "policyVersion": "1",
               "assertions": {{ "receiptCount": 1 }},
-              "adapters": {{ "mst-ledger": {{
+              "adapters": {{ "azure-confidential-ledger": {{
               "target": {{ "host": "l.example" }},
               "trust": {{
                 "uvmIssuer": "did:x509:0:sha256:abc",
@@ -328,7 +328,7 @@ mod tests {
     #[test]
     fn a_complete_section_parses_and_validates() {
         let p = Policy::from_json(&policy_json("")).expect("policy");
-        let adapter = p.adapters.mst_ledger.expect("adapter");
+        let adapter = p.adapters.acl.expect("adapter");
         assert_eq!(adapter.target.host, "l.example");
         let bind = adapter.binding;
         assert_eq!(bind.encoding, Encoding::Base64);
@@ -360,7 +360,7 @@ mod tests {
     #[test]
     fn the_section_parses_regardless_of_build_features() {
         let p = Policy::from_json(&policy_json("")).expect("policy");
-        assert!(p.adapters.mst_ledger.is_some());
+        assert!(p.adapters.acl.is_some());
     }
 
     /// An EKU written into the DID would be silently discarded downstream, so
@@ -461,7 +461,7 @@ mod tests {
     fn each_adapter_section_is_required() {
         for field in ["target", "trust", "binding"] {
             let mut json = policy_value();
-            json["adapters"]["mst-ledger"]
+            json["adapters"]["azure-confidential-ledger"]
                 .as_object_mut()
                 .unwrap()
                 .remove(field);
@@ -477,12 +477,12 @@ mod tests {
             (
                 "",
                 "trust",
-                policy_value()["adapters"]["mst-ledger"]["trust"].clone(),
+                policy_value()["adapters"]["azure-confidential-ledger"]["trust"].clone(),
             ),
             (
                 "/assertions",
                 "bindLedgerPolicy",
-                policy_value()["adapters"]["mst-ledger"]["binding"].clone(),
+                policy_value()["adapters"]["azure-confidential-ledger"]["binding"].clone(),
             ),
         ] {
             let mut json = policy_value();
@@ -500,11 +500,11 @@ mod tests {
     fn unknown_fields_are_refused_at_every_adapter_level() {
         for location in [
             "/adapters",
-            "/adapters/mst-ledger",
-            "/adapters/mst-ledger/target",
-            "/adapters/mst-ledger/trust",
-            "/adapters/mst-ledger/binding",
-            "/adapters/mst-ledger/binding/minimumTcb/0",
+            "/adapters/azure-confidential-ledger",
+            "/adapters/azure-confidential-ledger/target",
+            "/adapters/azure-confidential-ledger/trust",
+            "/adapters/azure-confidential-ledger/binding",
+            "/adapters/azure-confidential-ledger/binding/minimumTcb/0",
         ] {
             let mut json = policy_value();
             json.pointer_mut(location)
@@ -537,7 +537,10 @@ mod tests {
         assert!(decision.unevaluable());
         assert_eq!(decision.results.len(), 2);
         assert_eq!(decision.results[0].outcome, crate::Outcome::Pass);
-        assert_eq!(decision.results[1].name, "adapters.mst-ledger");
+        assert_eq!(
+            decision.results[1].name,
+            "adapters.azure-confidential-ledger"
+        );
         assert_eq!(decision.results[1].outcome, crate::Outcome::CannotEvaluate);
         assert!(decision.results[1].detail.contains("adapter evidence"));
     }
@@ -570,14 +573,17 @@ mod tests {
         assert!(!decision.failed());
         assert!(decision.unevaluable());
         assert_eq!(decision.results.len(), 1);
-        assert_eq!(decision.results[0].name, "adapters.mst-ledger");
+        assert_eq!(
+            decision.results[0].name,
+            "adapters.azure-confidential-ledger"
+        );
     }
 
     #[test]
     fn empty_adapters_do_not_make_an_empty_policy_meaningful() {
         for adapters in [
             serde_json::json!({}),
-            serde_json::json!({"mst-ledger": null}),
+            serde_json::json!({"azure-confidential-ledger": null}),
         ] {
             let mut json = policy_value();
             json["assertions"] = serde_json::json!({});

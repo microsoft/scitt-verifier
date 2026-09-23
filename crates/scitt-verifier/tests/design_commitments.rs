@@ -54,12 +54,16 @@ const ACQUIRE: &str = "scitt-network";
 /// Nothing here may reach the network on any path, under any feature. A
 /// verdict that depends on a socket is a verdict that can be changed by
 /// whoever controls the socket.
-const CORE: &[&str] = &["scitt-receipt", "scitt-policy", "scitt-adapter-mst-ledger"];
+const CORE: &[&str] = &[
+    "scitt-receipt",
+    "scitt-policy",
+    "scitt-adapter-azure-confidential-ledger",
+];
 const OFFLINE_SOURCE_ROOTS: &[&str] = &[
     "crates/scitt-verifier/src",
     "crates/scitt-receipt/src",
     "crates/scitt-policy/src",
-    "adapters/mst-ledger/src",
+    "adapters/azure-confidential-ledger/src",
 ];
 
 const SOCKET_APIS: &[&str] = &["std::net", "TcpStream", "TcpListener", "UdpSocket"];

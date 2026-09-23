@@ -15,8 +15,10 @@ fn statement_policy() -> Value {
 }
 
 fn adapter_policy() -> Value {
-    let mut policy: Value =
-        serde_json::from_slice(include_bytes!("../../../corpus/policies/mst-ledger.json")).unwrap();
+    let mut policy: Value = serde_json::from_slice(include_bytes!(
+        "../../../corpus/policies/azure-confidential-ledger.json"
+    ))
+    .unwrap();
     policy["assertions"] = statement_policy()["assertions"].clone();
     policy
 }
@@ -60,7 +62,7 @@ fn assert_code(output: &Output, expected: i32) -> String {
 
 const SAVED: &[&str] = &[
     "--adapter",
-    "mst-ledger",
+    "azure-confidential-ledger",
     "--binding-mode",
     "saved-evidence",
     "--evidence",
@@ -145,7 +147,7 @@ fn adapter_requirements_do_not_replace_statement_acceptance_policy() {
     assert!(!text.contains("PolicyMalformed"), "{text}");
 }
 
-#[cfg(not(feature = "adapter-mst-ledger"))]
+#[cfg(not(feature = "adapter-azure-confidential-ledger"))]
 #[test]
 fn valid_adapter_policy_in_an_adapterless_build_is_not_malformed_or_a_pass() {
     let output = run(
@@ -156,7 +158,7 @@ fn valid_adapter_policy_in_an_adapterless_build_is_not_malformed_or_a_pass() {
     );
     let text = assert_code(&output, 3);
     assert!(
-        text.contains("compiled without the mst-ledger adapter"),
+        text.contains("compiled without the Azure Confidential Ledger adapter"),
         "{text}"
     );
     assert!(!text.contains("PolicyMalformed"), "{text}");

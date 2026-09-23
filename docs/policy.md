@@ -127,9 +127,9 @@ for whoever opens the policy file, so put anything an auditor needs into
 namespaced under `adapters`, currently with one supported key:
 
 ```text
-adapters.mst-ledger.target   The ledger being appraised (host).
-adapters.mst-ledger.trust    UVM endorsement trust inputs.
-adapters.mst-ledger.binding  Execution-policy claim and node requirements.
+adapters.azure-confidential-ledger.target   The ledger being appraised (host).
+adapters.azure-confidential-ledger.trust    UVM endorsement trust inputs.
+adapters.azure-confidential-ledger.binding  Execution-policy claim and node requirements.
 ```
 
 See [adapters](adapters.md#policy-shape) for the complete JSON shape and field

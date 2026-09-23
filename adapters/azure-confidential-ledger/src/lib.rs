@@ -16,9 +16,9 @@
 
 pub mod bundle;
 pub mod error;
-#[cfg(feature = "mst-ledger")]
+#[cfg(feature = "azure-confidential-ledger")]
 mod identity;
-#[cfg(feature = "mst-ledger")]
+#[cfg(feature = "azure-confidential-ledger")]
 mod snp;
 
 pub use bundle::{EvidenceBundle, NodeEvidence};
@@ -297,7 +297,7 @@ pub struct TcbFloor {
 /// the bytes that were accepted.
 ///
 /// Returns findings, never a verdict.
-#[cfg(not(feature = "mst-ledger"))]
+#[cfg(not(feature = "azure-confidential-ledger"))]
 pub fn appraise(
     _bundle: &EvidenceBundle,
     _policy_digest: &[u8; 32],
@@ -308,7 +308,7 @@ pub fn appraise(
     // only constructor: there is no state of this crate in which absent
     // functionality reports a pass.
     Ok(Appraisal::unevaluated(
-        "this build was compiled without the mst-ledger adapter, so no attestation \
+        "this build was compiled without the azure-confidential-ledger adapter, so no attestation \
          evidence can be appraised",
     ))
 }
@@ -325,7 +325,7 @@ pub fn appraise(
 /// nodes disagree, not merely that one did.
 ///
 /// Returns findings, never a verdict.
-#[cfg(feature = "mst-ledger")]
+#[cfg(feature = "azure-confidential-ledger")]
 pub fn appraise(
     bundle: &EvidenceBundle,
     policy_digest: &[u8; 32],
@@ -336,7 +336,7 @@ pub fn appraise(
 
 /// Observe completed nodes in execution order, before the next node runs.
 /// The observer cannot alter the evidence, requirements, or returned findings.
-#[cfg(feature = "mst-ledger")]
+#[cfg(feature = "azure-confidential-ledger")]
 pub fn appraise_with(
     bundle: &EvidenceBundle,
     policy_digest: &[u8; 32],
@@ -466,7 +466,7 @@ pub fn appraise_with(
 /// [`AppraisalError`]: a bundle recorded without a service certificate is
 /// incomplete, not malformed, and the attestation findings it *does* contain
 /// are still worth reporting alongside an honest "identity was not assessed".
-#[cfg(feature = "mst-ledger")]
+#[cfg(feature = "azure-confidential-ledger")]
 fn parse_service_certificate(pem: &[u8]) -> Result<Vec<u8>, String> {
     if pem.is_empty() {
         return Err(
@@ -496,7 +496,7 @@ fn parse_service_certificate(pem: &[u8]) -> Result<Vec<u8>, String> {
 /// [`CheckState::CannotEvaluate`] — the question was not asked — whereas a
 /// certificate that is present and does not bind is [`CheckState::Fail`],
 /// because it was asked and answered no.
-#[cfg(feature = "mst-ledger")]
+#[cfg(feature = "azure-confidential-ledger")]
 fn assess_binding(
     node: &NodeEvidence,
     service_der: Result<&[u8], &String>,
@@ -529,7 +529,7 @@ fn assess_binding(
 }
 
 /// The three fleet-wide checks derived from per-node findings.
-#[cfg(any(feature = "mst-ledger", test))]
+#[cfg(any(feature = "azure-confidential-ledger", test))]
 struct Aggregate {
     ledger_identity_binding: Check,
     snp_uvm_validation: Check,
@@ -560,7 +560,7 @@ struct Aggregate {
 ///    because `node_coverage` fails whenever any node produced no usable
 ///    evidence. The distinction is in what the report claims, not in what it
 ///    permits.
-#[cfg(any(feature = "mst-ledger", test))]
+#[cfg(any(feature = "azure-confidential-ledger", test))]
 fn aggregate(outcomes: &[NodeOutcome]) -> Aggregate {
     let total = outcomes.len();
 
@@ -729,7 +729,7 @@ fn aggregate(outcomes: &[NodeOutcome]) -> Aggregate {
 }
 
 /// Lowercase hex, for reporting a digest an operator will compare by eye.
-#[cfg(feature = "mst-ledger")]
+#[cfg(feature = "azure-confidential-ledger")]
 fn hex(bytes: &[u8]) -> String {
     use core::fmt::Write;
     bytes.iter().fold(String::new(), |mut out, b| {
@@ -813,12 +813,12 @@ mod tests {
         };
         let result = appraise(&bundle, &[0u8; 32], &requirements());
 
-        #[cfg(feature = "mst-ledger")]
+        #[cfg(feature = "azure-confidential-ledger")]
         assert_eq!(result.unwrap_err(), AppraisalError::EmptyBundle);
 
         // Without the adapter there is nothing to appraise at all, so the
         // answer is every check unevaluated — and, critically, not a pass.
-        #[cfg(not(feature = "mst-ledger"))]
+        #[cfg(not(feature = "azure-confidential-ledger"))]
         {
             let a = result.expect("appraisal");
             assert!(!a.scoped_pass());
@@ -827,7 +827,7 @@ mod tests {
     }
 
     /// A build without the adapter must say so, and must not pass.
-    #[cfg(not(feature = "mst-ledger"))]
+    #[cfg(not(feature = "azure-confidential-ledger"))]
     #[test]
     fn a_build_without_the_adapter_cannot_report_a_pass() {
         let bundle = EvidenceBundle {
@@ -845,7 +845,7 @@ mod tests {
         for (_, _, check) in a.checks() {
             assert_eq!(check.state, CheckState::CannotEvaluate);
         }
-        assert!(a.cce_policy_host_data.detail.contains("mst-ledger"));
+        assert!(a.cce_policy_host_data.detail.contains("azure-confidential-ledger"));
     }
 
     /// Evidence that cannot authenticate must not produce a HOST_DATA finding.
@@ -854,7 +854,7 @@ mod tests {
     /// the policy. Reporting `Fail` there would be a finding this crate did
     /// not make, and would send an operator looking for a policy mismatch that
     /// may not exist.
-    #[cfg(feature = "mst-ledger")]
+    #[cfg(feature = "azure-confidential-ledger")]
     #[test]
     fn unusable_evidence_fails_attestation_without_claiming_a_policy_mismatch() {
         let bundle = EvidenceBundle {
@@ -886,7 +886,7 @@ mod tests {
     ///
     /// A valid SNP report proves a genuine confidential VM; it does not prove
     /// that VM belongs to the ledger being assessed.
-    #[cfg(feature = "mst-ledger")]
+    #[cfg(feature = "azure-confidential-ledger")]
     #[test]
     fn identity_binding_is_never_inferred_from_a_valid_attestation() {
         let bundle = EvidenceBundle {
@@ -966,7 +966,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "mst-ledger")]
+    #[cfg(feature = "azure-confidential-ledger")]
     #[test]
     fn observer_sees_each_completed_node_without_changing_findings() {
         let bundle = EvidenceBundle {

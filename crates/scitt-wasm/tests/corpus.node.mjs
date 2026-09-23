@@ -179,7 +179,7 @@ const adapterPolicy = {
   policyVersion: '1',
   assertions: { receiptCount: 1 },
   adapters: {
-    'mst-ledger': {
+    'azure-confidential-ledger': {
       target: { host: 'ledger.example' },
       trust: {
         uvmIssuer: 'did:x509:0:sha256:abc',
@@ -210,8 +210,8 @@ for (const statementRules of [true, false]) {
   check(`${label}: missing adapter evidence is reported`, result.unevaluable, true);
   check(`${label}: exact outcomes`, result.assertions.map((a) => [a.name, a.outcome]),
     statementRules
-      ? [['receiptCount', 'pass'], ['adapters.mst-ledger', 'cannotEvaluate']]
-      : [['adapters.mst-ledger', 'cannotEvaluate']]);
+      ? [['receiptCount', 'pass'], ['adapters.azure-confidential-ledger', 'cannotEvaluate']]
+      : [['adapters.azure-confidential-ledger', 'cannotEvaluate']]);
 }
 
 // A policy naming a transparency service this statement was not registered

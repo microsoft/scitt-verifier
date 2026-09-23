@@ -116,16 +116,16 @@ Exit 3 is not a pass. It means the tool could not answer the question.
 /// Gated so an adapter-less build never advertises a mode it cannot run.
 /// Printing it unconditionally would send an operator to write a policy
 /// section and capture a bundle for a binary that would then refuse both.
-#[cfg(feature = "adapter-mst-ledger")]
+#[cfg(feature = "adapter-azure-confidential-ledger")]
 pub const ADAPTER_USAGE: &str = r#"
-LEDGER EVIDENCE (mst-ledger adapter):
+LEDGER EVIDENCE (azure-confidential-ledger adapter):
     --binding-mode live-evidence
                              Collect the ledger's attestation evidence now and
                              appraise it. Requires --adapter and --online.
     --binding-mode saved-evidence
                              Appraise a previously captured bundle instead.
                              Requires --adapter and --evidence.
-    --adapter <NAME>         mst-ledger
+    --adapter <NAME>         azure-confidential-ledger
     --evidence <DIR>         A bundle captured from the ledger, containing
                              snapshot.json and the per-node evidence it names.
     --save-evidence <DIR>    With live-evidence, write what was collected so the
@@ -134,7 +134,7 @@ LEDGER EVIDENCE (mst-ledger adapter):
 Answers one question: does the execution policy embedded in this statement
 equal the policy the ledger's attested nodes are enforcing?
 
-The ledger under appraisal is named by `adapters.mst-ledger.target.host` in the policy —
+The ledger under appraisal is named by `adapters.azure-confidential-ledger.target.host` in the policy —
 which is usually *not* the transparency service that issued the receipt. A
 production transparency service notarises builds for many deployments; the
 statement describes one of them. Evidence from anywhere else is refused rather
@@ -162,7 +162,7 @@ when it observed the nodes; a saved one reports when someone else did.
 "#;
 
 /// Nothing to add: this build has no adapter.
-#[cfg(not(feature = "adapter-mst-ledger"))]
+#[cfg(not(feature = "adapter-azure-confidential-ledger"))]
 pub const ADAPTER_USAGE: &str = "";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,13 +208,13 @@ impl BindingMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Adapter {
     /// Azure Confidential Ledger nodes attested with SEV-SNP.
-    MstLedger,
+    AzureConfidentialLedger,
 }
 
 impl Adapter {
     pub fn as_str(self) -> &'static str {
         match self {
-            Adapter::MstLedger => "mst-ledger",
+            Adapter::AzureConfidentialLedger => "azure-confidential-ledger",
         }
     }
 }
@@ -390,9 +390,11 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             "--adapter" => {
                 let raw = value(&mut it, flag)?;
                 adapter = Some(match raw.as_str() {
-                    "mst-ledger" => Adapter::MstLedger,
+                    "azure-confidential-ledger" => Adapter::AzureConfidentialLedger,
                     other => {
-                        return Err(format!("unknown adapter '{other}'; expected 'mst-ledger'"))
+                        return Err(format!(
+                            "unknown adapter '{other}'; expected 'azure-confidential-ledger'"
+                        ))
                     }
                 });
             }
@@ -748,7 +750,7 @@ mod tests {
             "--binding-mode",
             "live-evidence",
             "--adapter",
-            "mst-ledger",
+            "azure-confidential-ledger",
         ]))
         .unwrap_err();
         assert!(err.contains("requires --online"), "{err}");
@@ -773,7 +775,7 @@ mod tests {
                 "--binding-mode",
                 "live-evidence",
                 "--adapter",
-                "mst-ledger",
+                "azure-confidential-ledger",
                 "--save-evidence",
                 "bundle",
                 "--result",
@@ -811,7 +813,7 @@ mod tests {
             "--binding-mode",
             "live-evidence",
             "--adapter",
-            "mst-ledger",
+            "azure-confidential-ledger",
             "--evidence",
             "dir",
         ]))
@@ -834,7 +836,7 @@ mod tests {
             "--binding-mode",
             "saved-evidence",
             "--adapter",
-            "mst-ledger",
+            "azure-confidential-ledger",
             "--evidence",
             "dir",
             "--save-evidence",
@@ -856,7 +858,7 @@ mod tests {
             "--binding-mode",
             "live-evidence",
             "--adapter",
-            "mst-ledger",
+            "azure-confidential-ledger",
             "--save-evidence",
             "out",
         ]))

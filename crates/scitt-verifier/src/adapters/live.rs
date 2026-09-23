@@ -26,7 +26,7 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use scitt_adapter_mst_ledger::{EvidenceBundle, NodeEvidence};
+use acl::{EvidenceBundle, NodeEvidence};
 use scitt_network::limits;
 use serde::Deserialize;
 
@@ -87,7 +87,7 @@ pub fn fetch(
         .map_err(|e| format!("could not timestamp evidence acquisition: {e}"))?;
     let observed_at = i64::try_from(observed_at.as_secs())
         .map_err(|e| format!("evidence acquisition time is out of range: {e}"))?;
-    let collected = scitt_network::mst_ledger::collect_with(host, deadline, &mut |step| {
+    let collected = scitt_network::acl::collect_with(host, deadline, &mut |step| {
         progress.emit(collection_event(step));
     })
     .map_err(|e| format!("ledger evidence acquisition failed: {e}"))?;
@@ -112,9 +112,9 @@ pub fn fetch(
     ))
 }
 
-fn collection_event(step: scitt_network::mst_ledger::CollectionStep) -> crate::progress::Event {
+fn collection_event(step: scitt_network::acl::CollectionStep) -> crate::progress::Event {
     use crate::progress::{Event, Stage, State};
-    use scitt_network::mst_ledger::CollectionStep;
+    use scitt_network::acl::CollectionStep;
     let (state, message) = match step {
         CollectionStep::ResolvingIdentity => (State::Started, "Resolving service certificate through identity service..."),
         CollectionStep::Connecting => (State::Started, "Connecting using TLS pinned to that certificate; fetching SNP reports and UVM endorsements..."),
@@ -270,7 +270,7 @@ mod tests {
 
     #[test]
     fn transport_progress_never_claims_authentication_before_a_response() {
-        use scitt_network::mst_ledger::CollectionStep::*;
+        use scitt_network::acl::CollectionStep::*;
         for step in [ResolvingIdentity, Connecting, FetchingNodes] {
             assert_eq!(
                 collection_event(step).state,

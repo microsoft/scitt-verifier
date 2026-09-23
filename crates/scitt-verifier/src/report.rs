@@ -1217,7 +1217,7 @@ mod tests {
             "policy.json",
             "--online",
             "--adapter",
-            "mst-ledger",
+            "azure-confidential-ledger",
             "--binding-mode",
             "live-evidence",
         ]

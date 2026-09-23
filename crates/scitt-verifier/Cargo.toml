@@ -20,7 +20,12 @@ scitt-network = { path = "../scitt-network", default-features = false }
 # COSE verification stack, which is dead weight for the offline statement path
 # that most runs take. Enabling it adds a binding mode; it changes nothing about
 # how a statement is verified.
-scitt-adapter-mst-ledger = { path = "../../adapters/mst-ledger", default-features = false, optional = true }
+#
+# Renamed to `acl` for use inside this crate. The published name is spelled out
+# because it is what a consumer types into a policy document and a CI line, and
+# `acl` already means access-control list; the short key is a local convenience
+# for the module that has no such ambiguity in scope.
+acl = { package = "scitt-adapter-azure-confidential-ledger", path = "../../adapters/azure-confidential-ledger", default-features = false, optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
@@ -29,13 +34,13 @@ default = ["crypto_pure_rust"]
 crypto_pure_rust = [
     "scitt-receipt/crypto_pure_rust",
     "scitt-policy/crypto_pure_rust",
-    "scitt-adapter-mst-ledger?/crypto_pure_rust",
+    "acl?/crypto_pure_rust",
 ]
 crypto_openssl = [
     "scitt-receipt/crypto_openssl",
     "scitt-policy/crypto_openssl",
-    "scitt-adapter-mst-ledger?/crypto_openssl",
+    "acl?/crypto_openssl",
 ]
-# The mst-ledger adapter: appraise saved or explicitly acquired ledger evidence
-# against the execution policy an accepted statement embeds.
-adapter-mst-ledger = ["dep:scitt-adapter-mst-ledger", "scitt-adapter-mst-ledger/mst-ledger"]
+# The Azure Confidential Ledger adapter: appraise saved or explicitly acquired
+# ledger evidence against the execution policy an accepted statement embeds.
+adapter-azure-confidential-ledger = ["dep:acl", "acl/azure-confidential-ledger"]

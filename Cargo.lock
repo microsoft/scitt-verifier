@@ -780,7 +780,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "scitt-adapter-mst-ledger"
+name = "scitt-adapter-azure-confidential-ledger"
 version = "0.4.0"
 dependencies = [
  "scitt-receipt",
@@ -823,7 +823,7 @@ dependencies = [
 name = "scitt-verifier"
 version = "0.4.0"
 dependencies = [
- "scitt-adapter-mst-ledger",
+ "scitt-adapter-azure-confidential-ledger",
  "scitt-network",
  "scitt-policy",
  "scitt-receipt",

@@ -337,7 +337,7 @@ fn evaluate(args: &VerifyArgs, now: i64, progress: &mut dyn progress::Sink) -> A
     ));
     if let Some(adapter) = args.adapter {
         progress.emit(progress::Event::context("Adapter", adapter.as_str()));
-        if let Some(config) = &policy.adapters.mst_ledger {
+        if let Some(config) = &policy.adapters.acl {
             progress.emit(progress::Event::context("Target", &config.target.host));
         }
         progress.emit(progress::Event::stage(

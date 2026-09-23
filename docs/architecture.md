@@ -10,15 +10,15 @@ not a prerequisite for verifying a transparent statement.
 | `crates/scitt-receipt` | Parse, verify signatures and receipts, compare artifact bytes; facts only, no I/O or clock |
 | `crates/scitt-policy` | Evaluate statement assertions and parse typed adapter requirements; no I/O or clock (`now` is supplied) |
 | `crates/scitt-network` | Acquire receipt keys and live resource evidence; no policy decisions |
-| `adapters/mst-ledger` (`scitt-adapter-mst-ledger`) | Pure appraisal of supplied MST ledger evidence against typed requirements |
+| `adapters/azure-confidential-ledger` (`scitt-adapter-azure-confidential-ledger`) | Pure appraisal of supplied MST ledger evidence against typed requirements |
 | `crates/scitt-verifier` | Load inputs, select acquisition and adapter paths, combine checks, report verdicts and exit codes |
 
-`scitt-policy/src/adapters/{mod.rs,mst_ledger.rs}` owns the policy namespace
+`scitt-policy/src/adapters/{mod.rs,acl.rs}` owns the policy namespace
 and MST-specific requirements. CLI
 `scitt-verifier/src/adapters/mod.rs` provides dispatch and the shared appraisal
-result; `mst_ledger.rs` translates MST requirements and findings, and `load.rs`
+result; `acl.rs` translates MST requirements and findings, and `load.rs`
 handles local evidence bundles. `live.rs` calls
-`scitt_network::mst_ledger::collect`, then decodes and joins the returned node
+`scitt_network::acl::collect`, then decodes and joins the returned node
 views into a pure evidence bundle. TLS bootstrap, pinned connections, and
 bounded HTTP collection belong to `collect`, not the CLI or pure adapter.
 
@@ -47,7 +47,7 @@ by the existence of the dispatch seam.
 
 `--online` fetches receipt-signing keys from policy-allowlisted transparency
 services. `--binding-mode live-evidence` additionally acquires resource evidence
-from `adapters.mst-ledger.target.host`; the two destinations need not be the
+from `adapters.azure-confidential-ledger.target.host`; the two destinations need not be the
 same. Live evidence currently requires `--online`, but key acquisition alone
 does not request an appraisal. See [adapters](adapters.md).
 

@@ -193,7 +193,7 @@ of the scoped claim, such as MST freshness and connection binding.
 `saved-evidence` replays a bundle captured earlier. The checks are identical.
 What differs is the anchor: a saved bundle supplies the service certificate
 that identity binding is checked against. Its unsigned manifest must match
-`adapters.mst-ledger.target.host`, but a forged, self-consistent bundle can
+`adapters.azure-confidential-ledger.target.host`, but a forged, self-consistent bundle can
 substitute both evidence and anchor. A live run takes that certificate from the
 public identity service and pins the connection to it.
 

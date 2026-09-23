@@ -19,10 +19,10 @@
 //! has no opinion about where its requirements came from, and cannot acquire
 //! one by reading the file.
 
-use scitt_policy::adapters::mst_ledger::MstLedgerPolicy;
-#[cfg(feature = "adapter-mst-ledger")]
-use scitt_policy::adapters::mst_ledger::{BindLedgerPolicy, Encoding, TrustInputs};
-#[cfg(feature = "adapter-mst-ledger")]
+use scitt_policy::adapters::acl::AzureConfidentialLedgerPolicy;
+#[cfg(feature = "adapter-azure-confidential-ledger")]
+use scitt_policy::adapters::acl::{BindLedgerPolicy, Encoding, TrustInputs};
+#[cfg(feature = "adapter-azure-confidential-ledger")]
 use scitt_receipt::base64::Alphabet;
 use scitt_receipt::Sign1;
 
@@ -120,12 +120,12 @@ fn required_checks() -> Vec<String> {
 /// build without the adapter still has to name the checks it did not perform:
 /// a run that omitted them entirely would be indistinguishable from one where
 /// they were never relevant.
-#[cfg(feature = "adapter-mst-ledger")]
+#[cfg(feature = "adapter-azure-confidential-ledger")]
 fn check_names() -> Vec<(&'static str, &'static str)> {
-    scitt_adapter_mst_ledger::CHECK_NAMES.to_vec()
+    acl::CHECK_NAMES.to_vec()
 }
 
-#[cfg(not(feature = "adapter-mst-ledger"))]
+#[cfg(not(feature = "adapter-azure-confidential-ledger"))]
 fn check_names() -> Vec<(&'static str, &'static str)> {
     vec![
         ("ledger-identity-binding", "Ledger identity/key binding"),
@@ -140,11 +140,11 @@ fn check_names() -> Vec<(&'static str, &'static str)> {
 /// Appraise ledger evidence against an accepted statement.
 ///
 /// `statement` is the parsed statement that already passed acceptance.
-#[cfg(not(feature = "adapter-mst-ledger"))]
+#[cfg(not(feature = "adapter-azure-confidential-ledger"))]
 pub fn appraise_evidence(
     _source: EvidenceSource<'_>,
     _statement: &Sign1,
-    _policy: &MstLedgerPolicy,
+    _policy: &AzureConfidentialLedgerPolicy,
     progress: &mut dyn Sink,
 ) -> AdapterAssessment {
     // Not an error and not a failure: the question was asked and this binary
@@ -154,28 +154,28 @@ pub fn appraise_evidence(
     progress.emit(Event::stage(
         Stage::Evidence,
         State::NotRun,
-        "This build has no mst-ledger adapter",
+        "This build has no azure-confidential-ledger adapter",
     ));
     progress.emit(Event::stage(
         Stage::Adapter,
         State::NotRun,
-        "Rebuild with --features adapter-mst-ledger",
+        "Rebuild with --features adapter-azure-confidential-ledger",
     ));
     not_attempted(
-        "this build was compiled without the mst-ledger adapter, so no ledger evidence can be \
-         appraised. Rebuild with --features adapter-mst-ledger.",
+        "this build was compiled without the azure-confidential-ledger adapter, so no ledger evidence can be \
+         appraised. Rebuild with --features adapter-azure-confidential-ledger.",
     )
 }
 
 /// Appraise ledger evidence against an accepted statement.
-#[cfg(feature = "adapter-mst-ledger")]
+#[cfg(feature = "adapter-azure-confidential-ledger")]
 pub fn appraise_evidence(
     source: EvidenceSource<'_>,
     statement: &Sign1,
-    policy: &MstLedgerPolicy,
+    policy: &AzureConfidentialLedgerPolicy,
     progress: &mut dyn Sink,
 ) -> AdapterAssessment {
-    let MstLedgerPolicy {
+    let AzureConfidentialLedgerPolicy {
         target: ledger,
         trust,
         binding: bind,
@@ -411,7 +411,7 @@ pub fn appraise_evidence(
     };
     progress.emit(checklist);
     let mut index = 0;
-    let appraisal = match scitt_adapter_mst_ledger::appraise_with(
+    let appraisal = match acl::appraise_with(
         &bundle,
         &policy_digest,
         &requirements,
@@ -490,8 +490,8 @@ pub fn appraise_evidence(
     }
 }
 
-#[cfg(feature = "adapter-mst-ledger")]
-fn emit_node(node: &scitt_adapter_mst_ledger::NodeOutcome, label: &str, progress: &mut dyn Sink) {
+#[cfg(feature = "adapter-azure-confidential-ledger")]
+fn emit_node(node: &acl::NodeOutcome, label: &str, progress: &mut dyn Sink) {
     let mut row = Event::stage(Stage::Adapter, State::Done, label);
     row.presentation = Presentation::Row(vec![
         crate::progress_state(map_state(node.identity_binding)),
@@ -504,7 +504,7 @@ fn emit_node(node: &scitt_adapter_mst_ledger::NodeOutcome, label: &str, progress
     }
 }
 
-#[cfg(feature = "adapter-mst-ledger")]
+#[cfg(feature = "adapter-azure-confidential-ledger")]
 fn node_event(finding: AdapterFinding, label: &str) -> Event {
     let summarized = matches!(
         finding.check.as_str(),
@@ -527,7 +527,7 @@ fn node_event(finding: AdapterFinding, label: &str) -> Event {
     }
 }
 
-#[cfg(feature = "adapter-mst-ledger")]
+#[cfg(feature = "adapter-azure-confidential-ledger")]
 fn node_labels(ids: &[&str]) -> Vec<String> {
     ids.iter()
         .enumerate()
@@ -557,8 +557,8 @@ fn node_labels(ids: &[&str]) -> Vec<String> {
         .collect()
 }
 
-#[cfg(feature = "adapter-mst-ledger")]
-fn node_findings(nodes: &[scitt_adapter_mst_ledger::NodeOutcome]) -> Vec<AdapterFinding> {
+#[cfg(feature = "adapter-azure-confidential-ledger")]
+fn node_findings(nodes: &[acl::NodeOutcome]) -> Vec<AdapterFinding> {
     let mut findings = Vec::with_capacity(nodes.len() * 3);
     for node in nodes {
         findings.push(AdapterFinding {
@@ -597,7 +597,7 @@ fn node_findings(nodes: &[scitt_adapter_mst_ledger::NodeOutcome]) -> Vec<Adapter
 /// does not weaken the comparison, because everything it removes is a form
 /// that denotes the same host. Ports are deliberately *not* stripped: a
 /// different port is a different endpoint.
-#[cfg(feature = "adapter-mst-ledger")]
+#[cfg(feature = "adapter-azure-confidential-ledger")]
 fn normalise_host(raw: &str) -> String {
     let host = raw.trim();
     let host = host
@@ -609,19 +609,19 @@ fn normalise_host(raw: &str) -> String {
 }
 
 /// Translate policy into the adapter's typed requirements.
-#[cfg(feature = "adapter-mst-ledger")]
+#[cfg(feature = "adapter-azure-confidential-ledger")]
 fn requirements(
     bind: &BindLedgerPolicy,
     trust: &TrustInputs,
-) -> Result<scitt_adapter_mst_ledger::Requirements, String> {
+) -> Result<acl::Requirements, String> {
     let mut min_tcb = Vec::with_capacity(bind.minimum_tcb.len());
     for entry in &bind.minimum_tcb {
-        min_tcb.push(scitt_adapter_mst_ledger::TcbFloor {
+        min_tcb.push(acl::TcbFloor {
             generation: entry.generation.clone(),
             reported_tcb: entry.value()?,
         });
     }
-    Ok(scitt_adapter_mst_ledger::Requirements {
+    Ok(acl::Requirements {
         uvm_did_x509: trust.uvm_issuer.clone(),
         uvm_feed: bind.uvm_feed.clone(),
         uvm_eku: trust.uvm_eku.clone(),
@@ -635,17 +635,17 @@ fn requirements(
 /// Written out rather than shared, because the adapter defines its own
 /// vocabulary precisely so it does not depend on this binary. A `From` in
 /// either crate would recreate the coupling the split exists to avoid.
-#[cfg(feature = "adapter-mst-ledger")]
-fn map_state(state: scitt_adapter_mst_ledger::CheckState) -> CheckState {
+#[cfg(feature = "adapter-azure-confidential-ledger")]
+fn map_state(state: acl::CheckState) -> CheckState {
     match state {
-        scitt_adapter_mst_ledger::CheckState::Pass => CheckState::Pass,
-        scitt_adapter_mst_ledger::CheckState::Fail => CheckState::Fail,
-        scitt_adapter_mst_ledger::CheckState::NotChecked => CheckState::NotChecked,
-        scitt_adapter_mst_ledger::CheckState::CannotEvaluate => CheckState::CannotEvaluate,
+        acl::CheckState::Pass => CheckState::Pass,
+        acl::CheckState::Fail => CheckState::Fail,
+        acl::CheckState::NotChecked => CheckState::NotChecked,
+        acl::CheckState::CannotEvaluate => CheckState::CannotEvaluate,
     }
 }
 
-#[cfg(feature = "adapter-mst-ledger")]
+#[cfg(feature = "adapter-azure-confidential-ledger")]
 fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write;
     bytes.iter().fold(String::new(), |mut out, b| {
@@ -723,7 +723,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "adapter-mst-ledger")]
+    #[cfg(feature = "adapter-azure-confidential-ledger")]
     #[test]
     fn node_labels_are_visibly_shortened_unique_and_bounded() {
         let ids = ["12345678aaaa0000", "12345678aaab0000", "short", "short"];
@@ -740,9 +740,9 @@ mod tests {
             .all(|label| label.len() < 80 && label.ends_with("...")));
     }
 
-    #[cfg(feature = "adapter-mst-ledger")]
-    fn test_node() -> scitt_adapter_mst_ledger::NodeOutcome {
-        use scitt_adapter_mst_ledger::{CheckState::Pass, NodeOutcome};
+    #[cfg(feature = "adapter-azure-confidential-ledger")]
+    fn test_node() -> acl::NodeOutcome {
+        use acl::{CheckState::Pass, NodeOutcome};
         NodeOutcome {
             node_id: "12345678abcdef0123456789".into(),
             identity_binding: Pass,
@@ -754,7 +754,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "adapter-mst-ledger")]
+    #[cfg(feature = "adapter-azure-confidential-ledger")]
     #[test]
     fn successful_node_is_one_row_without_hashes_but_verbose_keeps_evidence() {
         let node = test_node();
@@ -790,10 +790,10 @@ mod tests {
         assert!(text.contains("Observed: expected-full-hash"));
     }
 
-    #[cfg(feature = "adapter-mst-ledger")]
+    #[cfg(feature = "adapter-azure-confidential-ledger")]
     #[test]
     fn node_mismatch_expands_values_and_unevaluated_checks() {
-        use scitt_adapter_mst_ledger::CheckState;
+        use acl::CheckState;
         let mut node = test_node();
         node.host_data_match = CheckState::Fail;
         node.attestation = CheckState::CannotEvaluate;
@@ -815,7 +815,7 @@ mod tests {
         assert!(text.contains("Observed: different-full-hash"));
     }
 
-    #[cfg(feature = "adapter-mst-ledger")]
+    #[cfg(feature = "adapter-azure-confidential-ledger")]
     #[test]
     fn new_node_findings_are_not_silently_absorbed_by_the_row() {
         let finding = AdapterFinding {
@@ -854,7 +854,7 @@ mod tests {
     /// Everything normalised away denotes the same host, so removing it
     /// cannot admit a different service. A port is left alone deliberately: a
     /// different port is a different endpoint, not a different spelling.
-    #[cfg(feature = "adapter-mst-ledger")]
+    #[cfg(feature = "adapter-azure-confidential-ledger")]
     #[test]
     fn host_comparison_ignores_spelling_but_not_identity() {
         let canonical = normalise_host("ledger.confidential-ledger.azure.com");
@@ -901,14 +901,14 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "adapter-mst-ledger")]
+    #[cfg(feature = "adapter-azure-confidential-ledger")]
     #[test]
     fn node_policy_findings_keep_expected_and_observed_digests() {
-        let findings = node_findings(&[scitt_adapter_mst_ledger::NodeOutcome {
+        let findings = node_findings(&[acl::NodeOutcome {
             node_id: "node-a".into(),
-            identity_binding: scitt_adapter_mst_ledger::CheckState::Pass,
-            attestation: scitt_adapter_mst_ledger::CheckState::Pass,
-            host_data_match: scitt_adapter_mst_ledger::CheckState::Fail,
+            identity_binding: acl::CheckState::Pass,
+            attestation: acl::CheckState::Pass,
+            host_data_match: acl::CheckState::Fail,
             expected_policy_digest: Some("expected".into()),
             observed_host_data: Some("observed".into()),
             detail: "different commitments".into(),

@@ -129,9 +129,10 @@ fn artifact_stage_is_numbered_only_when_requested() {
 }
 
 fn adapter_policy(path: &Path) {
-    let mut policy: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(corpus("policies/mst-ledger.json")).unwrap())
-            .unwrap();
+    let mut policy: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(corpus("policies/azure-confidential-ledger.json")).unwrap(),
+    )
+    .unwrap();
     let fixture: serde_json::Value =
         serde_json::from_slice(&std::fs::read(corpus("policies/fixture-mst.json")).unwrap())
             .unwrap();
@@ -151,7 +152,7 @@ fn saved_evidence_never_claims_live_authentication_and_skipped_appraisal_is_name
         .arg(corpus("fixtures/mst-test-scitt-keys.cbor"))
         .args([
             "--adapter",
-            "mst-ledger",
+            "azure-confidential-ledger",
             "--binding-mode",
             "saved-evidence",
             "--evidence",
@@ -179,12 +180,12 @@ fn saved_evidence_never_claims_live_authentication_and_skipped_appraisal_is_name
         text.contains("Scope: No node evidence was appraised."),
         "{text}"
     );
-    #[cfg(not(feature = "adapter-mst-ledger"))]
+    #[cfg(not(feature = "adapter-azure-confidential-ledger"))]
     assert!(
-        text.contains("compiled without the mst-ledger adapter"),
+        text.contains("compiled without the Azure Confidential Ledger adapter"),
         "{text}"
     );
-    #[cfg(feature = "adapter-mst-ledger")]
+    #[cfg(feature = "adapter-azure-confidential-ledger")]
     assert!(
         text.contains("execution policy could not be read"),
         "{text}"
@@ -204,7 +205,7 @@ fn live_mode_refused_before_network_never_claims_a_connection() {
             "--ledger",
             "not-allowlisted.invalid",
             "--adapter",
-            "mst-ledger",
+            "azure-confidential-ledger",
             "--binding-mode",
             "live-evidence",
         ])

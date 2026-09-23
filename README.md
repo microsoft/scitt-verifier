@@ -121,19 +121,19 @@ or safety of those bytes.
 ## Optional resource adapters
 
 An adapter can relate an accepted statement to evidence about its subject.
-The only implemented adapter is `mst-ledger`: it compares an execution policy
+The only implemented adapter is `azure-confidential-ledger`: it compares an execution policy
 embedded in the statement with policy enforcement evidenced by attested ledger
 nodes. It is not required for ordinary statement or artifact verification.
 
 Build it explicitly:
 
 ```console
-cargo build --release --features adapter-mst-ledger
+cargo build --release --features adapter-azure-confidential-ledger
 ```
 
-Select it with `--adapter mst-ledger` and either `--binding-mode saved-evidence`
+Select it with `--adapter azure-confidential-ledger` and either `--binding-mode saved-evidence`
 or `--binding-mode live-evidence`. Requirements live under
-`adapters.mst-ledger` in the relying-party policy.
+`adapters.azure-confidential-ledger` in the relying-party policy.
 
 **Receipt-key acquisition and resource acquisition are distinct.** `--online`
 alone fetches receipt keys, not resource evidence. `live-evidence` additionally
@@ -235,7 +235,7 @@ code fails the task; do not replace it with a PowerShell task that ignores
 crates/scitt-receipt       Parsing, crypto, receipts, and byte binding; no I/O.
 crates/scitt-policy        Statement rules and typed adapter requirements.
 crates/scitt-network       Network acquisition; no acceptance decisions.
-adapters/mst-ledger        Pure MST ledger appraisal (scitt-adapter-mst-ledger).
+adapters/azure-confidential-ledger        Pure MST ledger appraisal (scitt-adapter-azure-confidential-ledger).
 crates/scitt-verifier      CLI orchestration, reporting, and exit codes.
 crates/scitt-wasm          Browser bindings and demo.
 corpus/                   Conformance fixtures and example policies.

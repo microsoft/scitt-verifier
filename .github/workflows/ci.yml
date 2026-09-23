@@ -39,16 +39,16 @@ jobs:
       # The adapter is off by default, so the two steps above never compile a
       # line of it. Without this, its code could stop building — or start
       # failing its tests — and every job here would stay green.
-      - run: cargo clippy -p scitt-adapter-mst-ledger --features mst-ledger --all-targets
-      - run: cargo test -p scitt-adapter-mst-ledger --features mst-ledger
+      - run: cargo clippy -p scitt-adapter-azure-confidential-ledger --features azure-confidential-ledger --all-targets
+      - run: cargo test -p scitt-adapter-azure-confidential-ledger --features azure-confidential-ledger
 
-      # Same reasoning one level up. `adapter-mst-ledger` is what wires the
+      # Same reasoning one level up. `adapter-azure-confidential-ledger` is what wires the
       # adapter into the CLI — the evidence loader, the policy translation, and
       # the rule that an adapter may only narrow a verdict. None of it is
       # compiled by the default build, so without these steps the monotonicity
       # tests could stop being run without anything turning red.
-      - run: cargo clippy -p scitt-verifier --features adapter-mst-ledger --all-targets
-      - run: cargo test -p scitt-verifier --features adapter-mst-ledger
+      - run: cargo clippy -p scitt-verifier --features adapter-azure-confidential-ledger --all-targets
+      - run: cargo test -p scitt-verifier --features adapter-azure-confidential-ledger
 
   boundary:
     name: Core boundary
@@ -67,7 +67,7 @@ jobs:
           # Both crates make the same promise — callers supply bytes, we decide
           # nothing about time, exit status, or the network — so both are held
           # to it here. A crate that claims purity and is never scanned drifts.
-          roots="crates/scitt-receipt/src adapters/mst-ledger/src"
+          roots="crates/scitt-receipt/src adapters/azure-confidential-ledger/src"
           io_pattern='std::fs|File::open|read_to_string'
 
           # `if grep` cannot tell "found nothing" from "looked at nothing": both
@@ -127,12 +127,12 @@ jobs:
           check crates/scitt-receipt/src 'scitt_policy|scitt_verifier' \
                 'scitt-receipt must not depend on policy or the CLI.'
           # This one is the structural half of "an adapter reports checks, not a
-          # verdict". If scitt-adapter-mst-ledger could see the CLI, it could construct a
+          # verdict". If scitt-adapter-azure-confidential-ledger could see the CLI, it could construct a
           # Verdict, and an appraisal that gathered no evidence could return a
           # pass. Keeping the type out of scope is what makes that impossible
           # rather than merely discouraged.
-          check adapters/mst-ledger/src 'scitt_verifier' \
-                'scitt-adapter-mst-ledger must not depend on the CLI; it reports checks, not verdicts.'
+          check adapters/azure-confidential-ledger/src 'scitt_verifier' \
+                'scitt-adapter-azure-confidential-ledger must not depend on the CLI; it reports checks, not verdicts.'
           exit $violations
 
       - name: Reject dependency drift in the core manifests
@@ -158,9 +158,9 @@ jobs:
           # networking lives, and a dependency edge to it would let the offline
           # appraisal reach the ledger it is supposed to be appraising from
           # evidence someone else collected.
-          check_manifest adapters/mst-ledger/Cargo.toml \
+          check_manifest adapters/azure-confidential-ledger/Cargo.toml \
             '^(scitt-verifier|scitt-network)' \
-            'scitt-adapter-mst-ledger must not depend on scitt-verifier or scitt-network.'
+            'scitt-adapter-azure-confidential-ledger must not depend on scitt-verifier or scitt-network.'
 
   size:
     name: Binary size budget
@@ -185,7 +185,7 @@ jobs:
             exit 1
           fi
 
-      - run: cargo build --release -p scitt-verifier --features adapter-mst-ledger
+      - run: cargo build --release -p scitt-verifier --features adapter-azure-confidential-ledger
 
       # The adapter build is what an operator gating on a ledger actually
       # downloads, so it gets a budget too rather than being left unmeasured.
@@ -196,7 +196,7 @@ jobs:
           set -euo pipefail
           budget=$((4 * 1024 * 1024))
           actual=$(stat -c%s target/release/scitt-verifier)
-          printf 'scitt-verifier + mst-ledger: %s bytes (budget %s)\n' "$actual" "$budget"
+          printf 'scitt-verifier + azure-confidential-ledger: %s bytes (budget %s)\n' "$actual" "$budget"
           if [ "$actual" -gt "$budget" ]; then
             echo "::error::adapter binary exceeded the size budget"
             exit 1

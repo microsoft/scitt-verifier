@@ -9,7 +9,7 @@ cargo test
 
 The default crypto backend is pure Rust, so it needs no OpenSSL installation.
 Native builds still need the linker required by the chosen Rust toolchain.
-The optional MST ledger adapter is enabled with `--features adapter-mst-ledger`.
+The optional MST ledger adapter is enabled with `--features adapter-azure-confidential-ledger`.
 
 ## The rules that are not negotiable
 
@@ -65,14 +65,14 @@ new assertion. That is intended, and worth mentioning in release notes.
 
 Statement assertions belong in `assertions`; domain requirements belong under
 `adapters.<name>`, not in the statement rules. Typed MST requirements live in
-`crates/scitt-policy/src/adapters/mst_ledger.rs`. Unknown adapter names and
+`crates/scitt-policy/src/adapters/azure-confidential-ledger.rs`. Unknown adapter names and
 unknown fields are refused; there is no plugin discovery mechanism.
 
 `Policy::evaluate` must fail closed when adapter requirements cannot be run.
 The CLI explicitly evaluates the statement and then the selected adapter.
 Never make statement-only success stand in for the whole policy's acceptance.
 
-The pure `scitt-adapter-mst-ledger` package lives in `adapters/mst-ledger`.
+The pure `scitt-adapter-azure-confidential-ledger` package lives in `adapters/azure-confidential-ledger`.
 It consumes evidence and typed requirements, does no I/O, and returns findings
 rather than a CLI verdict. Keep SNP/UVM details there and in MST-specific
 orchestration, not in a generic attestation model.

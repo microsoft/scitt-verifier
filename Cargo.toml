@@ -4,7 +4,7 @@ members = [
     "crates/scitt-receipt",
     "crates/scitt-policy",
     "crates/scitt-network",
-    "adapters/mst-ledger",
+    "adapters/azure-confidential-ledger",
     "crates/scitt-verifier",
     "crates/scitt-wasm",
 ]
@@ -28,7 +28,7 @@ authors = ["Microsoft Corporation"]
 # via git, which crates.io forbids. See docs/distribution.md.
 tav-cose = { package = "tee-attestation-verification-cose", git = "https://github.com/microsoft/TEE-Attestation-Verification.git", rev = "a52c499f64aeb5014c94c1faf5ac33c38a195280", default-features = false }
 tav-crypto = { package = "tee-attestation-verification-crypto", git = "https://github.com/microsoft/TEE-Attestation-Verification.git", rev = "a52c499f64aeb5014c94c1faf5ac33c38a195280", default-features = false }
-# SEV-SNP report and UVM endorsement verification, used only by the mst-ledger
+# SEV-SNP report and UVM endorsement verification, used only by the azure-confidential-ledger
 # adapter and only when that feature is on.
 #
 # Pinned to the same revision as the two above, which is not incidental: caci

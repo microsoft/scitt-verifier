@@ -1,5 +1,5 @@
 [package]
-name = "scitt-adapter-mst-ledger"
+name = "scitt-adapter-azure-confidential-ledger"
 description = "Appraisal of SNP/UVM evidence against a statement-derived policy commitment"
 version.workspace = true
 edition.workspace = true
@@ -50,6 +50,6 @@ tav-crypto = { workspace = true }
 default = ["crypto_pure_rust"]
 # Turns on real appraisal. Named for the adapter rather than for the library
 # behind it, so the flag a consumer sets describes what they get.
-mst-ledger = ["dep:tav-caci"]
+azure-confidential-ledger = ["dep:tav-caci"]
 crypto_pure_rust = ["scitt-receipt/crypto_pure_rust", "tav-caci?/crypto_pure_rust", "tav-crypto/crypto_pure_rust"]
 crypto_openssl = ["scitt-receipt/crypto_openssl", "tav-caci?/crypto_openssl", "tav-crypto/crypto_openssl"]

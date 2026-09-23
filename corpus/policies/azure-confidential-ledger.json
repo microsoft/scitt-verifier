@@ -8,7 +8,7 @@
     "receiptCount": 1
   },
   "adapters": {
-    "mst-ledger": {
+    "azure-confidential-ledger": {
       "target": {
         "host": "example-target.confidential-ledger.azure.com"
       },

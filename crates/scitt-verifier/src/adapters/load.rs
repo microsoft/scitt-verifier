@@ -1,7 +1,7 @@
 //! Reading a saved evidence bundle from disk.
 //!
 //! The only filesystem code on the appraisal path, kept at the edge so that
-//! [`scitt_adapter_mst_ledger`] stays free of I/O and an offline replay and a future live
+//! [`acl`] stays free of I/O and an offline replay and a future live
 //! run reach the appraiser through the same types. Two runs over the same
 //! evidence must not be able to disagree because one of them read it from a
 //! different place.
@@ -23,7 +23,7 @@
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 
-use scitt_adapter_mst_ledger::{EvidenceBundle, NodeEvidence};
+use acl::{EvidenceBundle, NodeEvidence};
 use serde::Deserialize;
 
 /// The manifest file a bundle must carry.

@@ -19,7 +19,7 @@ request.
 
 This document concerns **receipt-signing keys**. Optional resource adapters
 have separate targets and trust inputs under `adapters.<name>`. For example,
-`mst-ledger` obtains live evidence from `adapters.mst-ledger.target.host`, not
+`azure-confidential-ledger` obtains live evidence from `adapters.azure-confidential-ledger.target.host`, not
 from the receipt issuer selected by `assertions.issuer` or `--ledger`.
 `--online` alone does not appraise a resource; `live-evidence` additionally
 requests that work and currently requires `--online`. See [adapters](adapters.md).

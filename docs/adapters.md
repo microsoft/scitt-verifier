@@ -5,7 +5,7 @@ resource adapter. An adapter adds a domain-specific comparison between an
 accepted statement and evidence about its subject. It cannot turn an
 unaccepted statement into a success.
 
-The only implemented adapter is `mst-ledger`. It appraises evidence that ledger
+The only implemented adapter is `azure-confidential-ledger`. It appraises evidence that ledger
 nodes enforce the execution policy embedded in a transparent statement.
 Image reproducibility, hardware, and MAA adapters are architectural possibilities,
 not supported commands or evidence formats.
@@ -13,22 +13,22 @@ not supported commands or evidence formats.
 ## Build and select the MST ledger adapter
 
 ```console
-cargo build --release --features adapter-mst-ledger
+cargo build --release --features adapter-azure-confidential-ledger
 ```
 
-The feature is off by default. Select it at runtime with `--adapter mst-ledger`
+The feature is off by default. Select it at runtime with `--adapter azure-confidential-ledger`
 and an evidence binding mode. A build unable to run the required adapter reports
 `cannot-evaluate` rather than ignoring the requirements.
 
-The selector and policy must agree: omitting `--adapter mst-ledger` when the
-policy requires it, or selecting it without `adapters.mst-ledger`, is a usage
+The selector and policy must agree: omitting `--adapter azure-confidential-ledger` when the
+policy requires it, or selecting it without `adapters.azure-confidential-ledger`, is a usage
 error rejected before network acquisition. Appraisal runs only after the full
 statement verdict passes, not merely after parsing or a valid signature.
 
 ## Policy shape
 
 Statement rules stay in `assertions`. MST-specific target, trust inputs, and
-binding requirements live together under `adapters.mst-ledger`:
+binding requirements live together under `adapters.azure-confidential-ledger`:
 
 ```json
 {
@@ -40,7 +40,7 @@ binding requirements live together under `adapters.mst-ledger`:
     "receiptCount": 1
   },
   "adapters": {
-    "mst-ledger": {
+    "azure-confidential-ledger": {
       "target": {
         "host": "example-target.confidential-ledger.azure.com"
       },
@@ -66,7 +66,7 @@ binding requirements live together under `adapters.mst-ledger`:
 ```
 
 The same example is available as
-[`corpus/policies/mst-ledger.json`](../corpus/policies/mst-ledger.json).
+[`corpus/policies/azure-confidential-ledger.json`](../corpus/policies/azure-confidential-ledger.json).
 This illustrates the schema, **not deployable trust values**; the UVM root
 fingerprint is an all-zero placeholder. Replace the
 hostnames, signer/subject constraints, UVM root, EKU, feed, SVN, TCB floors,
@@ -75,13 +75,13 @@ environment. Do not learn acceptance thresholds from the evidence being judged.
 
 The old unpublished top-level `ledger` and `trust` fields and
 `assertions.bindLedgerPolicy` are removed, not aliases. Move their contents to
-`adapters.mst-ledger.target`, `.trust`, and `.binding` respectively. Unknown
+`adapters.azure-confidential-ledger.target`, `.trust`, and `.binding` respectively. Unknown
 adapter names and fields are rejected. Include meaningful statement assertions:
 adapter configuration is not a replacement for accepting the statement.
 
 ### Target and trust
 
-| Field under `adapters.mst-ledger` | Meaning |
+| Field under `adapters.azure-confidential-ledger` | Meaning |
 |---|---|
 | `target.host` | Ledger being appraised, not necessarily the service that issued the receipt |
 | `trust.uvmIssuer` | Bare `did:x509` root reference for the UVM endorsement, without `::` policy components |
@@ -130,12 +130,12 @@ no other nodes exist; choose `expectNodeCount` when your policy knows the count.
 
 ```console
 scitt-verifier verify --statement statement.cose --policy ledger-policy.json \
-  --online --adapter mst-ledger --binding-mode live-evidence \
+  --online --adapter azure-confidential-ledger --binding-mode live-evidence \
   --save-trust trust-snapshot --save-evidence evidence-snapshot
 ```
 
 Two acquisitions occur: `--online` obtains keys for acceptable receipts, and
-`live-evidence` collects resource evidence from `adapters.mst-ledger.target.host`.
+`live-evidence` collects resource evidence from `adapters.azure-confidential-ledger.target.host`.
 The CLI currently requires `--online` for live evidence; it does not accept a
 local receipt-key file in that mode. `--online` by itself never enables resource
 appraisal.
@@ -158,7 +158,7 @@ the command line is parsed, so no directory is created and nothing is collected.
 
 ```console
 scitt-verifier verify --statement statement.cose --policy ledger-policy.json \
-  --scitt-keys keys.cbor --adapter mst-ledger --binding-mode saved-evidence \
+  --scitt-keys keys.cbor --adapter azure-confidential-ledger --binding-mode saved-evidence \
   --evidence evidence-snapshot
 ```
 
@@ -166,7 +166,7 @@ This path makes no network request. The directory contains `snapshot.json` and
 the per-node evidence it names. Use the matching key set from a trust snapshot
 for an offline replay of a live run.
 
-The manifest's ledger must match `adapters.mst-ledger.target.host`, but the
+The manifest's ledger must match `adapters.azure-confidential-ledger.target.host`, but the
 manifest is unsigned. Its hostname and collection time are claims. Likewise,
 the saved bundle supplies the service certificate used for identity binding:
 an attacker can substitute both evidence and its anchor in a self-consistent

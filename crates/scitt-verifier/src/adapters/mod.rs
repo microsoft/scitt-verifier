@@ -1,10 +1,10 @@
 //! Optional domain workflows. Statement verification remains in the CLI/core.
 
-#[cfg(feature = "adapter-mst-ledger")]
+mod acl;
+#[cfg(feature = "adapter-azure-confidential-ledger")]
 mod live;
-#[cfg(feature = "adapter-mst-ledger")]
+#[cfg(feature = "adapter-azure-confidential-ledger")]
 mod load;
-mod mst_ledger;
 
 use scitt_policy::Policy;
 use scitt_receipt::Sign1;
@@ -13,7 +13,7 @@ use std::path::Path;
 use crate::cli::Adapter;
 use crate::outcome::{AdapterCheck, AdapterFinding, CheckState};
 
-#[cfg_attr(not(feature = "adapter-mst-ledger"), allow(dead_code))]
+#[cfg_attr(not(feature = "adapter-azure-confidential-ledger"), allow(dead_code))]
 pub enum EvidenceSource<'a> {
     Saved(&'a Path),
     Live { save_to: Option<&'a Path> },
@@ -53,22 +53,22 @@ impl AdapterAssessment {
 
 /// A policy requirement cannot disappear just because its CLI selector was omitted.
 pub fn validate_request(adapter: Option<Adapter>, policy: &Policy) -> Result<(), String> {
-    match (adapter, policy.adapters.mst_ledger.as_ref()) {
-        (None, None) | (Some(Adapter::MstLedger), Some(_)) => Ok(()),
+    match (adapter, policy.adapters.acl.as_ref()) {
+        (None, None) | (Some(Adapter::AzureConfidentialLedger), Some(_)) => Ok(()),
         (None, Some(_)) => Err(
-            "policy requires adapters.mst-ledger; select --adapter mst-ledger and an \
+            "policy requires adapters.azure-confidential-ledger; select --adapter azure-confidential-ledger and an \
              evidence binding mode so its requirements are evaluated"
                 .into(),
         ),
-        (Some(Adapter::MstLedger), None) => {
-            Err("--adapter mst-ledger requires policy.adapters.mst-ledger".into())
+        (Some(Adapter::AzureConfidentialLedger), None) => {
+            Err("--adapter azure-confidential-ledger requires policy.adapters.azure-confidential-ledger".into())
         }
     }
 }
 
 pub fn not_attempted(adapter: Adapter, reason: impl Into<String>) -> AdapterAssessment {
     match adapter {
-        Adapter::MstLedger => mst_ledger::not_attempted(reason),
+        Adapter::AzureConfidentialLedger => acl::not_attempted(reason),
     }
 }
 
@@ -79,7 +79,7 @@ pub fn check_event(
     findings: &[AdapterFinding],
 ) -> crate::progress::Event {
     match adapter {
-        Adapter::MstLedger => mst_ledger::check_event(check, detail, findings),
+        Adapter::AzureConfidentialLedger => acl::check_event(check, detail, findings),
     }
 }
 
@@ -89,7 +89,7 @@ pub fn compact_limitation(
     findings: &[AdapterFinding],
 ) -> Option<&'static str> {
     match adapter {
-        Adapter::MstLedger => mst_ledger::compact_limitation(check, findings),
+        Adapter::AzureConfidentialLedger => acl::compact_limitation(check, findings),
     }
 }
 
@@ -101,9 +101,12 @@ pub fn appraise(
     progress: &mut dyn crate::progress::Sink,
 ) -> AdapterAssessment {
     match adapter {
-        Adapter::MstLedger => match &policy.adapters.mst_ledger {
-            Some(config) => mst_ledger::appraise_evidence(source, statement, config, progress),
-            None => not_attempted(adapter, "policy.adapters.mst-ledger is missing"),
+        Adapter::AzureConfidentialLedger => match &policy.adapters.acl {
+            Some(config) => acl::appraise_evidence(source, statement, config, progress),
+            None => not_attempted(
+                adapter,
+                "policy.adapters.azure-confidential-ledger is missing",
+            ),
         },
     }
 }

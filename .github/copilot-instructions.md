@@ -101,20 +101,21 @@ resolve the tension by committing the original.
 | Path | Role |
 |---|---|
 | `crates/scitt-receipt` | Core: parsing, crypto, receipts, binding. Embeddable — no I/O, no clock, no verdicts, no dependency on the other crates. CI's `boundary` job enforces this by grep |
-| `crates/scitt-policy` | Statement assertions and typed requirements in `src/adapters/{mod.rs,mst_ledger.rs}`; no I/O |
+| `crates/scitt-policy` | Statement assertions and typed requirements in `src/adapters/{mod.rs,acl.rs}`; no I/O |
 | `crates/scitt-network` | Network acquisition of receipt keys and resource evidence; no policy decisions |
-| `adapters/mst-ledger` | `scitt-adapter-mst-ledger`: pure MST appraisal; no I/O, no CLI verdicts |
-| `crates/scitt-verifier` | CLI arguments, reporting, exit codes; `src/adapters/` owns dispatch, MST orchestration, bundle loading and acquisition orchestration |
+| `adapters/azure-confidential-ledger` | `scitt-adapter-azure-confidential-ledger`: pure appraisal of ACL/CCF node evidence; no I/O, no CLI verdicts. Renamed to `acl` inside `scitt-verifier`, because the published name is what a consumer types and `acl` alone means access-control list |
+| `crates/scitt-verifier` | CLI arguments, reporting, exit codes; `src/adapters/` owns dispatch, adapter orchestration, bundle loading and acquisition orchestration |
 | `crates/scitt-wasm` | Browser bindings and the demo page |
 | `corpus/` | Real fixtures and example policies |
 | `docs/` | `policy.md`, `adapters.md`, `output.md`, `trust-material.md`, `limitations.md`, `architecture.md`, `distribution.md` |
 
 Policy JSON separates `assertions` from
-`adapters.mst-ledger.{target,trust,binding}`. The old top-level `ledger`/`trust`
+`adapters.azure-confidential-ledger.{target,trust,binding}`. The old top-level `ledger`/`trust`
 and `assertions.bindLedgerPolicy` shape is not supported.
 `Policy::evaluate` must not pass when required adapters cannot run; the CLI
 evaluates statement assertions and then adapters explicitly. Keep SNP/UVM
-types MST-specific. There is no generic attestation crate or plugin framework.
+types specific to the Azure Confidential Ledger adapter. There is no generic
+attestation crate or plugin framework.
 
 Crypto and CBOR come from `tav-cose` / `tav-crypto`
 (microsoft/TEE-Attestation-Verification), pinned to an exact git revision. An
@@ -127,6 +128,14 @@ second crypto or CBOR dependency; check what TAV already exposes first.
 cargo fmt --all -- --check
 cargo clippy --all-targets      # not --all-features: crypto backends are exclusive
 cargo test --workspace
+```
+
+The adapter is behind a feature and is not built by the commands above. Lint
+and test it explicitly:
+
+```console
+cargo clippy -p scitt-verifier --features adapter-azure-confidential-ledger --all-targets
+cargo clippy -p scitt-adapter-azure-confidential-ledger --features azure-confidential-ledger --all-targets
 ```
 
 `RUSTFLAGS: -D warnings` in CI, so a warning is a failure. The release binary

@@ -247,7 +247,7 @@ impl CheckState {
 ///
 /// Named rather than positional because the set is open: an adapter decides
 /// what it establishes, and the core cannot enumerate that in advance. The
-/// `mst-ledger` adapter alone contributes identity binding, SNP/UVM
+/// `azure-confidential-ledger` adapter alone contributes identity binding, SNP/UVM
 /// validation, policy comparison, node coverage, and two checks it reports as
 /// permanently unevaluated.
 ///

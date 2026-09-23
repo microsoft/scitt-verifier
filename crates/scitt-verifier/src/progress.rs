@@ -86,13 +86,13 @@ pub enum Presentation {
     FinalLimitation,
     Brief(String),
     Context(String),
-    #[cfg_attr(not(feature = "adapter-mst-ledger"), allow(dead_code))]
+    #[cfg_attr(not(feature = "adapter-azure-confidential-ledger"), allow(dead_code))]
     Checklist {
         checks: Vec<String>,
         columns: Vec<String>,
         subject_width: usize,
     },
-    #[cfg_attr(not(feature = "adapter-mst-ledger"), allow(dead_code))]
+    #[cfg_attr(not(feature = "adapter-azure-confidential-ledger"), allow(dead_code))]
     Row(Vec<State>),
 }
 
@@ -107,7 +107,7 @@ impl Event {
         self
     }
 
-    #[cfg_attr(not(feature = "adapter-mst-ledger"), allow(dead_code))]
+    #[cfg_attr(not(feature = "adapter-azure-confidential-ledger"), allow(dead_code))]
     pub fn subject_label(mut self, label: impl Into<String>) -> Self {
         self.compact_subject = Some(label.into());
         self
@@ -153,7 +153,7 @@ impl Event {
         }
     }
 
-    #[cfg_attr(not(feature = "adapter-mst-ledger"), allow(dead_code))]
+    #[cfg_attr(not(feature = "adapter-azure-confidential-ledger"), allow(dead_code))]
     pub fn finding_with_values(
         stage: Stage,
         check: impl Into<String>,

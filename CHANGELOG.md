@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### The ledger adapter is now named `azure-confidential-ledger` (breaking)
+
+The adapter appraises a deployed Azure Confidential Ledger. It was named after
+MST, which is one service built on that ledger and not the thing being
+appraised — the same conflation that lets a statement notarised by one ledger
+be mistaken for evidence about another. The policy key is now
+`adapters.azure-confidential-ledger`, the CLI value `--adapter
+azure-confidential-ledger`, and the build feature
+`adapter-azure-confidential-ledger`. There is no alias: an existing policy is
+rejected by `deny_unknown_fields` rather than silently reinterpreted, and must
+be updated.
+
 ### A TCB floor is now required to cover the node it appraises
 
 The attestation library compares a minimum TCB only against a node of the same
@@ -78,26 +90,26 @@ receipt support remains limited to the CCF VDS profile.
 
 Network acquisition is renamed from `scitt-acquire` to `scitt-network`.
 The pure MST appraisal package moves from `crates/scitt-attest` to
-`adapters/mst-ledger`, named `scitt-adapter-mst-ledger`. There is no generic
+`adapters/azure-confidential-ledger`, named `scitt-adapter-azure-confidential-ledger`. There is no generic
 attestation crate. CLI dispatch, MST orchestration, and bundle handling live in
 `crates/scitt-verifier/src/adapters/`; networking stays in `scitt-network`.
 
 The unpublished adapter policy shape is replaced, not retained as an alias:
-`ledger` moves to `adapters.mst-ledger.target`, `trust` to
-`adapters.mst-ledger.trust`, and `assertions.bindLedgerPolicy` to
-`adapters.mst-ledger.binding`. Statement rules remain in `assertions`.
+`ledger` moves to `adapters.azure-confidential-ledger.target`, `trust` to
+`adapters.azure-confidential-ledger.trust`, and `assertions.bindLedgerPolicy` to
+`adapters.azure-confidential-ledger.binding`. Statement rules remain in `assertions`.
 Unknown adapters/fields are rejected, and `Policy::evaluate` cannot silently
 pass requirements that need adapter execution.
 
 The CLI rejects policy/adapter-selector mismatches before acquisition and
 requires a passing statement verdict before appraisal. Shared adapter results
 derive success from explicit required checks rather than an independent
-boolean. TLS evidence collection is in `scitt_network::mst_ledger::collect`;
+boolean. TLS evidence collection is in `scitt_network::acl::collect`;
 the CLI decodes and joins the responses into the pure adapter's evidence types.
 Saved bundles retain their existing trust limitations: their manifests and
 service-certificate provenance are not authenticated on offline replay.
 
-The `adapter-mst-ledger` build feature, `--adapter mst-ledger`,
+The `adapter-azure-confidential-ledger` build feature, `--adapter azure-confidential-ledger`,
 `saved-evidence`/`live-evidence` modes, and acquisition behavior are unchanged.
 `--online` selects receipt-key acquisition; live resource acquisition is an
 additional explicit mode that currently requires it. See
@@ -108,7 +120,7 @@ additional explicit mode that currently requires it. See
 `--binding-mode live-evidence` collects the ledger's attestation evidence
 during the run instead of reading a bundle someone recorded earlier. It
 requires `--online`, and the ledger it contacts is the one named by
-`adapters.mst-ledger.target.host` in the policy — never a flag, for the same reason the allowlist
+`adapters.azure-confidential-ledger.target.host` in the policy — never a flag, for the same reason the allowlist
 is not a flag.
 
 This is a security change, not a convenience. A saved bundle carries
@@ -154,11 +166,11 @@ service that issued the receipt is usually *not* the service the statement
 describes. Pointing the adapter at the notary's own evidence produced a
 confident, wrong answer.
 
-The bundle's `ledger` is now compared against `adapters.mst-ledger.target.host` before any node is
+The bundle's `ledger` is now compared against `adapters.azure-confidential-ledger.target.host` before any node is
 appraised, and a mismatch fails the run. Hostnames are compared case-insensitively
 and tolerate a URL, a trailing root dot, or surrounding whitespace; a differing
 port is a differing endpoint and is not normalised away. A policy with no
-`adapters.mst-ledger` section no longer runs the adapter at all.
+`adapters.azure-confidential-ledger` section no longer runs the adapter at all.
 
 The comparison is against the collector's unsigned manifest, so it catches the
 wrong bundle, not a forged one. Pinning the bundle's service certificate to the
