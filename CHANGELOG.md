@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+### A TCB floor is now required to cover the node it appraises
+
+The attestation library compares a minimum TCB only against a node of the same
+CPU generation and skips every other entry, so a floor naming only `milan`
+appraised a Genoa node against nothing and reported a pass. The adapter now
+refuses a node whose generation the configured floor does not name, once the
+report has authenticated and its generation is a fact rather than a claim.
+This is reported as cannot-evaluate rather than a node failure: nothing about
+the node is at fault, the policy simply configured no floor applicable to it.
+
+### Records can no longer be written over saved evidence
+
+`--result` or `--facts` naming a path inside the `--save-evidence` or
+`--save-trust` directory overwrote a bundle file — typically `snapshot.json` —
+with a verification record, and because the record write itself succeeded the
+run still exited 0 having made the bundle unreplayable. The combination is now
+refused while the command line is parsed, before any evidence is collected.
+
+### Output failures are no longer silent
+
+Errors from the progress transcript and from the final text or JSON write were
+discarded, so a truncated or entirely missing result could accompany exit 0.
+Both are now folded into the verdict: a pass whose output could not be
+delivered is demoted, while a run that had already failed keeps its own verdict.
+The final write is flushed as part of the write, since a buffered writer can
+accept every byte and then fail to hand them on.
+
+### The verbose report escapes what the transcript escapes
+
+Node ids, policy ids and the diagnostics quoting them reached the completed
+`--verbose` report as raw bytes, so a hostile value could emit newlines and
+terminal control sequences — enough to print a line that reads like a verdict,
+or to scroll the real one out of view. Every value in that report which did not
+originate as a literal is now escaped and bounded, as the compact transcript
+already did.
+
 ### Text verification reports progress as checks run
 
 Human-readable `verify` output now begins with an append-only transcript emitted

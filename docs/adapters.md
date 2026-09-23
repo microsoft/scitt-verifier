@@ -110,6 +110,14 @@ configurable AMD-root override or debug-disable switch in this schema.
 | `minimumTcb` | Non-empty generation-specific floors; each `reportedTcb` is a `0x`-prefixed 64-bit hexadecimal string |
 | `expectPolicySha256` | Optional 64-hex-character SHA-256 pin for one exact decoded execution policy |
 
+`minimumTcb` must name the generation of every node it will appraise. A floor
+is compared only against a node of the same CPU generation, so one listing only
+`milan` establishes nothing about a Genoa node — and, left unchecked, that node
+would reach the end of the comparison having passed a check that never ran.
+A node whose generation the floor does not name is therefore reported as
+cannot-evaluate. Nothing about that node is at fault; the policy configured no
+floor applicable to it, which is the same fail-open an empty floor produces.
+
 The comparison digest is derived from the same in-memory statement that passed
 verification, not from unauthenticated `inspect` output or a second file read.
 `expectPolicySha256` additionally rejects an otherwise accepted statement for
@@ -140,6 +148,11 @@ cannot replace the external anchor with one of its own choosing.
 `--save-evidence` writes the collected bundle for replay. Failure to preserve
 requested evidence fails the run. An unreachable service is `cannot-evaluate`,
 not a finding that its policy is wrong.
+
+`--result` and `--facts` may not name a path inside a `--save-evidence` or
+`--save-trust` directory: a verification record written there would overwrite a
+bundle file and leave the bundle unreplayable. The combination is refused while
+the command line is parsed, so no directory is created and nothing is collected.
 
 ## Saved evidence
 

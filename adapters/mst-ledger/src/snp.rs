@@ -22,8 +22,8 @@
 
 use crate::bundle::NodeEvidence;
 use crate::Requirements;
-use tav_caci::snp::report::TcbVersionRaw;
-use tav_caci::snp::Cpuid;
+use tav_caci::snp::report::{AttestationReport, TcbVersionRaw};
+use tav_caci::snp::{Cpuid, Generation};
 use tav_caci::{synchronous as tav, AciError};
 
 /// The AMD endorsement chain length the library requires, as `[vcek, ask, ark]`.
@@ -96,6 +96,12 @@ pub(crate) fn verify_node(
     let report = tav::verify_attestation(&evidence.snp_report, &endorsements)
         .map_err(|e| format!("SNP attestation did not verify: {}", describe(&e)))?;
 
+    // The floor is matched by generation and a non-match is skipped, so a
+    // floor that names no generation this node belongs to is the empty floor
+    // by another route. Refused here, once the report has authenticated and
+    // its generation is therefore a fact rather than a claim.
+    enforce_floor_covers_this_node(&report, requirements)?;
+
     // Stage 2: the UVM endorsement's own signature and chain, anchored to the
     // did:x509 the consumer configured.
     let uvm = tav::verify_uvm_endorsement(&evidence.uvm_endorsement, &requirements.uvm_did_x509)
@@ -135,6 +141,55 @@ pub(crate) fn verify_node(
         measurement: report.measurement,
         report_data: report.report_data,
         requirement_failure,
+    })
+}
+
+/// Refuse a node whose generation the configured floor does not cover.
+///
+/// The library compares a floor entry only against a node of the *same*
+/// generation, and `continue`s past every other entry. A Genoa node appraised
+/// against a Milan-only floor is therefore never compared to anything, and
+/// reaches the end of the loop having passed the TCB check without one
+/// happening. That is indistinguishable, in the output, from meeting a floor.
+///
+/// Refusing rather than failing the node is deliberate: nothing here is a
+/// finding about the node. The consumer configured no floor applicable to it,
+/// so the honest answer is that the question was not evaluated.
+fn enforce_floor_covers_this_node(
+    report: &AttestationReport,
+    requirements: &Requirements,
+) -> Result<(), String> {
+    let generation = report
+        .cpu_generation()
+        .map_err(|e| format!("node reports a CPU generation the library cannot decode: {e}"))?;
+
+    if floor_covers(generation, requirements) {
+        return Ok(());
+    }
+
+    let configured: Vec<&str> = requirements
+        .min_tcb
+        .iter()
+        .map(|floor| floor.generation.as_str())
+        .collect();
+    Err(format!(
+        "node is a {generation} part, but the configured TCB floor covers only [{}]; \
+         a floor that does not name this generation is never compared against it, so no \
+         minimum TCB was enforced",
+        configured.join(", ")
+    ))
+}
+
+/// Whether the configured floor names the generation a node belongs to.
+///
+/// Separated from [`enforce_floor_covers_this_node`] so the predicate can be
+/// tested without minting a signed attestation report.
+fn floor_covers(generation: Generation, requirements: &Requirements) -> bool {
+    requirements.min_tcb.iter().any(|floor| {
+        cpuid_for(&floor.generation)
+            .ok()
+            .and_then(|cpuid| Generation::from_cpuid(&cpuid).ok())
+            .is_some_and(|configured| configured == generation)
     })
 }
 
@@ -259,7 +314,6 @@ fn describe(error: &AciError) -> String {
 mod tests {
     use super::*;
     use crate::TcbFloor;
-    use tav_caci::snp::Generation;
 
     fn requirements(min_tcb: Vec<TcbFloor>) -> Requirements {
         Requirements {
@@ -303,6 +357,49 @@ mod tests {
     fn an_empty_tcb_floor_is_refused_rather_than_skipped() {
         let err = tcb_floor(&requirements(Vec::new())).unwrap_err();
         assert!(err.contains("empty floor is not a floor"), "{err}");
+    }
+
+    /// A floor for the wrong generation is the empty floor by another route.
+    ///
+    /// The library's comparison loop `continue`s past every floor entry whose
+    /// generation differs from the node's, so a Genoa node appraised against a
+    /// Milan-only floor exits the loop having been compared to nothing. The
+    /// node would otherwise be reported as meeting a minimum TCB that was
+    /// never applied to it.
+    #[test]
+    fn a_floor_for_another_generation_does_not_cover_this_node() {
+        let milan_only = requirements(vec![TcbFloor {
+            generation: "milan".into(),
+            reported_tcb: 1,
+        }]);
+        assert!(!floor_covers(Generation::Genoa, &milan_only));
+        assert!(!floor_covers(Generation::Turin, &milan_only));
+        assert!(floor_covers(Generation::Milan, &milan_only));
+    }
+
+    #[test]
+    fn a_floor_listing_several_generations_covers_each_of_them() {
+        let both = requirements(vec![
+            TcbFloor {
+                generation: "milan".into(),
+                reported_tcb: 1,
+            },
+            TcbFloor {
+                generation: "Genoa".into(),
+                reported_tcb: 2,
+            },
+        ]);
+        assert!(floor_covers(Generation::Milan, &both));
+        assert!(floor_covers(Generation::Genoa, &both));
+        assert!(!floor_covers(Generation::Turin, &both));
+    }
+
+    #[test]
+    fn an_empty_floor_covers_nothing() {
+        let none = requirements(Vec::new());
+        for generation in [Generation::Milan, Generation::Genoa, Generation::Turin] {
+            assert!(!floor_covers(generation, &none));
+        }
     }
 
     #[test]

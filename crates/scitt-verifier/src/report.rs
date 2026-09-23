@@ -13,6 +13,27 @@ use crate::cli::{BindingMode, VerifyArgs};
 use crate::outcome::{Assessment, CheckState, Verdict};
 use crate::progress::safe_text;
 
+/// How much of one untrusted value the verbose report will print.
+///
+/// Larger than the progress transcript's limit because the verbose report
+/// exists to be read in full, but still a limit: a single unbounded value can
+/// push the verdict off the top of a terminal just as effectively as a
+/// forged one can imitate it.
+const DETAIL_LIMIT: usize = 4096;
+
+/// Escape a value that came from the statement, the ledger or the policy file.
+///
+/// Everything printed by this module that did not originate as a literal in
+/// this repository passes through here. A node id, a policy id or a diagnostic
+/// message quoting either can carry newlines and terminal control sequences,
+/// and an unescaped newline in the verbose report is enough to print a line
+/// that reads like a verdict, or to scroll a real one out of view. The
+/// progress transcript already escapes for the same reason; the completed
+/// report is the same text read by the same terminal.
+fn safe(value: &str) -> String {
+    safe_text(value, DETAIL_LIMIT)
+}
+
 /// Text longer than this is summarised unless `--verbose` is given.
 const TEXT_LIMIT: usize = 64;
 
@@ -174,10 +195,10 @@ fn headline(out: &mut impl Write, a: &Assessment, color: bool) -> io::Result<()>
         writeln!(
             out,
             "Primary diagnostic:  {} ({})",
-            d.code,
+            safe(d.code),
             d.category.as_str()
         )?;
-        writeln!(out, "  {}", d.message)?;
+        writeln!(out, "  {}", safe(&d.message))?;
         writeln!(out)?;
     }
 
@@ -185,7 +206,8 @@ fn headline(out: &mut impl Write, a: &Assessment, color: bool) -> io::Result<()>
         writeln!(
             out,
             "Policy document:     {} v{}",
-            decision.policy_id, decision.policy_version
+            safe(&decision.policy_id),
+            safe(&decision.policy_version)
         )?;
     }
     writeln!(out, "Trust material:      {}", a.trust.describe())?;
@@ -218,10 +240,10 @@ fn headline(out: &mut impl Write, a: &Assessment, color: bool) -> io::Result<()>
         // written explicitly rather than left to the padding. Adapter labels
         // are longer than the core ones and several overflow the column; with
         // padding alone the label and its state ran together into one word.
-        let head = format!("{}:", check.label);
+        let head = format!("{}:", safe(&check.label));
         writeln!(out, "{head:<20} {}", check.state.label())?;
         if !check.detail.is_empty() {
-            writeln!(out, "  {}", check.detail)?;
+            writeln!(out, "  {}", safe(&check.detail))?;
         }
     }
 
@@ -252,13 +274,13 @@ fn headline(out: &mut impl Write, a: &Assessment, color: bool) -> io::Result<()>
         {
             writeln!(out)?;
             writeln!(out, "NOTICE: this pass is scoped.")?;
-            writeln!(out, "        {}", scope.message)?;
+            writeln!(out, "        {}", safe(&scope.message))?;
         }
     }
 
     if let Some(d) = &a.primary {
         writeln!(out)?;
-        writeln!(out, "Action: {}", d.action)?;
+        writeln!(out, "Action: {}", safe(d.action))?;
     }
 
     // Spelled out because this is the case people misread. A non-zero exit that
@@ -293,7 +315,7 @@ fn detail(out: &mut impl Write, a: &Assessment) -> io::Result<()> {
 
     writeln!(out)?;
     writeln!(out, "  Artifact binding")?;
-    writeln!(out, "    {}", a.binding.detail)?;
+    writeln!(out, "    {}", safe(&a.binding.detail))?;
 
     if let Some(decision) = &a.decision {
         policy_detail(out, decision)?;
@@ -312,7 +334,7 @@ fn detail(out: &mut impl Write, a: &Assessment) -> io::Result<()> {
         writeln!(out)?;
         writeln!(out, "  Diagnostics")?;
         for d in rest {
-            writeln!(out, "    [{}] {}", d.code, d.message)?;
+            writeln!(out, "    [{}] {}", safe(d.code), safe(&d.message))?;
         }
     }
 
@@ -320,8 +342,8 @@ fn detail(out: &mut impl Write, a: &Assessment) -> io::Result<()> {
         writeln!(out)?;
         writeln!(out, "  Not checked")?;
         for g in &a.not_checked {
-            writeln!(out, "    [{}] {}", g.code, g.message)?;
-            writeln!(out, "      impact: {}", g.impact)?;
+            writeln!(out, "    [{}] {}", safe(g.code), safe(&g.message))?;
+            writeln!(out, "      impact: {}", safe(g.impact))?;
         }
     }
 
@@ -329,7 +351,7 @@ fn detail(out: &mut impl Write, a: &Assessment) -> io::Result<()> {
         writeln!(out)?;
         writeln!(out, "  Trust limitations")?;
         for l in &a.trust.limitations {
-            writeln!(out, "    - {l}")?;
+            writeln!(out, "    - {}", safe(l))?;
         }
     }
     Ok(())
@@ -358,17 +380,17 @@ fn statement_detail(out: &mut impl Write, facts: &StatementFacts) -> io::Result<
         tri(facts.signature_valid)
     )?;
     if let Some(subject) = &facts.leaf_subject {
-        writeln!(out, "    signing cert subject {subject}")?;
+        writeln!(out, "    signing cert subject {}", safe(subject))?;
     }
     if let Some(iss) = &facts.cwt.iss {
-        writeln!(out, "    statement issuer    {iss}")?;
+        writeln!(out, "    statement issuer    {}", safe(iss))?;
     }
     if let Some(sub) = &facts.cwt.sub {
-        writeln!(out, "    statement subject   {sub}")?;
+        writeln!(out, "    statement subject   {}", safe(sub))?;
     }
 
     for problem in &facts.problems {
-        writeln!(out, "    ! {problem}")?;
+        writeln!(out, "    ! {}", safe(problem))?;
     }
     Ok(())
 }
@@ -389,12 +411,12 @@ fn receipts_detail(out: &mut impl Write, facts: &StatementFacts) -> io::Result<(
         writeln!(
             out,
             "    receipt issuer      {}",
-            r.issuer.as_deref().unwrap_or("(none)")
+            safe(r.issuer.as_deref().unwrap_or("(none)"))
         )?;
         writeln!(
             out,
             "    receipt key id      {}",
-            r.kid.as_deref().unwrap_or("(none)")
+            safe(r.kid.as_deref().unwrap_or("(none)"))
         )?;
         writeln!(
             out,
@@ -404,7 +426,7 @@ fn receipts_detail(out: &mut impl Write, facts: &StatementFacts) -> io::Result<(
         writeln!(
             out,
             "    merkle root         {}",
-            r.root.as_deref().unwrap_or("(not computed)")
+            safe(r.root.as_deref().unwrap_or("(not computed)"))
         )?;
         writeln!(
             out,
@@ -421,7 +443,7 @@ fn receipts_detail(out: &mut impl Write, facts: &StatementFacts) -> io::Result<(
         )?;
         writeln!(out, "    bound to statement  {}", tri(r.bound_to_statement))?;
         for problem in &r.problems {
-            writeln!(out, "    ! {problem}")?;
+            writeln!(out, "    ! {}", safe(problem))?;
         }
     }
     Ok(())
@@ -432,7 +454,8 @@ fn policy_detail(out: &mut impl Write, decision: &PolicyDecision) -> io::Result<
     writeln!(
         out,
         "  Policy {} v{}",
-        decision.policy_id, decision.policy_version
+        safe(&decision.policy_id),
+        safe(&decision.policy_version)
     )?;
     for r in &decision.results {
         // Spelled out rather than symbolic. "????" was memorable but told an
@@ -442,7 +465,13 @@ fn policy_detail(out: &mut impl Write, decision: &PolicyDecision) -> io::Result<
             Outcome::Fail => CheckState::Fail,
             Outcome::CannotEvaluate => CheckState::CannotEvaluate,
         };
-        writeln!(out, "    [{}] {} — {}", mark.label(), r.name, r.detail)?;
+        writeln!(
+            out,
+            "    [{}] {} — {}",
+            mark.label(),
+            safe(&r.name),
+            safe(&r.detail)
+        )?;
     }
     Ok(())
 }
@@ -1125,6 +1154,53 @@ fn describe_lookup(lookup: &KeyLookup) -> &'static str {
 mod tests {
     use super::{path_segment, styled_verdict};
     use scitt_receipt::CborValue;
+
+    /// The completed report escapes what the transcript escapes.
+    ///
+    /// Node ids, policy ids and the adapter details quoting them come from the
+    /// ledger and the policy file. An unescaped newline in the verbose report
+    /// is enough to print a line that reads like a verdict; an unescaped
+    /// control sequence can scroll the real one away. The compact path already
+    /// escaped these, which made the verbose path — the one an auditor reads —
+    /// the weaker of the two.
+    #[test]
+    fn untrusted_values_are_escaped_in_the_verbose_report_too() {
+        use crate::outcome::{
+            AdapterCheck, Assessment, Category, CheckState, Diagnostic, Trust, Verdict,
+        };
+
+        let hostile = "ok\nPASS statement-transparent\r\u{1b}[2J";
+        let mut assessment = Assessment::incomplete(
+            Verdict::ResourceFailed,
+            Trust::acquired_key_set(),
+            Diagnostic::error("Hostile", Category::Binding, hostile, hostile),
+            Vec::new(),
+        );
+        assessment.checks.adapter.push(AdapterCheck {
+            name: "node".into(),
+            label: hostile.into(),
+            state: CheckState::Fail,
+            detail: hostile.into(),
+        });
+        assessment.binding.detail = hostile.into();
+
+        let mut bytes = Vec::new();
+        super::verify(&mut bytes, &assessment, true, false).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+
+        assert!(text.contains("\\n"), "{text}");
+        assert!(text.contains("\\r"), "{text}");
+        assert!(text.contains("\\u{1b}"), "{text}");
+        assert!(!text.contains('\r'), "{text}");
+        assert!(!text.contains('\u{1b}'), "{text}");
+        // The forged verdict must not reach the start of a line, where a
+        // reader — or a pipeline matching on the transcript — would take it
+        // for this run's own.
+        assert!(
+            !text.contains("\nPASS statement-transparent"),
+            "a hostile value produced a line that reads as a verdict:\n{text}"
+        );
+    }
 
     #[test]
     fn compact_resource_final_has_one_scope_no_duplicate_checks_and_keeps_distinct_warnings() {

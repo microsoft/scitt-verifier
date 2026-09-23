@@ -177,6 +177,7 @@ fn run_inspect(args: &cli::InspectArgs) -> u8 {
 fn run_verify(args: &VerifyArgs, out: &mut impl std::io::Write, color: bool) -> Verdict {
     let now = args.now.unwrap_or_else(wall_clock);
 
+    let mut progress_failure = None;
     let assessment = match args.format {
         Format::Text => {
             let mut progress = if args.verbose {
@@ -188,7 +189,9 @@ fn run_verify(args: &VerifyArgs, out: &mut impl std::io::Write, color: bool) -> 
             if args.verbose {
                 emit_assessment_summary(&assessment, &mut progress);
             }
-            let _ = progress.finish();
+            if let Err(e) = progress.finish() {
+                progress_failure = Some(e.to_string());
+            }
             assessment
         }
         Format::Json => {
@@ -196,7 +199,7 @@ fn run_verify(args: &VerifyArgs, out: &mut impl std::io::Write, color: bool) -> 
             evaluate(args, now, &mut progress)
         }
     };
-    emit(args, assessment, now, out, color)
+    emit(args, assessment, now, out, color, progress_failure)
 }
 
 fn progress_plan(args: &VerifyArgs) -> Vec<(progress::Stage, String)> {
@@ -1175,7 +1178,24 @@ fn emit(
     now: i64,
     out: &mut impl std::io::Write,
     color: bool,
+    progress_failure: Option<String>,
 ) -> Verdict {
+    // The progress transcript is part of the record a human reads. A run whose
+    // transcript was truncated cannot show which check produced the verdict,
+    // so it is folded in before anything else is written and before the record
+    // is built — leaving stdout, the record on disk and the exit code agreeing
+    // that this run did not complete.
+    if let Some(e) = progress_failure {
+        demote(
+            &mut assessment,
+            Diagnostic::error(
+                "OutputNotWritten",
+                Category::Input,
+                format!("the progress transcript could not be written: {e}"),
+                "Check the destination of standard output, then re-run.",
+            ),
+        );
+    }
     // First, because it is the only output that is evidence in its own right
     // rather than a description of a conclusion. The key sets and certificates
     // written here are what a later run replays, and they are true whatever
@@ -1234,17 +1254,35 @@ fn emit(
 
     // Built after every write outcome is known, so stdout agrees with the exit
     // code and with the record on disk.
-    match args.format {
-        Format::Json => {
-            let _ = writeln!(out, "{:#}", record::build(args, &assessment, now));
-        }
+    let written = match args.format {
+        Format::Json => writeln!(out, "{:#}", record::build(args, &assessment, now)),
         Format::Text => {
             if args.verbose {
-                let _ = report::verify(out, &assessment, true, color);
+                report::verify(out, &assessment, true, color)
             } else {
-                let _ = report::compact(out, &assessment, args, color);
+                report::compact(out, &assessment, args, color)
             }
         }
+    }
+    // A buffered writer can accept every byte and then fail to hand them on,
+    // so the flush is part of the write, not a tidy-up after it.
+    .and_then(|()| out.flush());
+
+    // A verdict nobody can read is not a verdict a gate should act on. The
+    // record on disk was written before this point and still says what this
+    // run concluded; the exit code is what changes, because it is the one
+    // channel that survives a broken stdout.
+    if let Err(e) = written {
+        demote(
+            &mut assessment,
+            Diagnostic::error(
+                "OutputNotWritten",
+                Category::Input,
+                format!("the verification result could not be written to standard output: {e}"),
+                "Check the destination of standard output, then re-run.",
+            ),
+        );
+        eprintln!("error: the verification result could not be written to standard output: {e}");
     }
 
     assessment.verdict
@@ -2517,6 +2555,125 @@ mod resource_tests {
             .find(|d| d.code == "ResourceAppraisalIncomplete")
             .expect("an inconclusive appraisal named no cause");
         assert!(named.message.contains("Check 0"), "{}", named.message);
+    }
+}
+
+#[cfg(test)]
+mod output_failure_tests {
+    use super::*;
+
+    /// A writer that accepts nothing, like a closed pipe or a full disk.
+    struct Broken;
+
+    impl std::io::Write for Broken {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "stdout went away",
+            ))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "stdout went away",
+            ))
+        }
+    }
+
+    fn passing_args() -> Box<crate::cli::VerifyArgs> {
+        let argv: Vec<String> = [
+            "verify",
+            "--statement",
+            "statement.cose",
+            "--scitt-keys",
+            "keys.cbor",
+            "--policy",
+            "policy.json",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        let crate::cli::Command::Verify(args) = crate::cli::parse(&argv).unwrap() else {
+            panic!("verify")
+        };
+        args
+    }
+
+    fn passing_assessment() -> Assessment {
+        // `incomplete` is the only constructor, so the diagnostic it requires
+        // is cleared again: this stands for a run that concluded cleanly.
+        let mut assessment = Assessment::incomplete(
+            Verdict::StatementTransparent,
+            Trust::unsigned_key_set(),
+            Diagnostic::warning("Placeholder", Category::Trust, "cleared", "None."),
+            Vec::new(),
+        );
+        assessment.primary = None;
+        assessment.diagnostics.clear();
+        assessment
+    }
+
+    /// A verdict nobody could read must not be reported as a pass.
+    ///
+    /// Every byte of the result went to a writer that refused all of them, so
+    /// the only channel that still reaches the caller is the exit code. Left
+    /// at 0, a gate proceeds on a result that was never delivered.
+    #[test]
+    fn a_result_that_could_not_be_written_is_not_a_pass() {
+        let args = passing_args();
+        assert!(passing_assessment().verdict.is_pass());
+
+        let verdict = emit(&args, passing_assessment(), 0, &mut Broken, false, None);
+
+        assert!(!verdict.is_pass(), "got {verdict:?}");
+        assert_eq!(verdict, Verdict::UsageError);
+    }
+
+    /// The same for a transcript that was cut off part way.
+    ///
+    /// The transcript is where a text run says which check produced the
+    /// verdict, so a truncated one leaves a verdict with no visible reason.
+    #[test]
+    fn a_truncated_progress_transcript_is_not_a_pass() {
+        let args = passing_args();
+        let mut sink = Vec::new();
+
+        let verdict = emit(
+            &args,
+            passing_assessment(),
+            0,
+            &mut sink,
+            false,
+            Some("stdout went away".into()),
+        );
+
+        assert_eq!(verdict, Verdict::UsageError);
+        let text = String::from_utf8(sink).unwrap();
+        assert!(
+            text.contains("OutputNotWritten"),
+            "the reason must reach the reader: {text}"
+        );
+    }
+
+    /// A run that had already failed keeps its own, more important, verdict.
+    #[test]
+    fn a_failing_run_is_not_relabelled_by_a_broken_stdout() {
+        let args = passing_args();
+        let assessment = Assessment::incomplete(
+            Verdict::Untrusted,
+            Trust::unsigned_key_set(),
+            Diagnostic::error(
+                "ReceiptKeyUnknown",
+                Category::Trust,
+                "no key",
+                "Refresh the key set.",
+            ),
+            Vec::new(),
+        );
+
+        let verdict = emit(&args, assessment, 0, &mut Broken, false, None);
+
+        assert_eq!(verdict, Verdict::Untrusted);
     }
 }
 

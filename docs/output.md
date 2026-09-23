@@ -36,6 +36,9 @@ presentation details, not an acceptance contract. The verdict, checks, and
 exit code continue to come only from the completed assessment.
 Transcript values are bounded and terminal control characters are escaped so
 an issuer, path, or remote diagnostic cannot forge another displayed line.
+The completed `--verbose` report applies the same escaping and bounding to
+every value it did not originate itself, at a larger limit because that report
+exists to be read in full.
 Individual receipt outcomes and policy assertion results are emitted during
 their respective stages; the later report remains a completed evidence view,
 not the source from which the transcript is reconstructed.
@@ -398,6 +401,12 @@ once every other write outcome is known. In the other order a successful
 after the terminal output is gone.
 
 The most common cause is an output path whose parent directory does not exist.
+
+The same rule applies to stdout. A pass whose final text or JSON document could
+not be written — or could not be flushed, which a buffered writer defers until
+after every byte was accepted — is downgraded the same way, with the cause
+reported on stderr. A failure to emit the progress transcript is treated
+identically: a gate reading an incomplete record must not be told it is whole.
 
 ## Every failure names its cause
 

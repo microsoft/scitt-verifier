@@ -6,7 +6,7 @@
 //! ignores `--require-two-receipts` because it was renamed last release is a
 //! gate that reports success for a check nobody ran.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub const USAGE: &str = r#"scitt-verifier — verify SCITT transparent statements
 
@@ -555,6 +555,33 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         );
     }
 
+    // A record describes a conclusion; a saved bundle is the evidence that
+    // conclusion was drawn from. Writing the former into the latter overwrites
+    // `snapshot.json` or a node file with JSON that is not evidence, and the
+    // record write succeeds, so the run still exits 0 having destroyed what a
+    // later replay needs. Refused before anything is collected, so no bundle
+    // exists to be half-written when the mistake is caught.
+    for (dir, flag) in [
+        (save_evidence.as_deref(), "--save-evidence"),
+        (save_trust.as_deref(), "--save-trust"),
+    ] {
+        let Some(dir) = dir else { continue };
+        for (path, name) in [
+            (result.as_deref(), "--result"),
+            (facts.as_deref(), "--facts"),
+        ] {
+            let Some(path) = path else { continue };
+            if within(dir, path) {
+                return Err(format!(
+                    "{name} would write {} inside the {flag} directory {}, overwriting evidence \
+                     this run is about to save. Name a path outside that directory.",
+                    path.display(),
+                    dir.display()
+                ));
+            }
+        }
+    }
+
     Ok(Command::Verify(Box::new(VerifyArgs {
         statement,
         trust,
@@ -572,6 +599,46 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         trusted_roots,
         now,
     })))
+}
+
+/// Whether `path` would be written inside `dir`.
+///
+/// Either may not exist yet — the point is to refuse before anything is
+/// created — so `canonicalize` is applied to the deepest ancestor that does
+/// exist and the remaining components are appended to it. That resolves the
+/// cases that actually arise here: a relative path, a trailing `.`, a `..`
+/// through a real directory, and a symlinked parent.
+///
+/// When nothing on the path exists the comparison falls back to the path
+/// joined to the working directory, which does not collapse `..`. A false
+/// negative there is a missed refusal rather than a wrong one, and the write
+/// it fails to catch is into a directory tree that does not exist yet, so
+/// there is no evidence in it to destroy.
+fn within(dir: &Path, path: &Path) -> bool {
+    resolve(path).starts_with(resolve(dir))
+}
+
+fn resolve(p: &Path) -> PathBuf {
+    let mut trailing = Vec::new();
+    let mut cur = p.to_path_buf();
+    loop {
+        if let Ok(existing) = cur.canonicalize() {
+            let mut out = existing;
+            out.extend(trailing.iter().rev());
+            return out;
+        }
+        let (Some(name), Some(parent)) = (
+            cur.file_name().map(|n| n.to_os_string()),
+            cur.parent().map(Path::to_path_buf),
+        ) else {
+            break;
+        };
+        trailing.push(name);
+        cur = parent;
+    }
+    let mut out = std::env::current_dir().unwrap_or_default();
+    out.push(p);
+    out
 }
 
 fn parse_inspect<'a>(mut it: impl Iterator<Item = &'a String>) -> Result<Command, String> {
@@ -685,6 +752,49 @@ mod tests {
         ]))
         .unwrap_err();
         assert!(err.contains("requires --online"), "{err}");
+    }
+
+    /// A record written into the bundle directory destroys the bundle.
+    ///
+    /// `--save-evidence d --result d\snapshot.json` overwrites the manifest
+    /// the adapter has just written with a verification record, and the record
+    /// write succeeds, so the run still exits 0 having made the bundle
+    /// unreplayable. Refused during parsing, before anything is collected.
+    #[test]
+    fn a_record_written_into_the_saved_bundle_is_refused() {
+        let live = |result: &str| {
+            parse(&args(&[
+                "verify",
+                "--statement",
+                "a",
+                "--online",
+                "--policy",
+                "p",
+                "--binding-mode",
+                "live-evidence",
+                "--adapter",
+                "mst-ledger",
+                "--save-evidence",
+                "bundle",
+                "--result",
+                result,
+            ]))
+        };
+
+        for inside in [
+            "bundle/snapshot.json",
+            "bundle/nested/record.json",
+            "bundle",
+        ] {
+            let err = live(inside).unwrap_err();
+            assert!(err.contains("--save-evidence"), "{inside}: {err}");
+            assert!(err.contains("overwriting evidence"), "{inside}: {err}");
+        }
+
+        // A sibling directory whose name merely starts with the same letters
+        // is not inside it; refusing that would be a false positive.
+        live("bundle-record.json").unwrap();
+        live("elsewhere/record.json").unwrap();
     }
 
     /// A live run collects its own evidence. Handing it a bundle as well would
