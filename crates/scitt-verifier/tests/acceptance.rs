@@ -52,6 +52,27 @@ fn verify(extra: &[&str]) -> Run {
     run(&args)
 }
 
+fn has_line(output: &str, expected: &str) -> bool {
+    output.lines().any(|line| line == expected)
+}
+
+fn transcript(output: &str) -> &str {
+    output.split("\nDetails\n").next().unwrap_or(output)
+}
+
+fn has_progress_finding(output: &str, state: &str, check: &str) -> bool {
+    transcript(output).lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with(state) && line[state.len()..].split_whitespace().next() == Some(check)
+    })
+}
+
+fn has_pass_verdict(output: &str) -> bool {
+    output
+        .lines()
+        .any(|line| line.starts_with("PASS ") && line.contains("-transparent"))
+}
+
 #[test]
 fn a_genuine_statement_without_an_artifact_is_only_statement_transparent() {
     // The distinction this test defends: a run that never looked at an
@@ -59,8 +80,18 @@ fn a_genuine_statement_without_an_artifact_is_only_statement_transparent() {
     let r = verify(&[]);
     assert_eq!(r.code, 0, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
     assert!(
-        r.stdout.starts_with("PASS statement-transparent"),
-        "the decision must be the first thing on screen: {}",
+        r.stdout.starts_with("Verifying ") && r.stdout.contains("[1/3] Read inputs\n"),
+        "text verification must report work as it happens: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains('\u{1b}'),
+        "redirected text output must not contain terminal color codes: {}",
+        r.stdout
+    );
+    assert!(
+        has_line(&r.stdout, "PASS statement-transparent"),
+        "the transcript must end in the scoped decision: {}",
         r.stdout
     );
     assert!(
@@ -68,6 +99,66 @@ fn a_genuine_statement_without_an_artifact_is_only_statement_transparent() {
         "an unbound pass must say so: {}",
         r.stdout
     );
+    assert!(
+        transcript(&r.stdout)
+            .contains("PASS Signature valid; chain consistent with its embedded root")
+            && transcript(&r.stdout).contains("ArtifactBindingNotRequested"),
+        "statement facts and omitted checks must precede the completed report: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains("signing certificate subject:")
+            && !r.stdout.contains("claim digest")
+            && !r.stdout.contains("receipt key id"),
+        "compact successes must not dump raw evidence identities and hashes: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("\n\nPASS statement-transparent\n")
+            && !r.stdout.contains("Statement signature:")
+            && !r.stdout.contains("Receipt inclusion:")
+            && r.stdout.lines().count() <= 36,
+        "the scoped result must be visually separated as the final verdict block: {}",
+        r.stdout
+    );
+    assert!(
+        !has_line(&r.stdout, "Details"),
+        "default text output must not repeat the completed evidence report: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn verbose_text_retains_the_completed_evidence_report() {
+    let r = verify(&["--verbose"]);
+    assert_eq!(r.code, 0, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
+    assert!(
+        has_line(&r.stdout, "Details"),
+        "verbose output must include the completed evidence report: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("[pass] issuer"),
+        "verbose output must retain per-assertion evidence: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("signing certificate subject:")
+            && r.stdout.contains("statement issuer:")
+            && r.stdout.contains("registered at UTC"),
+        "detailed identity and timestamp labels remain available: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn json_stdout_contains_only_the_final_record() {
+    let r = verify(&["--format", "json"]);
+    assert_eq!(r.code, 0, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
+    let value: serde_json::Value =
+        serde_json::from_str(&r.stdout).expect("progress must not contaminate JSON stdout");
+    assert_eq!(value["appraisal"]["verdict"], "statement-transparent");
+    assert!(!r.stdout.contains("Read inputs"));
 }
 
 #[test]
@@ -123,7 +214,7 @@ fn an_appended_broken_receipt_does_not_deny_the_gate() {
         r.stdout
     );
     assert!(
-        r.stdout.starts_with("PASS statement-transparent"),
+        has_line(&r.stdout, "PASS statement-transparent"),
         "{}",
         r.stdout
     );
@@ -133,6 +224,12 @@ fn an_appended_broken_receipt_does_not_deny_the_gate() {
     assert!(
         r.stdout.contains("ReceiptRootSignatureInvalid"),
         "the disregarded receipt must still be reported: {}",
+        r.stdout
+    );
+    assert!(
+        transcript(&r.stdout)
+            .contains("the ledger's signature over the Merkle root did not verify"),
+        "receipt diagnostics must be emitted while the statement stage runs: {}",
         r.stdout
     );
     assert!(
@@ -242,6 +339,19 @@ fn stale_trust_material_exits_three_not_one() {
         "stale keys must be named, not left for the reader to infer: {}",
         r.stdout
     );
+    assert!(
+        transcript(&r.stdout).contains("ReceiptKeyUnknown"),
+        "the deciding diagnostic must appear in the assessment summary: {}",
+        r.stdout
+    );
+    // Severity has to survive into the transcript. Printed as a notice it
+    // would sit among the trust limitations, and a reader scanning for what
+    // stopped the run would find nothing that looked like a failure.
+    assert!(
+        has_progress_finding(&r.stdout, "FAIL", "ReceiptKeyUnknown"),
+        "a diagnostic that decided the verdict must not render as a notice: {}",
+        r.stdout
+    );
 }
 
 #[test]
@@ -259,7 +369,7 @@ fn a_policy_that_rejects_the_issuer_exits_two() {
         &policy,
     ]);
     assert_eq!(r.code, 2, "{}", r.stdout);
-    assert!(r.stdout.starts_with("STOP policy-failed"));
+    assert!(has_line(&r.stdout, "STOP policy-failed"));
     assert!(
         r.stdout.contains("PolicyAssertionFailed"),
         "a policy failure must name the assertion that stopped it: {}",
@@ -310,7 +420,7 @@ fn a_matching_artifact_binds() {
     let r = verify(&["--artifact", &artifact, "--binding-mode", "payload-bytes"]);
     assert_eq!(r.code, 0, "{}", r.stdout);
     assert!(
-        r.stdout.starts_with("PASS artifact-transparent"),
+        has_line(&r.stdout, "PASS artifact-transparent"),
         "a bound run must claim the artifact, not just the statement: {}",
         r.stdout
     );
@@ -998,8 +1108,9 @@ fn a_requested_binding_that_cannot_be_performed_is_never_a_pass() {
         r.stdout
     );
     assert!(
-        !r.stdout.contains("PASS"),
-        "an unevaluable binding is not a pass: {}",
+        !has_line(&r.stdout, "PASS artifact-transparent")
+            && !has_line(&r.stdout, "PASS statement-transparent"),
+        "an unevaluable binding must not produce an overall pass: {}",
         r.stdout
     );
     assert!(
@@ -1093,8 +1204,15 @@ fn a_matching_statement_subject_passes() {
     let r = verify_with_subject_policy("match", r#"{"equals":"unknown.intent"}"#);
     assert_eq!(r.code, 0, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
     assert!(
-        r.stdout.contains("[pass] statementSubject"),
+        has_progress_finding(&r.stdout, "PASS", "statementSubject"),
         "the assertion must be shown as having run: {}",
+        r.stdout
+    );
+    assert!(
+        transcript(&r.stdout).lines().any(|line| {
+            line.contains("statementSubject") && line.trim_start().starts_with("PASS")
+        }),
+        "the policy assertion must be emitted in the live transcript: {}",
         r.stdout
     );
 }
@@ -1110,7 +1228,7 @@ fn a_statement_about_something_else_fails_the_policy() {
         r.stdout
     );
     assert!(
-        r.stdout.contains("[FAIL] statementSubject"),
+        has_progress_finding(&r.stdout, "FAIL", "statementSubject"),
         "the failing assertion must be named: {}",
         r.stdout
     );
@@ -1160,7 +1278,7 @@ fn a_matching_statement_issuer_passes() {
     let r = verify_with_issuer_policy("match", &format!(r#"{{"equals":"{FIXTURE_ISSUER}"}}"#));
     assert_eq!(r.code, 0, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
     assert!(
-        r.stdout.contains("[pass] statementIssuer"),
+        has_progress_finding(&r.stdout, "PASS", "statementIssuer"),
         "the assertion must be shown as having run: {}",
         r.stdout
     );
@@ -1177,7 +1295,7 @@ fn a_statement_from_another_issuer_fails_the_policy() {
         r.stdout
     );
     assert!(
-        r.stdout.contains("[FAIL] statementIssuer"),
+        has_progress_finding(&r.stdout, "FAIL", "statementIssuer"),
         "the failing assertion must be named: {}",
         r.stdout
     );
@@ -1193,7 +1311,11 @@ fn an_issuer_prefix_pins_the_authority_without_pinning_the_eku() {
         r#"{"startsWith":"did:x509:0:sha256:12_fzPuLgftjDn11g05T4lOItyjNHc7akSntxDcX3xw"}"#,
     );
     assert_eq!(r.code, 0, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
-    assert!(r.stdout.contains("[pass] statementIssuer"), "{}", r.stdout);
+    assert!(
+        has_progress_finding(&r.stdout, "PASS", "statementIssuer"),
+        "{}",
+        r.stdout
+    );
 }
 
 #[test]
@@ -1214,7 +1336,7 @@ fn a_vacuous_subject_match_is_refused_before_anything_is_verified() {
     let r = verify_with_subject_policy("vacuous", r#"{"startsWith":""}"#);
     assert_eq!(r.code, 4, "a rule that cannot reject is a usage error");
     assert!(
-        !r.stdout.starts_with("PASS"),
+        !has_pass_verdict(&r.stdout),
         "a refused policy must never print a pass: {}",
         r.stdout
     );
@@ -1224,6 +1346,10 @@ fn a_vacuous_subject_match_is_refused_before_anything_is_verified() {
 
 /// Run a policy whose only assertion is a `protectedHeaders` list.
 fn verify_with_header_policy(name: &str, list: &str) -> Run {
+    verify_with_header_policy_options(name, list, &[])
+}
+
+fn verify_with_header_policy_options(name: &str, list: &str, extra: &[&str]) -> Run {
     let dir = std::env::temp_dir().join(format!("scitt-verifier-headers-{name}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -1238,15 +1364,18 @@ fn verify_with_header_policy(name: &str, list: &str) -> Run {
 
     let statement = corpus(&["fixtures", "transparent-statement.cose"]);
     let keys = corpus(&["fixtures", "mst-test-scitt-keys.cbor"]);
-    let r = run(&[
+    let policy_path = policy.display().to_string();
+    let mut args = vec![
         "verify",
         "--statement",
         &statement,
         "--scitt-keys",
         &keys,
         "--policy",
-        &policy.display().to_string(),
-    ]);
+        &policy_path,
+    ];
+    args.extend_from_slice(extra);
+    let r = run(&args);
     let _ = std::fs::remove_dir_all(&dir);
     r
 }
@@ -1259,7 +1388,7 @@ fn a_protected_header_can_be_pinned_by_integer_label() {
     );
     assert_eq!(r.code, 0, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
     assert!(
-        r.stdout.contains("[pass] protectedHeaders"),
+        has_progress_finding(&r.stdout, "PASS", "protectedHeaders"),
         "the assertion must be shown as having run: {}",
         r.stdout
     );
@@ -1289,7 +1418,7 @@ fn a_header_the_statement_does_not_carry_cannot_be_evaluated() {
     let r = verify_with_header_policy("absent", r#"[{"path":[-65537],"text":{"equals":"x"}}]"#);
     assert_eq!(r.code, 3, "absent is not a pass and not a failure");
     assert!(
-        !r.stdout.starts_with("PASS"),
+        !has_pass_verdict(&r.stdout),
         "an unevaluable rule must never print a pass: {}",
         r.stdout
     );
@@ -1335,7 +1464,7 @@ fn an_array_wildcard_path_is_refused_before_anything_is_verified() {
         "a path this build cannot honour is a usage error"
     );
     assert!(
-        !r.stdout.starts_with("PASS"),
+        !has_pass_verdict(&r.stdout),
         "a refused policy must never print a pass: {}",
         r.stdout
     );
@@ -1420,7 +1549,7 @@ fn a_path_read_from_inspect_can_be_pasted_into_a_policy() {
     );
     assert_eq!(r.code, 0, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
     assert!(
-        r.stdout.contains("[pass] protectedHeaders"),
+        has_progress_finding(&r.stdout, "PASS", "protectedHeaders"),
         "the path printed by inspect must resolve when pasted verbatim: {}",
         r.stdout
     );
@@ -1491,7 +1620,7 @@ fn a_nested_path_read_from_inspect_can_be_pasted_into_a_policy() {
     ]);
     assert_eq!(r.code, 0, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
     assert!(
-        r.stdout.contains("[pass] protectedHeaders"),
+        has_progress_finding(&r.stdout, "PASS", "protectedHeaders"),
         "a nested path printed by inspect must resolve verbatim: {}",
         r.stdout
     );
@@ -1519,9 +1648,10 @@ fn an_algorithm_name_read_from_inspect_can_be_pasted_into_a_policy() {
         .expect("a name precedes the parenthesised value");
     assert_eq!(name, "PS256", "read straight off the inspect line");
 
-    let r = verify_with_header_policy(
+    let r = verify_with_header_policy_options(
         "pasted-alg",
         &format!(r#"[{{"path":[1],"alg":{{"equals":"{name}"}}}}]"#),
+        &["--verbose"],
     );
     assert_eq!(r.code, 0, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
     assert!(
@@ -1619,7 +1749,7 @@ fn a_detached_signature_in_a_protected_header_can_be_verified() {
     );
     assert_eq!(r.code, 0, "{}", r.stdout);
     assert!(
-        r.stdout.contains("[pass] externalSignatures"),
+        has_progress_finding(&r.stdout, "PASS", "externalSignatures"),
         "{}",
         r.stdout
     );
@@ -1658,7 +1788,7 @@ fn an_absent_detached_signature_cannot_be_evaluated() {
     );
     assert_eq!(r.code, 3, "{}", r.stdout);
     assert!(
-        r.stdout.contains("[CANNOT EVALUATE] externalSignatures"),
+        has_progress_finding(&r.stdout, "CANNOT EVALUATE", "externalSignatures"),
         "{}",
         r.stdout
     );
@@ -1718,7 +1848,7 @@ fn a_nested_cose_sign1_can_be_verified() {
     );
     assert_eq!(r.code, 0, "{}", r.stdout);
     assert!(
-        r.stdout.contains("[pass] externalSignatures"),
+        has_progress_finding(&r.stdout, "PASS", "externalSignatures"),
         "{}",
         r.stdout
     );
@@ -1760,7 +1890,7 @@ fn naming_the_wrong_convention_cannot_be_evaluated() {
     );
     assert_eq!(r.code, 3, "{}", r.stdout);
     assert!(
-        r.stdout.contains("[CANNOT EVALUATE] externalSignatures"),
+        has_progress_finding(&r.stdout, "CANNOT EVALUATE", "externalSignatures"),
         "{}",
         r.stdout
     );
@@ -1775,7 +1905,7 @@ fn naming_the_wrong_convention_cannot_be_evaluated() {
 // was never made would be proving the opposite of what it claims.
 //
 // The paths that do reach a service are covered by the ignored live tests in
-// the scitt-acquire crate, where a real endpoint is named explicitly.
+// the scitt-network crate, where a real endpoint is named explicitly.
 // ---------------------------------------------------------------------------
 
 /// A run that names no ledger and no key set has not been told how to
@@ -2026,7 +2156,7 @@ fn a_payload_claim_is_not_read_from_a_statement_that_declares_another_type() {
     ]);
     assert_eq!(r.code, 3, "{}", r.stdout);
     assert!(
-        r.stdout.contains("[CANNOT EVALUATE] payloadJson"),
+        has_progress_finding(&r.stdout, "CANNOT EVALUATE", "payloadJson"),
         "{}",
         r.stdout
     );

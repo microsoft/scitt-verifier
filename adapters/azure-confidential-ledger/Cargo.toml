@@ -1,0 +1,55 @@
+[package]
+name = "scitt-adapter-azure-confidential-ledger"
+description = "Appraisal of SNP/UVM evidence against a statement-derived policy commitment"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# Deliberately dependency-free at this stage.
+#
+# Dependencies are limited to the offline core and the attestation library.
+#
+# This crate appraises evidence someone else gathered: callers hand it bytes
+# and it hands back typed findings. It performs no file I/O, opens no sockets,
+# and reads no clock — the CI `boundary` job enforces all three, for the same
+# reason it does on `scitt-receipt`.
+#
+# It also must never depend on `scitt-verifier`. That is what makes "an adapter
+# reports checks, not a verdict" structural rather than a convention: the
+# `Verdict` type is not in scope here, so no code in this crate can construct
+# one and turn missing evidence into a pass. Nor on `scitt-network`, which is
+# where networking lives.
+[dependencies]
+# For did:x509 resolution and certificate parsing. Reused rather than
+# reimplemented because this crate must enforce the EKU predicate that the
+# attestation library parses and then discards, and `scitt-receipt` already
+# does exactly that for statement issuers.
+scitt-receipt = { path = "../../crates/scitt-receipt", default-features = false }
+# Optional so a build that does not want the adapter does not pay for the SNP
+# and UVM verification stack. Without it this crate still compiles, and every
+# check reports CannotEvaluate — which is the honest answer for a build that
+# cannot appraise attestation, and is why the unevaluated path is not merely a
+# placeholder.
+tav-caci = { workspace = true, optional = true }
+# The crypto backend, used directly to verify a CCF node certificate's ECDSA
+# signature. `scitt-receipt::chain` cannot: the pinned X.509 parser recognises
+# only RSA signature algorithms and reports every ECDSA-signed certificate as
+# uncheckable, while CCF signs its service and node certificates with P-384.
+# The raw signature primitives handle ECDSA, so the certificate is taken apart
+# and verified through those instead.
+tav-crypto = { workspace = true }
+
+[features]
+# Matches every other crate here. A crate that defaulted to no backend would
+# build fine on its own and then panic in the crypto build script the moment
+# anything enabled the adapter, which is a confusing way to learn that a
+# backend is mandatory.
+default = ["crypto_pure_rust"]
+# Turns on real appraisal. Named for the adapter rather than for the library
+# behind it, so the flag a consumer sets describes what they get.
+azure-confidential-ledger = ["dep:tav-caci"]
+crypto_pure_rust = ["scitt-receipt/crypto_pure_rust", "tav-caci?/crypto_pure_rust", "tav-crypto/crypto_pure_rust"]
+crypto_openssl = ["scitt-receipt/crypto_openssl", "tav-caci?/crypto_openssl", "tav-crypto/crypto_openssl"]

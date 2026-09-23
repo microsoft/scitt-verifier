@@ -2,62 +2,70 @@
 
 ## The boundary that matters
 
-```
-                 bytes in
-                    │
-        ┌───────────▼────────────┐
-        │     scitt-receipt      │   facts, no opinions
-        │  parse · digest · COSE │   no I/O · no clock · no exit codes
-        │  Merkle · key lookup   │
-        └───────────┬────────────┘
-                    │ StatementFacts
-        ┌───────────▼────────────┐
-        │     scitt-policy       │   facts → decision
-        │  assertions over facts │   no I/O · no clock (now is a parameter)
-        └───────────┬────────────┘
-                    │ PolicyDecision
-        ┌───────────▼────────────┐        ┌──────────────────────┐
-        │    scitt-verifier      │◀───────│    scitt-acquire     │
-        │  CLI · evidence · exit │  keys  │  the only socket     │
-        └────────────────────────┘        │  --online only       │
-                                          └──────────────────────┘
-```
+Statement verification is the common path. Resource appraisal is optional,
+not a prerequisite for verifying a transparent statement.
 
-Everything above the bottom row could run in a browser.
+| Component | Responsibility |
+|---|---|
+| `crates/scitt-receipt` | Parse, verify signatures and receipts, compare artifact bytes; facts only, no I/O or clock |
+| `crates/scitt-policy` | Evaluate statement assertions and parse typed adapter requirements; no I/O or clock (`now` is supplied) |
+| `crates/scitt-network` | Acquire receipt keys and live resource evidence; no policy decisions |
+| `adapters/azure-confidential-ledger` (`scitt-adapter-azure-confidential-ledger`) | Pure appraisal of supplied MST ledger evidence against typed requirements |
+| `crates/scitt-verifier` | Load inputs, select acquisition and adapter paths, combine checks, report verdicts and exit codes |
+
+`scitt-policy/src/adapters/{mod.rs,acl.rs}` owns the policy namespace
+and MST-specific requirements. CLI
+`scitt-verifier/src/adapters/mod.rs` provides dispatch and the shared appraisal
+result; `acl.rs` translates MST requirements and findings, and `load.rs`
+handles local evidence bundles. `live.rs` calls
+`scitt_network::acl::collect`, then decodes and joins the returned node
+views into a pure evidence bundle. TLS bootstrap, pinned connections, and
+bounded HTTP collection belong to `collect`, not the CLI or pure adapter.
+
+Before network acquisition, the CLI rejects a mismatch between the selected
+adapter and the policy's adapter requirements. It then requires the full
+statement verdict to pass (signature, receipt, chain handling, and statement
+policy) before running the adapter against the accepted in-memory statement.
+`Policy::evaluate` remains
+fail closed for callers that cannot run adapter requirements: statement-only
+evaluation must not silently satisfy a policy that also requires appraisal.
+Adapter results may narrow acceptance, never rescue a failed statement check.
+
+The internal `AdapterAssessment` contains `checks`, `required_checks`, `scope`,
+and `notes`. It does not carry an independent pass boolean. `scoped_pass()`
+derives acceptance from a non-empty required-check list: every required name
+must resolve to exactly one check whose state is `Pass`. Missing, duplicate,
+failed, or unevaluated required checks block success. Other checks still report
+scope limitations; they cannot stand in for a required check.
+
+There is no generic `scitt-attest` crate, plugin loader, or universal SNP
+evidence model. SNP and UVM concepts belong to the Azure Confidential Ledger
+adapter. A future image, hardware, or MAA adapter could use this separation,
+but none is implemented
+by the existence of the dispatch seam.
 
 ## Where the network is, and is not
 
-`--online` fetches signing keys from the transparency service that issued a
-receipt. That is one crate, `scitt-acquire`, and it is the only place in the
-tree that can open a socket.
+`--online` fetches receipt-signing keys from policy-allowlisted transparency
+services. `--binding-mode live-evidence` additionally acquires resource evidence
+from `adapters.azure-confidential-ledger.target.host`; the two destinations need not be the
+same. Live evidence currently requires `--online`, but key acquisition alone
+does not request an appraisal. See [adapters](adapters.md).
 
-The arrow points one way on purpose. `scitt-acquire` produces key material and
-nothing else: it does not see the policy, does not evaluate assertions, and
-cannot produce a verdict. Verification runs afterwards, in the same core crates
-that run offline, over the same `StatementFacts`. A run with `--online` and a
-run with `--scitt-keys` reach the decision by identical code; they differ only
-in where the bytes came from.
+`scitt-network` owns network I/O. It returns acquired material, not a verdict.
+Verification uses the same core whether keys came from `--scitt-keys` or
+`--online`. The pure adapter likewise appraises supplied evidence without
+opening sockets or loading files.
 
-Three properties hold structurally rather than by convention, and
-`tests/design_commitments.rs` walks the dependency graph to prove each one:
+The dependency boundaries are deliberate:
 
-- `scitt-receipt` and `scitt-policy` cannot reach a network crate on any path.
-  A verdict that depended on a socket could be changed by whoever controls the
-  socket.
-- Networking reaches the CLI only through `scitt-acquire`. Without this,
-  `--online` would be indistinguishable from the whole tool having quietly
-  become a network client.
-- `scitt-acquire` does not depend on `scitt-policy`. Fetching trust material
-  and judging it are separate jobs, and only the second may reach a conclusion.
+- The core, policy, and pure adapter cannot reach network clients.
+- CLI network access goes through `scitt-network`.
+- Network acquisition does not depend on relying-party policy evaluation.
 
-That test used to assert something blunter: that no network crate appeared
-anywhere in `Cargo.lock`. It could not survive `--online` existing, and
-replacing it was a reviewed decision rather than a convenience. What replaced
-it is more precise, not merely more permissive. Lockfile presence was always a
-proxy — it flagged optional dependencies that are never compiled, and would
-have flagged a crate pulled in by a dev-dependency of an unrelated package.
-Reachability from named roots is the property actually claimed, and is now
-checked directly.
+Check reachability from those roots, not merely whether a networking package
+appears in `Cargo.lock`: an optional or unrelated dependency says nothing about
+what the pure verification path can do.
 
 ### What a fetch establishes
 
@@ -94,7 +102,7 @@ implementation too many.
 
 The boundary is enforced in CI (`.github/workflows/ci.yml`, job `boundary`) by
 grepping the core for `std::fs`, `SystemTime`, `ExitCode`, network clients, and
-any reference to the other two crates. Greps are crude, but they fail on the
+any coupling to policy or CLI crates. Greps are crude, but they fail on the
 first `use std::fs` someone adds "just here", which is when the erosion actually
 happens.
 
@@ -106,11 +114,13 @@ happens.
 * CCF leaf hashing and the Merkle path walk
 * COSE_KeySet parsing, kid resolution, issuer scoping
 * The `claims_digest` binding back to the statement
+* Artifact binding over supplied bytes (not loading the artifact from disk)
 
 ### What is not
 
 * Relying-party policy — a trust decision, not a fact
-* Artifact binding — needs a filesystem
+* Loading artifacts and evidence from files
+* Domain-specific resource appraisal
 * The evidence document, exit codes, and verdict vocabulary — all consumer
   concerns
 * Anything that reads the clock
@@ -139,8 +149,8 @@ crate:
    encoder would silently change the digest and break every receipt.
 2. **The crypto backend is swappable at compile time** — pure Rust, OpenSSL, or
    WebCrypto. The pure-Rust backend needs no OpenSSL, no C compiler, and no
-   platform linker, which is what makes both a static binary and a future WASM
-   build possible from one source tree.
+   external crypto library. Native builds still require a Rust-compatible
+   linker; the same core also supports the WASM consumer.
 
 We verify real PS256 statements with 4-certificate chains through the pure-Rust
 path, so this is measured rather than assumed.

@@ -780,7 +780,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "scitt-acquire"
+name = "scitt-adapter-azure-confidential-ledger"
+version = "0.4.0"
+dependencies = [
+ "scitt-receipt",
+ "tee-attestation-verification-caci",
+ "tee-attestation-verification-crypto",
+]
+
+[[package]]
+name = "scitt-network"
 version = "0.4.0"
 dependencies = [
  "rustls",
@@ -814,9 +823,11 @@ dependencies = [
 name = "scitt-verifier"
 version = "0.4.0"
 dependencies = [
- "scitt-acquire",
+ "scitt-adapter-azure-confidential-ledger",
+ "scitt-network",
  "scitt-policy",
  "scitt-receipt",
+ "serde",
  "serde_json",
 ]
 
@@ -972,6 +983,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tee-attestation-verification-caci"
+version = "1.0.6"
+source = "git+https://github.com/microsoft/TEE-Attestation-Verification.git?rev=a52c499f64aeb5014c94c1faf5ac33c38a195280#a52c499f64aeb5014c94c1faf5ac33c38a195280"
+dependencies = [
+ "serde_json",
+ "tee-attestation-verification-cose",
+ "tee-attestation-verification-crypto",
+ "tee-attestation-verification-lib",
+]
+
+[[package]]
 name = "tee-attestation-verification-cose"
 version = "1.0.6"
 source = "git+https://github.com/microsoft/TEE-Attestation-Verification.git?rev=a52c499f64aeb5014c94c1faf5ac33c38a195280#a52c499f64aeb5014c94c1faf5ac33c38a195280"
@@ -1001,6 +1023,16 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "x509-cert",
+]
+
+[[package]]
+name = "tee-attestation-verification-lib"
+version = "1.0.6"
+source = "git+https://github.com/microsoft/TEE-Attestation-Verification.git?rev=a52c499f64aeb5014c94c1faf5ac33c38a195280#a52c499f64aeb5014c94c1faf5ac33c38a195280"
+dependencies = [
+ "log",
+ "tee-attestation-verification-crypto",
+ "zerocopy",
 ]
 
 [[package]]

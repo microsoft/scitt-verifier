@@ -47,14 +47,24 @@ const NETWORK_CRATES: &[&str] = &[
 ];
 
 /// The one crate allowed to reach the network, and the only door into it.
-const ACQUIRE: &str = "scitt-acquire";
+const ACQUIRE: &str = "scitt-network";
 
 /// The crates that decide whether a statement is trustworthy.
 ///
 /// Nothing here may reach the network on any path, under any feature. A
 /// verdict that depends on a socket is a verdict that can be changed by
 /// whoever controls the socket.
-const CORE: &[&str] = &["scitt-receipt", "scitt-policy"];
+const CORE: &[&str] = &[
+    "scitt-receipt",
+    "scitt-policy",
+    "scitt-adapter-azure-confidential-ledger",
+];
+const OFFLINE_SOURCE_ROOTS: &[&str] = &[
+    "crates/scitt-verifier/src",
+    "crates/scitt-receipt/src",
+    "crates/scitt-policy/src",
+    "adapters/azure-confidential-ledger/src",
+];
 
 const SOCKET_APIS: &[&str] = &["std::net", "TcpStream", "TcpListener", "UdpSocket"];
 
@@ -225,8 +235,8 @@ fn no_source_file_reaches_for_a_socket() {
     // is always available and needs no lockfile entry.
     let mut offenders = Vec::new();
 
-    for crate_dir in ["scitt-verifier", "scitt-receipt", "scitt-policy"] {
-        let src = repo_root().join("crates").join(crate_dir).join("src");
+    for source_root in OFFLINE_SOURCE_ROOTS {
+        let src = repo_root().join(source_root);
         assert!(src.is_dir(), "expected {} to exist", src.display());
         visit(&src, &mut |path, body| {
             for needle in socket_apis_in(body) {
@@ -259,8 +269,8 @@ fn the_detectors_actually_detect() {
     );
 
     let walled =
-        "[[package]]\nname = \"scitt-verifier\"\ndependencies = [\n \"scitt-acquire\",\n]\n\
-                  \n[[package]]\nname = \"scitt-acquire\"\ndependencies = [\n \"ureq\",\n]\n\
+        "[[package]]\nname = \"scitt-verifier\"\ndependencies = [\n \"scitt-network\",\n]\n\
+                  \n[[package]]\nname = \"scitt-network\"\ndependencies = [\n \"ureq\",\n]\n\
                   \n[[package]]\nname = \"ureq\"\n";
     let g = dependency_graph(walled);
     assert!(
@@ -309,13 +319,10 @@ fn the_detectors_actually_detect() {
 /// socket test above would pass for the wrong reason forever.
 #[test]
 fn the_source_walk_reaches_every_crate() {
-    for crate_dir in ["scitt-verifier", "scitt-receipt", "scitt-policy"] {
+    for source_root in OFFLINE_SOURCE_ROOTS {
         let mut seen = 0usize;
-        visit(
-            &repo_root().join("crates").join(crate_dir).join("src"),
-            &mut |_, _| seen += 1,
-        );
-        assert!(seen > 0, "walked no .rs files in {crate_dir}");
+        visit(&repo_root().join(source_root), &mut |_, _| seen += 1);
+        assert!(seen > 0, "walked no .rs files in {source_root}");
     }
 }
 
@@ -360,11 +367,10 @@ fn docs_report_what_they_claim() {
     );
 
     let mut sources = String::new();
-    for crate_dir in ["scitt-verifier", "scitt-receipt", "scitt-policy"] {
-        visit(
-            &repo_root().join("crates").join(crate_dir).join("src"),
-            &mut |_, body| sources.push_str(body),
-        );
+    for source_root in OFFLINE_SOURCE_ROOTS {
+        visit(&repo_root().join(source_root), &mut |_, body| {
+            sources.push_str(body)
+        });
     }
 
     let missing: Vec<&String> = named

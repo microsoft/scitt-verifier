@@ -17,6 +17,16 @@ const AZURE_IDENTITY_HOST: &str = "identity.confidential-ledger.core.azure.com";
 /// Path on the ledger that serves the receipt-verification key set.
 pub const KEYSET_PATH: &str = "/.well-known/scitt-keys";
 
+/// Path on the ledger that serves each node's attestation report.
+pub const QUOTES_PATH: &str = "/node/quotes";
+
+/// Path on the ledger that serves the node certificates.
+///
+/// The api-version is pinned rather than left to the service's default: a
+/// later version may rename a field or change what one means, and this build
+/// would go on reading the response as though it had not.
+pub const NODES_PATH: &str = "/gov/service/nodes?api-version=2024-07-01";
+
 /// A bootstrap route for one ledger.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Route {
@@ -28,6 +38,12 @@ pub struct Route {
     pub identity_url: String,
     /// Where the key set is fetched from, authenticated by that certificate.
     pub keyset_url: String,
+    /// Where node attestation reports are fetched from, authenticated by that
+    /// certificate.
+    pub quotes_url: String,
+    /// Where node certificates are fetched from, authenticated by that
+    /// certificate.
+    pub nodes_url: String,
 }
 
 /// Resolve a ledger issuer to a bootstrap route.
@@ -55,6 +71,8 @@ pub fn route_for(issuer: &str) -> Result<Route, AcquireError> {
             provider: "azure-public",
             identity_url: format!("https://{AZURE_IDENTITY_HOST}/ledgerIdentity/{name}"),
             keyset_url: format!("https://{issuer}{KEYSET_PATH}"),
+            quotes_url: format!("https://{issuer}{QUOTES_PATH}"),
+            nodes_url: format!("https://{issuer}{NODES_PATH}"),
         });
     }
 
@@ -151,6 +169,17 @@ mod tests {
         assert_eq!(
             r.keyset_url,
             "https://example-ledger.confidential-ledger.azure.com/.well-known/scitt-keys"
+        );
+        assert_eq!(
+            r.quotes_url,
+            "https://example-ledger.confidential-ledger.azure.com/node/quotes"
+        );
+        // The api-version is part of the pinned URL. If it ever moves, this
+        // test is the record that it was a decision rather than a drift.
+        assert_eq!(
+            r.nodes_url,
+            "https://example-ledger.confidential-ledger.azure.com\
+             /gov/service/nodes?api-version=2024-07-01"
         );
     }
 

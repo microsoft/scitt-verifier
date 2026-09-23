@@ -71,59 +71,13 @@ pub struct Decoded {
 pub fn decode(statement: &Sign1, request: &Request, verbose: bool) -> Result<Decoded, String> {
     let at = scitt_policy::describe_path(&request.path);
 
-    let Some(payload) = &statement.payload else {
-        return Err(format!(
-            "{at}: the statement has a detached payload, so there is nothing here to read"
-        ));
-    };
-
-    // The same rule `payloadJson` and the claim listing follow: only a payload
-    // the statement *declares* to be JSON is parsed. Sniffing the bytes would
-    // decode a structure the issuer never claimed was there.
-    let Some(content_type) = statement.content_type() else {
-        return Err(format!(
-            "{at}: the statement declares no content type, so nothing says its payload is JSON"
-        ));
-    };
-    if !scitt_policy::declares_json(&content_type) {
-        return Err(format!(
-            "{at}: the statement declares its payload to be '{content_type}', not JSON, so it has \
-             no claims to address"
-        ));
-    }
-
-    // The strict parser, not `serde_json::from_slice`. It refuses duplicate
-    // object keys, which matters here more than anywhere: a payload carrying
-    // `{"policy":"YQ==","policy":"Yg=="}` has two answers for one path, and a
-    // permissive parser silently takes the last. This would then publish a
-    // digest for one of two values the producer offered, while a `payloadJson`
-    // rule over the same document refused it as ambiguous. Extraction and
-    // evaluation must agree about what a document says, not just about how a
-    // path walks it.
-    let document = scitt_policy::parse_payload_json(payload).map_err(|why| {
-        format!("{at}: the payload is not valid JSON, despite the declared content type: {why}")
-    })?;
-
-    let found = scitt_policy::resolve_json_path(&document, &request.path)
-        .map_err(|why| format!("{at}: {why}"))?;
-
-    let Some(value) = found else {
-        return Err(format!("{at}: no such claim"));
-    };
-
-    let serde_json::Value::String(encoded) = value else {
-        return Err(format!(
-            "{at}: the claim is {}, and only a string can carry an encoded value",
-            describe_type(value)
-        ));
-    };
-
-    let bytes = scitt_receipt::base64::decode(request.alphabet, encoded).map_err(|why| {
-        format!(
-            "{at}: the claim is not valid {}: {why}",
-            request.alphabet.name()
-        )
-    })?;
+    // The shared extraction, not a second copy of it. An adapter comparing a
+    // digest against an attested value reads the field through this same
+    // function, so a digest printed here and a digest compared there are over
+    // the same bytes by construction rather than by review.
+    let bytes =
+        scitt_policy::claim::encoded_claim_bytes(statement, &request.path, request.alphabet)
+            .map_err(|why| format!("{at}: {}", why.describe()))?;
 
     let sha256 = scitt_receipt::sha256_hex(&bytes);
     let (preview, preview_truncated, utf8) = preview(&bytes, verbose);
@@ -184,17 +138,6 @@ fn escape(c: char) -> String {
         '\n' | '\t' => c.to_string(),
         c if c.is_control() => format!("\\u{{{:04x}}}", c as u32),
         c => c.to_string(),
-    }
-}
-
-fn describe_type(value: &serde_json::Value) -> &'static str {
-    match value {
-        serde_json::Value::Null => "null",
-        serde_json::Value::Bool(_) => "a boolean",
-        serde_json::Value::Number(_) => "a number",
-        serde_json::Value::String(_) => "a string",
-        serde_json::Value::Array(_) => "an array",
-        serde_json::Value::Object(_) => "an object",
     }
 }
 

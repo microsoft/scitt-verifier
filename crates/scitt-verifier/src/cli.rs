@@ -6,7 +6,7 @@
 //! ignores `--require-two-receipts` because it was renamed last release is a
 //! gate that reports success for a check nobody ran.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub const USAGE: &str = r#"scitt-verifier — verify SCITT transparent statements
 
@@ -70,8 +70,12 @@ VERIFY OPTIONS:
                              but only against the root the statement carries —
                              internally consistent, not externally trusted.
     --artifact <FILE>        The artifact the statement should describe.
-    --binding-mode <MODE>    none | payload-bytes | payload-digest         [default: none]
+    --binding-mode <MODE>    none | payload-bytes | payload-digest. Builds with
+                             a ledger adapter offer more — see below. [default: none]
     --format <FORMAT>        text | json                                   [default: text]
+    --verbose, -v            Show detailed progress, full evidence values, and
+                             the completed evidence report. Default text is
+                             a compact explanatory transcript; JSON is unchanged.
     --result <FILE>          Write the verification record to a file. This is
                              byte-for-byte the same document --format json
                              prints to stdout; the flag chooses the sink, not
@@ -101,12 +105,66 @@ EXIT CODES:
     3  could not be evaluated — missing trust material or unsupported feature
     4  usage or input error
 
-VERDICTS (exit 0 is two different claims — see docs/output.md):
+VERDICTS (exit 0 is more than one claim — see docs/output.md):
     artifact-transparent   the artifact you supplied is the one that was registered
     statement-transparent  the statement is transparent, but no artifact was checked
 
 Exit 3 is not a pass. It means the tool could not answer the question.
 "#;
+
+/// Help for the ledger-evidence binding mode, when this build has it.
+///
+/// Gated so an adapter-less build never advertises a mode it cannot run.
+/// Printing it unconditionally would send an operator to write a policy
+/// section and capture a bundle for a binary that would then refuse both.
+#[cfg(feature = "adapter-azure-confidential-ledger")]
+pub const ADAPTER_USAGE: &str = r#"
+LEDGER EVIDENCE (azure-confidential-ledger adapter):
+    --binding-mode live-evidence
+                             Collect the ledger's attestation evidence now and
+                             appraise it. Requires --adapter and --online.
+    --binding-mode saved-evidence
+                             Appraise a previously captured bundle instead.
+                             Requires --adapter and --evidence.
+    --adapter <NAME>         azure-confidential-ledger
+    --evidence <DIR>         A bundle captured from the ledger, containing
+                             snapshot.json and the per-node evidence it names.
+    --save-evidence <DIR>    With live-evidence, write what was collected so the
+                             run can be replayed offline later.
+
+Answers one question: does the execution policy embedded in this statement
+equal the policy the ledger's attested nodes are enforcing?
+
+The ledger under appraisal is named by `adapters.azure-confidential-ledger.target.host` in the policy —
+which is usually *not* the transparency service that issued the receipt. A
+production transparency service notarises builds for many deployments; the
+statement describes one of them. Evidence from anywhere else is refused rather
+than appraised.
+
+The target ledger, its trust inputs and the acceptance requirements come from
+the policy document — never from the command line. A flag can be edited in a
+pipeline definition to point at a ledger that would happily attest to its own
+policy; a committed policy file gets reviewed.
+
+Prefer live-evidence. A saved bundle carries the service certificate that
+identity binding is checked against, so the subject of the appraisal also
+supplies its own anchor: a bundle collected from somebody else's ledger is
+internally consistent and passes. A live run takes that certificate from the
+public identity service instead, so a substituted ledger cannot substitute the
+anchor with it.
+
+Neither mode establishes freshness or connection binding, which are reported
+NOT EVALUATED and will stay that way: CCF offers no challenge-response
+attestation, and the endpoint load-balances per connection. A live run reports
+when it observed the nodes; a saved one reports when someone else did.
+
+    resource-transparent   the statement is transparent, and the appraised
+                           nodes enforce the policy it embeds
+"#;
+
+/// Nothing to add: this build has no adapter.
+#[cfg(not(feature = "adapter-azure-confidential-ledger"))]
+pub const ADAPTER_USAGE: &str = "";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BindingMode {
@@ -118,6 +176,48 @@ pub enum BindingMode {
     /// digest of the artifact, produced with the algorithm named in the
     /// protected header.
     PayloadDigest,
+    /// Appraise saved attestation evidence against the statement.
+    ///
+    /// A separate mode rather than a flag on the others, so the weaker claim
+    /// cannot be reached by accident. Replaying a recorded bundle is an
+    /// appraisal of evidence, not an observation of a live service, and the
+    /// two must not share a spelling: a pipeline that meant to check a running
+    /// ledger would otherwise pass while checking a file that was captured
+    /// months ago.
+    SavedEvidence,
+    /// Collect the ledger's attestation evidence now, and appraise it.
+    ///
+    /// Distinct from `SavedEvidence` because the anchor differs, not because
+    /// the checks do. Here the service certificate comes from the public
+    /// identity service, so the ledger cannot supply the thing it is being
+    /// checked against.
+    LiveEvidence,
+}
+
+impl BindingMode {
+    /// Whether this mode runs a resource adapter rather than an artifact check.
+    pub fn is_evidence(self) -> bool {
+        matches!(self, BindingMode::SavedEvidence | BindingMode::LiveEvidence)
+    }
+}
+
+/// Which adapter supplies the resource appraisal.
+///
+/// Named on the command line even though there is one of them, because the
+/// adapter decides what the evidence *means*, and a run's record has to say
+/// which set of rules produced its result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Adapter {
+    /// Azure Confidential Ledger nodes attested with SEV-SNP.
+    AzureConfidentialLedger,
+}
+
+impl Adapter {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Adapter::AzureConfidentialLedger => "azure-confidential-ledger",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,7 +285,19 @@ pub struct VerifyArgs {
     pub policy: PathBuf,
     pub artifact: Option<PathBuf>,
     pub binding_mode: BindingMode,
+    /// The adapter to appraise resource evidence with, if any.
+    pub adapter: Option<Adapter>,
+    /// The saved evidence bundle to appraise.
+    pub evidence: Option<PathBuf>,
+    /// Where to write evidence collected from a live ledger, if asked for.
+    ///
+    /// Live-only, for the same reason `--save-keys` is online-only: there is
+    /// nothing this run collected to save when it appraised a bundle someone
+    /// else recorded, and accepting the flag anyway would imply it had.
+    pub save_evidence: Option<PathBuf>,
     pub format: Format,
+    /// Include the completed evidence report in human-readable output.
+    pub verbose: bool,
     pub result: Option<PathBuf>,
     /// Where to write the observations-only projection, if asked for.
     ///
@@ -238,7 +350,11 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     let mut policy = None;
     let mut artifact = None;
     let mut binding_mode = None;
+    let mut adapter = None;
+    let mut evidence = None;
+    let mut save_evidence = None;
     let mut format = Format::Text;
+    let mut verbose = false;
     let mut result = None;
     let mut facts = None;
     let mut trusted_roots = None;
@@ -262,14 +378,29 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                     "none" => BindingMode::None,
                     "payload-bytes" => BindingMode::PayloadBytes,
                     "payload-digest" => BindingMode::PayloadDigest,
+                    "saved-evidence" => BindingMode::SavedEvidence,
+                    "live-evidence" => BindingMode::LiveEvidence,
                     other => {
                         return Err(format!(
-                            "unknown binding mode '{other}'; expected 'none', 'payload-bytes' \
-                             or 'payload-digest'"
+                            "unknown binding mode '{other}'; expected 'none', 'payload-bytes', \
+                             'payload-digest', 'saved-evidence' or 'live-evidence'"
                         ))
                     }
                 });
             }
+            "--adapter" => {
+                let raw = value(&mut it, flag)?;
+                adapter = Some(match raw.as_str() {
+                    "azure-confidential-ledger" => Adapter::AzureConfidentialLedger,
+                    other => {
+                        return Err(format!(
+                            "unknown adapter '{other}'; expected 'azure-confidential-ledger'"
+                        ))
+                    }
+                });
+            }
+            "--evidence" => evidence = Some(PathBuf::from(value(&mut it, flag)?)),
+            "--save-evidence" => save_evidence = Some(PathBuf::from(value(&mut it, flag)?)),
             "--format" => {
                 format = match value(&mut it, flag)?.as_str() {
                     "text" => Format::Text,
@@ -279,6 +410,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                     }
                 }
             }
+            "--verbose" | "-v" => verbose = true,
             "--now" => {
                 let raw = value(&mut it, flag)?;
                 now = Some(
@@ -349,6 +481,11 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     )?;
 
     let binding_mode = binding_mode.unwrap_or(BindingMode::None);
+    let artifact_mode = matches!(
+        binding_mode,
+        BindingMode::PayloadBytes | BindingMode::PayloadDigest
+    );
+
     if artifact.is_some() && binding_mode == BindingMode::None {
         return Err(
             "--artifact was supplied but --binding-mode is 'none', so the artifact would be \
@@ -356,8 +493,96 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 .into(),
         );
     }
-    if artifact.is_none() && binding_mode != BindingMode::None {
+    if artifact.is_none() && artifact_mode {
         return Err("--binding-mode requires --artifact".into());
+    }
+    // Refused rather than silently ignoring one of them. The two modes answer
+    // different questions, and a run that quietly dropped the artifact check
+    // would report on the ledger while an operator believed it had also
+    // checked what they were deploying.
+    if artifact.is_some() && binding_mode.is_evidence() {
+        return Err(
+            "--binding-mode saved-evidence and live-evidence appraise adapter evidence and make \
+             no claim about an artifact, so --artifact would be ignored. Run the artifact \
+             binding as a separate invocation."
+                .into(),
+        );
+    }
+
+    // Each evidence flag is useless without the others, and a partial set must
+    // not look like a configured run.
+    if binding_mode.is_evidence() {
+        if adapter.is_none() {
+            return Err(
+                "an evidence binding mode requires --adapter; the adapter decides what the \
+                 evidence means, and a result has to record which rules produced it"
+                    .into(),
+            );
+        }
+    } else if adapter.is_some() {
+        return Err(
+            "--adapter was supplied but --binding-mode is not an evidence mode, so no \
+             evidence would be appraised"
+                .into(),
+        );
+    }
+
+    if binding_mode == BindingMode::SavedEvidence && evidence.is_none() {
+        return Err("--binding-mode saved-evidence requires --evidence <DIR>".into());
+    }
+    if binding_mode != BindingMode::SavedEvidence && evidence.is_some() {
+        return Err(
+            "--evidence supplies a recorded bundle, which only means something with \
+             --binding-mode saved-evidence. A live run collects its own evidence, and \
+             appraising a bundle instead would answer a different question."
+                .into(),
+        );
+    }
+
+    // Live collection is a network operation, and this tool has exactly one
+    // way to say a run may reach the network. Inferring one from the binding
+    // mode would let an offline-looking command line make requests.
+    if binding_mode == BindingMode::LiveEvidence && !matches!(trust, TrustSource::Online { .. }) {
+        return Err(
+            "--binding-mode live-evidence collects evidence from the ledger, so it requires \
+             --online. An offline run cannot observe a service; use --binding-mode \
+             saved-evidence with a bundle captured earlier."
+                .into(),
+        );
+    }
+    if save_evidence.is_some() && binding_mode != BindingMode::LiveEvidence {
+        return Err(
+            "--save-evidence preserves evidence this run collected, so it only means \
+             something with --binding-mode live-evidence."
+                .into(),
+        );
+    }
+
+    // A record describes a conclusion; a saved bundle is the evidence that
+    // conclusion was drawn from. Writing the former into the latter overwrites
+    // `snapshot.json` or a node file with JSON that is not evidence, and the
+    // record write succeeds, so the run still exits 0 having destroyed what a
+    // later replay needs. Refused before anything is collected, so no bundle
+    // exists to be half-written when the mistake is caught.
+    for (dir, flag) in [
+        (save_evidence.as_deref(), "--save-evidence"),
+        (save_trust.as_deref(), "--save-trust"),
+    ] {
+        let Some(dir) = dir else { continue };
+        for (path, name) in [
+            (result.as_deref(), "--result"),
+            (facts.as_deref(), "--facts"),
+        ] {
+            let Some(path) = path else { continue };
+            if within(dir, path) {
+                return Err(format!(
+                    "{name} would write {} inside the {flag} directory {}, overwriting evidence \
+                     this run is about to save. Name a path outside that directory.",
+                    path.display(),
+                    dir.display()
+                ));
+            }
+        }
     }
 
     Ok(Command::Verify(Box::new(VerifyArgs {
@@ -366,13 +591,57 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         policy,
         artifact,
         binding_mode,
+        adapter,
+        evidence,
+        save_evidence,
         format,
+        verbose,
         result,
         facts,
         save_trust,
         trusted_roots,
         now,
     })))
+}
+
+/// Whether `path` would be written inside `dir`.
+///
+/// Either may not exist yet — the point is to refuse before anything is
+/// created — so `canonicalize` is applied to the deepest ancestor that does
+/// exist and the remaining components are appended to it. That resolves the
+/// cases that actually arise here: a relative path, a trailing `.`, a `..`
+/// through a real directory, and a symlinked parent.
+///
+/// When nothing on the path exists the comparison falls back to the path
+/// joined to the working directory, which does not collapse `..`. A false
+/// negative there is a missed refusal rather than a wrong one, and the write
+/// it fails to catch is into a directory tree that does not exist yet, so
+/// there is no evidence in it to destroy.
+fn within(dir: &Path, path: &Path) -> bool {
+    resolve(path).starts_with(resolve(dir))
+}
+
+fn resolve(p: &Path) -> PathBuf {
+    let mut trailing = Vec::new();
+    let mut cur = p.to_path_buf();
+    loop {
+        if let Ok(existing) = cur.canonicalize() {
+            let mut out = existing;
+            out.extend(trailing.iter().rev());
+            return out;
+        }
+        let (Some(name), Some(parent)) = (
+            cur.file_name().map(|n| n.to_os_string()),
+            cur.parent().map(Path::to_path_buf),
+        ) else {
+            break;
+        };
+        trailing.push(name);
+        cur = parent;
+    }
+    let mut out = std::env::current_dir().unwrap_or_default();
+    out.push(p);
+    out
 }
 
 fn parse_inspect<'a>(mut it: impl Iterator<Item = &'a String>) -> Result<Command, String> {
@@ -464,6 +733,143 @@ mod tests {
     fn policy_is_mandatory() {
         let err = parse(&args(&["verify", "--statement", "a", "--scitt-keys", "b"])).unwrap_err();
         assert!(err.contains("--policy is required"), "{err}");
+    }
+
+    /// Collecting evidence is a network operation, and only one flag may
+    /// authorise one. A binding mode that implied network access would let an
+    /// offline-looking command line make requests.
+    #[test]
+    fn live_evidence_requires_online() {
+        let err = parse(&args(&[
+            "verify",
+            "--statement",
+            "a",
+            "--scitt-keys",
+            "k",
+            "--policy",
+            "p",
+            "--binding-mode",
+            "live-evidence",
+            "--adapter",
+            "azure-confidential-ledger",
+        ]))
+        .unwrap_err();
+        assert!(err.contains("requires --online"), "{err}");
+    }
+
+    /// A record written into the bundle directory destroys the bundle.
+    ///
+    /// `--save-evidence d --result d\snapshot.json` overwrites the manifest
+    /// the adapter has just written with a verification record, and the record
+    /// write succeeds, so the run still exits 0 having made the bundle
+    /// unreplayable. Refused during parsing, before anything is collected.
+    #[test]
+    fn a_record_written_into_the_saved_bundle_is_refused() {
+        let live = |result: &str| {
+            parse(&args(&[
+                "verify",
+                "--statement",
+                "a",
+                "--online",
+                "--policy",
+                "p",
+                "--binding-mode",
+                "live-evidence",
+                "--adapter",
+                "azure-confidential-ledger",
+                "--save-evidence",
+                "bundle",
+                "--result",
+                result,
+            ]))
+        };
+
+        for inside in [
+            "bundle/snapshot.json",
+            "bundle/nested/record.json",
+            "bundle",
+        ] {
+            let err = live(inside).unwrap_err();
+            assert!(err.contains("--save-evidence"), "{inside}: {err}");
+            assert!(err.contains("overwriting evidence"), "{inside}: {err}");
+        }
+
+        // A sibling directory whose name merely starts with the same letters
+        // is not inside it; refusing that would be a false positive.
+        live("bundle-record.json").unwrap();
+        live("elsewhere/record.json").unwrap();
+    }
+
+    /// A live run collects its own evidence. Handing it a bundle as well would
+    /// leave which one was appraised to whichever branch ran first.
+    #[test]
+    fn a_live_run_refuses_a_recorded_bundle() {
+        let err = parse(&args(&[
+            "verify",
+            "--statement",
+            "a",
+            "--online",
+            "--policy",
+            "p",
+            "--binding-mode",
+            "live-evidence",
+            "--adapter",
+            "azure-confidential-ledger",
+            "--evidence",
+            "dir",
+        ]))
+        .unwrap_err();
+        assert!(err.contains("--binding-mode saved-evidence"), "{err}");
+    }
+
+    /// `--save-evidence` preserves what this run collected. With nothing
+    /// collected it would name a file that was never going to exist.
+    #[test]
+    fn save_evidence_without_a_live_run_is_refused() {
+        let err = parse(&args(&[
+            "verify",
+            "--statement",
+            "a",
+            "--scitt-keys",
+            "k",
+            "--policy",
+            "p",
+            "--binding-mode",
+            "saved-evidence",
+            "--adapter",
+            "azure-confidential-ledger",
+            "--evidence",
+            "dir",
+            "--save-evidence",
+            "out",
+        ]))
+        .unwrap_err();
+        assert!(err.contains("--save-evidence"), "{err}");
+    }
+
+    #[test]
+    fn a_live_run_parses() {
+        let parsed = parse(&args(&[
+            "verify",
+            "--statement",
+            "a",
+            "--online",
+            "--policy",
+            "p",
+            "--binding-mode",
+            "live-evidence",
+            "--adapter",
+            "azure-confidential-ledger",
+            "--save-evidence",
+            "out",
+        ]))
+        .expect("parses");
+        let Command::Verify(v) = parsed else {
+            panic!("expected verify")
+        };
+        assert_eq!(v.binding_mode, BindingMode::LiveEvidence);
+        assert_eq!(v.save_evidence, Some(PathBuf::from("out")));
+        assert!(v.evidence.is_none());
     }
 
     /// A flag the parser does not know must fail, not be ignored. A gate that

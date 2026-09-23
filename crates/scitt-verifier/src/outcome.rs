@@ -25,11 +25,35 @@ use scitt_receipt::StatementFacts;
 pub enum Verdict {
     /// The statement is transparent *and* it describes the artifact supplied.
     ArtifactTransparent,
+    /// The statement is transparent, and the appraised ledger nodes enforce
+    /// the execution policy it embeds.
+    ///
+    /// A third success rather than a reuse of `ArtifactTransparent` because it
+    /// is a different claim about a different subject: one is about a file on
+    /// disk, this is about what a service is running. A gate that accepted
+    /// either without distinguishing them could be satisfied by the wrong one.
+    ///
+    /// Always scoped. It is a statement about the node set that was assessed,
+    /// and — for saved evidence — about a recording, not a live observation.
+    /// The caller is responsible for saying so; see `report.rs`.
+    ResourceTransparent,
     /// The statement is transparent, but no artifact binding was requested,
     /// so this run says nothing about what is being deployed.
     StatementTransparent,
     Untrusted,
     PolicyFailed,
+    /// An adapter's requirement about the ledger was not met.
+    ///
+    /// Its own verdict rather than a reuse of `PolicyFailed` because the two
+    /// name different subjects, and the human report prints both: a run whose
+    /// policy assertions all passed but whose ledger check failed would
+    /// otherwise read `STOP policy-failed` above `Policy decision: pass`,
+    /// which invites the reader to distrust the report rather than the ledger.
+    ///
+    /// Deliberately the same exit code as `PolicyFailed`: to a pipeline, "the
+    /// ledger does not enforce the policy you demanded" and "the signer is not
+    /// the one you demanded" call for the same stop.
+    ResourceFailed,
     CannotEvaluate,
     UsageError,
 }
@@ -38,9 +62,11 @@ impl Verdict {
     pub fn as_str(self) -> &'static str {
         match self {
             Verdict::ArtifactTransparent => "artifact-transparent",
+            Verdict::ResourceTransparent => "resource-transparent",
             Verdict::StatementTransparent => "statement-transparent",
             Verdict::Untrusted => "untrusted",
             Verdict::PolicyFailed => "policy-failed",
+            Verdict::ResourceFailed => "resource-failed",
             Verdict::CannotEvaluate => "cannot-evaluate",
             Verdict::UsageError => "usage-error",
         }
@@ -49,8 +75,9 @@ impl Verdict {
     pub fn exit_code(self) -> u8 {
         match self {
             Verdict::ArtifactTransparent | Verdict::StatementTransparent => 0,
+            Verdict::ResourceTransparent => 0,
             Verdict::Untrusted => 1,
-            Verdict::PolicyFailed => 2,
+            Verdict::PolicyFailed | Verdict::ResourceFailed => 2,
             Verdict::CannotEvaluate => 3,
             Verdict::UsageError => 4,
         }
@@ -59,7 +86,9 @@ impl Verdict {
     pub fn is_pass(self) -> bool {
         matches!(
             self,
-            Verdict::ArtifactTransparent | Verdict::StatementTransparent
+            Verdict::ArtifactTransparent
+                | Verdict::ResourceTransparent
+                | Verdict::StatementTransparent
         )
     }
 
@@ -214,12 +243,91 @@ impl CheckState {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+/// A check contributed by an adapter, rather than one of the fixed core four.
+///
+/// Named rather than positional because the set is open: an adapter decides
+/// what it establishes, and the core cannot enumerate that in advance. The
+/// `azure-confidential-ledger` adapter alone contributes identity binding, SNP/UVM
+/// validation, policy comparison, node coverage, and two checks it reports as
+/// permanently unevaluated.
+///
+/// There is deliberately no verdict here. An adapter reports what it found;
+/// only the CLI decides what that means, and it may narrow the verdict but
+/// never widen it. An adapter that could hand back a verdict could turn
+/// missing evidence into success.
+#[derive(Debug, Clone)]
+pub struct AdapterCheck {
+    /// Stable machine name for the record, e.g. `ledger-identity-binding`.
+    pub name: String,
+    /// The human label, for the report.
+    pub label: String,
+    pub state: CheckState,
+    /// What was established, or why it could not be.
+    pub detail: String,
+}
+
+/// One adapter finding about one named subject.
+///
+/// Kept generic so progress and records can expose per-subject results without
+/// teaching the CLI about SNP reports, HOST_DATA, or any future adapter's
+/// domain vocabulary.
+#[derive(Debug, Clone)]
+pub struct AdapterFinding {
+    pub check: String,
+    pub subject: String,
+    pub state: CheckState,
+    pub detail: String,
+    pub expected: Option<String>,
+    pub observed: Option<String>,
+}
+
+/// What this run checked, and what it did not.
+///
+/// The four core checks are fixed fields because every run has an answer for
+/// each of them, even if that answer is `NotChecked`. Adapter checks are a
+/// list because the set is open and only the selected adapter knows it.
+#[derive(Debug, Clone)]
 pub struct Checks {
     pub statement_signature: CheckState,
     pub receipt_inclusion: CheckState,
     pub artifact_binding: CheckState,
     pub policy: CheckState,
+    /// Empty for every run that selected no adapter, which is the default.
+    pub adapter: Vec<AdapterCheck>,
+    /// The names in `adapter` that had to pass for the adapter's claim to
+    /// hold, as the adapter itself declared them.
+    ///
+    /// Carried alongside the results because the list of checks alone cannot
+    /// answer whether the policy was met: an adapter may report a check it
+    /// knows can never pass — `freshness` against CCF, say — which bounds the
+    /// claim rather than deciding it. Reading "every check passed" off the
+    /// results would make every genuine success look like a failure.
+    pub adapter_required: Vec<String>,
+}
+
+/// Whether every required check ran exactly once and passed.
+///
+/// The one place this rule lives. `AdapterAssessment::blocking` decides the
+/// verdict with it and the record reports it, and those two answers disagreeing
+/// would mean the document contradicts the exit code that accompanied it.
+///
+/// An empty contract is not satisfaction. An adapter that declared nothing
+/// required has established nothing, and treating that as a pass would let a
+/// stub adapter authorise a deployment.
+pub fn required_checks_pass(checks: &[AdapterCheck], required: &[String]) -> bool {
+    if required.is_empty() {
+        return false;
+    }
+    required.iter().all(|name| {
+        let mut matches = checks.iter().filter(|check| check.name == *name);
+        // A duplicate is refused rather than resolved: two entries under one
+        // name mean the adapter contradicted itself, and picking either would
+        // be this code deciding which of them to believe.
+        matches!(
+            (matches.next(), matches.next()),
+            (Some(check), None) if check.state == CheckState::Pass
+        )
+    })
 }
 
 impl Checks {
@@ -231,6 +339,8 @@ impl Checks {
             receipt_inclusion: CheckState::NotChecked,
             artifact_binding: CheckState::NotChecked,
             policy: CheckState::NotChecked,
+            adapter: Vec::new(),
+            adapter_required: Vec::new(),
         }
     }
 }
@@ -344,8 +454,8 @@ impl Trust {
 pub struct Acquisition {
     /// The issuers selection authorised, in request order.
     pub selected: Vec<String>,
-    pub acquired: Vec<scitt_acquire::Acquired>,
-    pub failed: Vec<scitt_acquire::Failed>,
+    pub acquired: Vec<scitt_network::Acquired>,
+    pub failed: Vec<scitt_network::Failed>,
     /// Set when selection stopped before any request was made, with the reason.
     pub not_attempted: Option<String>,
 }
@@ -356,6 +466,7 @@ pub struct Assessment {
     pub primary: Option<Diagnostic>,
     pub diagnostics: Vec<Diagnostic>,
     pub checks: Checks,
+    pub adapter_findings: Vec<AdapterFinding>,
     pub not_checked: Vec<Gap>,
     pub trust: Trust,
     pub facts: Option<StatementFacts>,
@@ -383,6 +494,7 @@ impl Assessment {
             diagnostics: vec![primary.clone()],
             primary: Some(primary),
             checks: Checks::none(),
+            adapter_findings: Vec::new(),
             not_checked,
             trust,
             facts: None,
@@ -465,6 +577,7 @@ mod tests {
         for v in [
             Verdict::Untrusted,
             Verdict::PolicyFailed,
+            Verdict::ResourceFailed,
             Verdict::CannotEvaluate,
             Verdict::UsageError,
         ] {
@@ -500,6 +613,10 @@ mod tests {
         );
         assert_eq!(a.checks.statement_signature, CheckState::NotChecked);
         assert_eq!(a.checks.policy, CheckState::NotChecked);
+        // An early stop has established nothing, least of all an adapter
+        // finding. A non-empty list here would be a claim about evidence that
+        // was never gathered.
+        assert!(a.checks.adapter.is_empty());
         assert!(a.primary.is_some());
         assert_eq!(a.diagnostics.len(), 1);
         // A run that stopped early has more gaps than one that finished, so

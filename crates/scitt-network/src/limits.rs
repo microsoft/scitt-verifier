@@ -39,6 +39,25 @@ pub const MAX_IDENTITY_BYTES: usize = 64 * 1024;
 /// that retains many rotations while still refusing an endless stream.
 pub const MAX_KEYSET_BYTES: usize = 256 * 1024;
 
+/// Largest node-quotes response we will read.
+///
+/// An SNP report is 1184 bytes, but each node's entry also carries an AMD
+/// certificate chain and a UVM endorsement, which dominate: observed at
+/// roughly 25 KB per node. This allows a large fleet while still refusing an
+/// endless stream.
+pub const MAX_QUOTES_BYTES: usize = 8 * 1024 * 1024;
+
+/// Largest service-nodes response we will read.
+///
+/// One certificate and a little metadata per node, around 16 KB observed.
+pub const MAX_NODES_BYTES: usize = 4 * 1024 * 1024;
+
+/// Most nodes one run will appraise.
+///
+/// Bounds the work before any parsing, so a response claiming an implausible
+/// fleet is refused rather than expanded in memory.
+pub const MAX_NODES: usize = 128;
+
 /// Most ledgers one run may contact.
 ///
 /// Receipts arrive in the statement's unprotected header bucket, which no

@@ -2,8 +2,10 @@
 
 ## What this repository is
 
-`scitt-verifier` decides whether a SCITT transparent statement is trustworthy,
-offline, and returns an exit code that pipelines branch on. It is a security
+`scitt-verifier` verifies SCITT transparent statements and evaluates the relying
+party's policy, offline by default. Artifact binding and resource adapters are
+optional; a deployed ledger is not the general subject of verification. Receipt
+proof support is currently CCF VDS only. It returns pipeline exit codes and is a security
 gate. The failure that matters is not a crash — it is a `PASS` printed for
 something nobody actually checked, because that answer is believed and acted on.
 
@@ -34,9 +36,10 @@ means "did not run" and must not be collapsed into success. Absent input yields
 `CONTRIBUTING.md`.
 
 Exit code 3 (`cannot-evaluate`) is **not** a pass. It means the tool could not
-answer. Code 0 is the only success, and it carries two distinct verdicts:
+answer. Code 0 is the only success, and it carries distinct verdicts:
 `artifact-transparent` (an artifact was supplied and matched) and
-`statement-transparent` (no artifact was checked). Do not blur them.
+`statement-transparent` (no artifact was checked), or `resource-transparent`
+(the selected adapter's scoped requirements held). Do not blur them.
 
 An unimplemented flag or assertion exits 4 with an explanation. Accepting and
 skipping it reports success for work nobody did.
@@ -46,14 +49,30 @@ skipping it reports success for work nobody did.
 Output, docs, and comments describe what this build actually does — not what is
 planned, and not what a reader might assume. Two live examples:
 
-* The signing certificate chain is **not** validated to a trusted root, and
-  revocation is never checked. Both appear in `appraisal.notChecked` at runtime.
+* Supported signing certificate chains are validated. Without independent
+  `--trusted-roots` or a policy pin to an independently selected root, an
+  embedded anchor establishes internal consistency, not external trust.
+  Unsupported chain checks and absent external anchoring are reported;
+  revocation is never checked.
 * A header this build does not interpret is printed and marked
   `(not interpreted)`. It is rendered so it can be audited, not because its
   contents were understood.
 
 If a change means something is no longer verified, add it to
 `appraisal.notChecked`. Runtime, not just documentation.
+
+## The report is part of the verdict
+
+Every value drawn from a statement, a policy or a bundle is untrusted text.
+Escape it on **every** path that reaches a terminal — the compact transcript,
+the verbose report and anything added later — or a crafted node label can emit
+newlines and terminal controls that scroll a failure away or forge a verdict
+line. `safe()` in `crates/scitt-verifier/src/report.rs` does the escaping; use
+it rather than formatting the value directly.
+
+A verdict that was not written was not delivered. Writing to stdout and
+flushing can fail, and the caller must handle the error rather than discard it;
+a pass whose record is missing or truncated is demoted, not reported as 0.
 
 ## Fixtures are real bytes
 
@@ -95,11 +114,34 @@ resolve the tension by committing the original.
 | Path | Role |
 |---|---|
 | `crates/scitt-receipt` | Core: parsing, crypto, receipts, binding. Embeddable — no I/O, no clock, no verdicts, no dependency on the other crates. CI's `boundary` job enforces this by grep |
-| `crates/scitt-policy` | Relying-party policy: parsing and evaluation |
-| `crates/scitt-verifier` | The CLI: argument handling, reporting, exit codes |
+| `crates/scitt-policy` | Statement assertions and typed requirements in `src/adapters/{mod.rs,acl.rs}`; no I/O |
+| `crates/scitt-network` | Network acquisition of receipt keys and resource evidence; no policy decisions |
+| `adapters/azure-confidential-ledger` | `scitt-adapter-azure-confidential-ledger`: pure appraisal of ACL/CCF node evidence; no I/O, no CLI verdicts. Renamed to `acl` inside `scitt-verifier`, because the published name is what a consumer types and `acl` alone means access-control list |
+| `crates/scitt-verifier` | CLI arguments, reporting, exit codes; `src/adapters/` owns dispatch, adapter orchestration, bundle loading and acquisition orchestration |
 | `crates/scitt-wasm` | Browser bindings and the demo page |
 | `corpus/` | Real fixtures and example policies |
-| `docs/` | `policy.md`, `output.md`, `trust-material.md`, `limitations.md`, `architecture.md`, `distribution.md` |
+| `docs/` | `policy.md`, `adapters.md`, `output.md`, `trust-material.md`, `limitations.md`, `architecture.md`, `distribution.md` |
+
+Policy JSON separates `assertions` from
+`adapters.azure-confidential-ledger.{target,trust,binding}`. The old top-level `ledger`/`trust`
+and `assertions.bindLedgerPolicy` shape is not supported.
+`Policy::evaluate` must not pass when required adapters cannot run; the CLI
+evaluates statement assertions and then adapters explicitly. Keep SNP/UVM
+types specific to the Azure Confidential Ledger adapter. There is no generic
+attestation crate or plugin framework.
+
+A requirement that does not apply to the evidence is not satisfied by it. A
+minimum TCB configured for one processor generation says nothing about a
+report from another, so the adapter demands a floor covering the generation it
+actually authenticated rather than letting an inapplicable minimum stand in
+for one. The same reasoning governs counting: node coverage counts distinct
+attested keys, because a saved bundle is unsigned and the cheapest forgery is
+one agreeing node copied under several names.
+
+Saved evidence is attacker-supplied input. `src/adapters/load.rs` bounds what
+it will read — file, manifest and total sizes, and node count — and refuses any
+path that leaves the bundle directory after canonicalisation, not just one that
+says `..`.
 
 Crypto and CBOR come from `tav-cose` / `tav-crypto`
 (microsoft/TEE-Attestation-Verification), pinned to an exact git revision. An
@@ -112,6 +154,14 @@ second crypto or CBOR dependency; check what TAV already exposes first.
 cargo fmt --all -- --check
 cargo clippy --all-targets      # not --all-features: crypto backends are exclusive
 cargo test --workspace
+```
+
+The adapter is behind a feature and is not built by the commands above. Lint
+and test it explicitly:
+
+```console
+cargo clippy -p scitt-verifier --features adapter-azure-confidential-ledger --all-targets
+cargo clippy -p scitt-adapter-azure-confidential-ledger --features azure-confidential-ledger --all-targets
 ```
 
 `RUSTFLAGS: -D warnings` in CI, so a warning is a failure. The release binary

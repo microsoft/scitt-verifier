@@ -7,8 +7,9 @@ cargo build
 cargo test
 ```
 
-No system dependencies. The default crypto backend is pure Rust, so there is no
-OpenSSL, no C compiler, and no platform linker to install.
+The default crypto backend is pure Rust, so it needs no OpenSSL installation.
+Native builds still need the linker required by the chosen Rust toolchain.
+The optional MST ledger adapter is enabled with `--features adapter-azure-confidential-ledger`.
 
 ## The rules that are not negotiable
 
@@ -59,6 +60,28 @@ regression is not an inconvenience — it is a false negative in a security gate
 
 Note that `deny_unknown_fields` means older binaries reject policies using your
 new assertion. That is intended, and worth mentioning in release notes.
+
+## Adapter and network boundaries
+
+Statement assertions belong in `assertions`; domain requirements belong under
+`adapters.<name>`, not in the statement rules. Typed Azure Confidential Ledger
+requirements live in `crates/scitt-policy/src/adapters/acl.rs`. Unknown adapter
+names and unknown fields are refused; there is no plugin discovery mechanism.
+
+`Policy::evaluate` must fail closed when adapter requirements cannot be run.
+The CLI explicitly evaluates the statement and then the selected adapter.
+Never make statement-only success stand in for the whole policy's acceptance.
+
+The pure `scitt-adapter-azure-confidential-ledger` package lives in `adapters/azure-confidential-ledger`.
+It consumes evidence and typed requirements, does no I/O, and returns findings
+rather than a CLI verdict. Keep SNP/UVM details there and in ledger-specific
+orchestration, not in a generic attestation model.
+`crates/scitt-verifier/src/adapters/` owns dispatch and file/bundle handling;
+all network I/O belongs in `crates/scitt-network`. Do not add a network client
+to the core, policy, or pure adapter.
+
+Preserve fail-closed behavior both with and without the optional build feature.
+See [architecture](docs/architecture.md) and [adapters](docs/adapters.md).
 
 ## Style
 

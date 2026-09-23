@@ -1,99 +1,324 @@
 //! Human-readable output.
 //!
-//! The design rule: a person reading this in a CI log at 2am should be able to
-//! tell, without scrolling, whether to deploy — and if not, whether the problem
-//! is the artifact or their own configuration.
+//! The completed verdict that follows the live verification transcript.
 //!
-//! That rule is why the verdict comes first. An earlier version printed the
-//! full statement, receipt, binding, and policy detail before the one line
-//! anybody actually needed, which meant the answer was the last thing on
-//! screen — and in a long pipeline log, often the part scrolled past.
+//! The transcript says what ran as it happened; this renderer states the final
+//! decision. The completed evidence report remains available with `--verbose`.
 
 use scitt_policy::{Outcome, PolicyDecision};
 use scitt_receipt::{CborValue, KeyLookup, Sign1, StatementFacts};
+use std::io::{self, Write};
 
+use crate::cli::{BindingMode, VerifyArgs};
 use crate::outcome::{Assessment, CheckState, Verdict};
+use crate::progress::safe_text;
+
+/// How much of one untrusted value the verbose report will print.
+///
+/// Larger than the progress transcript's limit because the verbose report
+/// exists to be read in full, but still a limit: a single unbounded value can
+/// push the verdict off the top of a terminal just as effectively as a
+/// forged one can imitate it.
+const DETAIL_LIMIT: usize = 4096;
+
+/// Escape a value that came from the statement, the ledger or the policy file.
+///
+/// Everything printed by this module that did not originate as a literal in
+/// this repository passes through here. A node id, a policy id or a diagnostic
+/// message quoting either can carry newlines and terminal control sequences,
+/// and an unescaped newline in the verbose report is enough to print a line
+/// that reads like a verdict, or to scroll a real one out of view. The
+/// progress transcript already escapes for the same reason; the completed
+/// report is the same text read by the same terminal.
+fn safe(value: &str) -> String {
+    safe_text(value, DETAIL_LIMIT)
+}
 
 /// Text longer than this is summarised unless `--verbose` is given.
 const TEXT_LIMIT: usize = 64;
 
-pub fn verify(a: &Assessment) {
-    headline(a);
-    println!();
-    detail(a);
+pub fn verify(out: &mut impl Write, a: &Assessment, verbose: bool, color: bool) -> io::Result<()> {
+    writeln!(out)?;
+    headline(out, a, color)?;
+    if verbose {
+        writeln!(out)?;
+        detail(out, a)?;
+    }
+    Ok(())
+}
+
+/// The transcript already carries check results. Keep the final decision and
+/// limitations, including diagnostics added while writing persistent records.
+pub fn compact(
+    out: &mut impl Write,
+    a: &Assessment,
+    args: &VerifyArgs,
+    color: bool,
+) -> io::Result<()> {
+    writeln!(
+        out,
+        "\n{}",
+        styled_verdict(a.verdict.banner(), a.verdict.as_str(), color)
+    )?;
+    let claim = match a.verdict {
+        Verdict::StatementTransparent => "Statement signature and receipt inclusion verified; relying-party policy satisfied.",
+        Verdict::ArtifactTransparent => "Supplied artifact matches the verified statement; relying-party policy satisfied.",
+        Verdict::ResourceTransparent => "Verified statement and assessed node evidence satisfy the scoped resource requirements.",
+        Verdict::CannotEvaluate => "This is not a pass. The tool could not answer the requested question.",
+        _ => "The requested acceptance requirements were not met.",
+    };
+    writeln!(out, "{claim}")?;
+    if a.trust.mode == "no-key-set" {
+        writeln!(out, "Trust material: {}", a.trust.describe())?;
+    }
+    if args.adapter.is_some() {
+        let scope = if a.adapter_findings.is_empty() {
+            "No node evidence was appraised."
+        } else if args.binding_mode == BindingMode::LiveEvidence {
+            "Evidence from the authenticated target during this run; assessed snapshot only, not proof of full service membership or distinct authenticated nodes."
+        } else {
+            "Saved evidence only; bundle origin and service anchor are collector-asserted, not authenticated acquisition provenance. Assessed snapshot only, not proof of full service membership or distinct authenticated nodes."
+        };
+        writeln!(out, "Scope: {scope}")?;
+    }
+
+    for diagnostic in &a.diagnostics {
+        if diagnostic.code == "ResourceAppraisalScoped"
+            || a.not_checked.iter().any(|gap| {
+                gap.code == diagnostic.code
+                    && diagnostic.severity == crate::outcome::Severity::Warning
+            })
+        {
+            continue;
+        }
+        let message = if diagnostic.code == "ResourceAppraisalNote"
+            && diagnostic
+                .message
+                .starts_with("the statement's execution policy matches the pinned digest ")
+        {
+            "Statement-derived policy commitment matches the configured pin."
+        } else {
+            &diagnostic.message
+        };
+        let severity = match diagnostic.severity {
+            crate::outcome::Severity::Error => "FAIL",
+            crate::outcome::Severity::Warning => "NOTICE",
+        };
+        writeln!(
+            out,
+            "{severity} {} {}",
+            diagnostic.code,
+            safe_text(message, 384)
+        )?;
+        if diagnostic.severity == crate::outcome::Severity::Error {
+            writeln!(out, "  Action: {}", safe_text(diagnostic.action, 384))?;
+        }
+    }
+    if let Some(primary) = &a.primary {
+        if !a
+            .diagnostics
+            .iter()
+            .any(|d| d.code == primary.code && d.message == primary.message)
+        {
+            writeln!(
+                out,
+                "FAIL {} {}\n  Action: {}",
+                primary.code,
+                safe_text(&primary.message, 384),
+                safe_text(primary.action, 384)
+            )?;
+        }
+    }
+    writeln!(out, "Limitations:")?;
+    if let Some(adapter) = args.adapter {
+        let mut shown = Vec::new();
+        for check in &a.checks.adapter {
+            if let Some(message) =
+                crate::adapters::compact_limitation(adapter, check, &a.adapter_findings)
+            {
+                if !shown.contains(&message) {
+                    writeln!(out, "  {message}")?;
+                    shown.push(message);
+                }
+            }
+        }
+    }
+    for gap in &a.not_checked {
+        let message = match gap.code {
+            "ArtifactBindingNotRequested" => "artifact binding was not requested; no artifact identity is established.",
+            "CertificateChainNotAnchoredExternally" => "Signing chain is internally consistent with its embedded root, not independently trusted.",
+            "RevocationNotChecked" => "Signing certificate revocation was not checked.",
+            _ => &gap.message,
+        };
+        writeln!(out, "  [{}] {}", gap.code, safe_text(message, 384))?;
+    }
+    if args.binding_mode.is_evidence() {
+        writeln!(
+            out,
+            "  Artifact binding was not requested; this is a resource appraisal."
+        )?;
+    }
+    if !a.facts.as_ref().is_some_and(|facts| {
+        matches!(&facts.chain_outcome,
+        Some(scitt_receipt::chain::Outcome::Valid(details)) if details.anchored_externally)
+    }) && !a.decision.as_ref().is_some_and(|decision| {
+        decision.results.iter().any(|r| {
+            r.name == "requireChainToRootSha256" && r.outcome == scitt_policy::Outcome::Pass
+        })
+    }) {
+        writeln!(out, "  No independent publisher authorization is established by a receipt issuer assertion.")?;
+    }
+    for limitation in &a.trust.limitations {
+        writeln!(out, "  {}", safe_text(limitation, 384))?;
+    }
+    if a.trust.mode == "acquired-key-set" {
+        writeln!(
+            out,
+            "  Receipt-key freshness is not established by acquisition."
+        )?;
+    }
+    Ok(())
 }
 
 /// Everything a reader needs in order to act, before any evidence.
-fn headline(a: &Assessment) {
-    println!("{} {}", a.verdict.banner(), a.verdict.as_str());
-    println!();
+fn headline(out: &mut impl Write, a: &Assessment, color: bool) -> io::Result<()> {
+    writeln!(out, "Verdict")?;
+    writeln!(out, "-------")?;
+    writeln!(
+        out,
+        "{}",
+        styled_verdict(a.verdict.banner(), a.verdict.as_str(), color)
+    )?;
+    writeln!(out)?;
 
     if let Some(d) = &a.primary {
-        println!("Primary diagnostic:  {} ({})", d.code, d.category.as_str());
-        println!("  {}", d.message);
-        println!();
+        writeln!(
+            out,
+            "Primary diagnostic:  {} ({})",
+            safe(d.code),
+            d.category.as_str()
+        )?;
+        writeln!(out, "  {}", safe(&d.message))?;
+        writeln!(out)?;
     }
 
     if let Some(decision) = &a.decision {
-        println!(
+        writeln!(
+            out,
             "Policy document:     {} v{}",
-            decision.policy_id, decision.policy_version
-        );
+            safe(&decision.policy_id),
+            safe(&decision.policy_version)
+        )?;
     }
-    println!("Trust material:      {}", a.trust.describe());
+    writeln!(out, "Trust material:      {}", a.trust.describe())?;
 
     // Named "decision" rather than "policy" so it cannot be misread as a
     // second mention of the policy document above it.
-    println!(
+    writeln!(
+        out,
         "Statement signature: {}",
         a.checks.statement_signature.label()
-    );
-    println!(
+    )?;
+    writeln!(
+        out,
         "Receipt inclusion:   {}",
         a.checks.receipt_inclusion.label()
-    );
-    println!("Artifact binding:    {}", a.checks.artifact_binding.label());
-    println!("Policy decision:     {}", a.checks.policy.label());
+    )?;
+    writeln!(
+        out,
+        "Artifact binding:    {}",
+        a.checks.artifact_binding.label()
+    )?;
+    writeln!(out, "Policy decision:     {}", a.checks.policy.label())?;
+
+    // Adapter checks follow the fixed four, so the core result reads the same
+    // whether or not an adapter ran. Labels are padded to the same column as
+    // the lines above, and the detail sits underneath rather than inline,
+    // because an adapter's reason is usually a sentence and not a word.
+    for check in &a.checks.adapter {
+        // Padded to the same column as the four above, but with the space
+        // written explicitly rather than left to the padding. Adapter labels
+        // are longer than the core ones and several overflow the column; with
+        // padding alone the label and its state ran together into one word.
+        let head = format!("{}:", safe(&check.label));
+        writeln!(out, "{head:<20} {}", check.state.label())?;
+        if !check.detail.is_empty() {
+            writeln!(out, "  {}", safe(&check.detail))?;
+        }
+    }
 
     // The distinction the verdict exists to make. A pass that never looked at
     // an artifact is a pass about a file, not about a deployment.
     if a.verdict == Verdict::StatementTransparent {
-        println!();
-        println!("NOTICE: artifact binding was not requested. This run says the statement is");
-        println!("        transparent; it does not say which artifact it describes.");
+        writeln!(out)?;
+        writeln!(
+            out,
+            "NOTICE: artifact binding was not requested. This run says the statement is"
+        )?;
+        writeln!(
+            out,
+            "        transparent; it does not say which artifact it describes."
+        )?;
+    }
+
+    // A resource pass is always bounded, and the bound is not a footnote: it
+    // names the nodes the claim covers and says the evidence was recorded
+    // rather than observed. Printed in the headline, beside the verdict,
+    // because this is the sentence most likely to be dropped when the result
+    // is quoted to someone else.
+    if a.verdict == Verdict::ResourceTransparent {
+        if let Some(scope) = a
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "ResourceAppraisalScoped")
+        {
+            writeln!(out)?;
+            writeln!(out, "NOTICE: this pass is scoped.")?;
+            writeln!(out, "        {}", safe(&scope.message))?;
+        }
     }
 
     if let Some(d) = &a.primary {
-        println!();
-        println!("Action: {}", d.action);
+        writeln!(out)?;
+        writeln!(out, "Action: {}", safe(d.action))?;
     }
 
     // Spelled out because this is the case people misread. A non-zero exit that
     // does not mean "compromised" still means "do not proceed".
     if a.verdict == Verdict::CannotEvaluate {
-        println!();
-        println!("This is not a pass. The tool could not answer the question;");
-        println!("the usual causes are stale trust material or an unsupported feature.");
+        writeln!(out)?;
+        writeln!(
+            out,
+            "This is not a pass. The tool could not answer the question;"
+        )?;
+        writeln!(
+            out,
+            "the usual causes are stale trust material or an unsupported feature."
+        )?;
     }
+    Ok(())
 }
 
-fn detail(a: &Assessment) {
-    println!("Details");
+fn detail(out: &mut impl Write, a: &Assessment) -> io::Result<()> {
+    writeln!(out, "Details")?;
 
     if let Some(facts) = &a.facts {
-        statement_detail(facts);
-        receipts_detail(facts);
+        statement_detail(out, facts)?;
+        receipts_detail(out, facts)?;
     } else {
-        println!();
-        println!("  The run stopped before any statement facts were established.");
+        writeln!(out)?;
+        writeln!(
+            out,
+            "  The run stopped before any statement facts were established."
+        )?;
     }
 
-    println!();
-    println!("  Artifact binding");
-    println!("    {}", a.binding.detail);
+    writeln!(out)?;
+    writeln!(out, "  Artifact binding")?;
+    writeln!(out, "    {}", safe(&a.binding.detail))?;
 
     if let Some(decision) = &a.decision {
-        policy_detail(decision);
+        policy_detail(out, decision)?;
     }
 
     // Everything the primary diagnostic did not already say. Gating on
@@ -106,108 +331,132 @@ fn detail(a: &Assessment) {
         .filter(|d| !primary.is_some_and(|p| p.code == d.code && p.message == d.message))
         .collect();
     if !rest.is_empty() {
-        println!();
-        println!("  Diagnostics");
+        writeln!(out)?;
+        writeln!(out, "  Diagnostics")?;
         for d in rest {
-            println!("    [{}] {}", d.code, d.message);
+            writeln!(out, "    [{}] {}", safe(d.code), safe(&d.message))?;
         }
     }
 
     if !a.not_checked.is_empty() {
-        println!();
-        println!("  Not checked");
+        writeln!(out)?;
+        writeln!(out, "  Not checked")?;
         for g in &a.not_checked {
-            println!("    [{}] {}", g.code, g.message);
-            println!("      impact: {}", g.impact);
+            writeln!(out, "    [{}] {}", safe(g.code), safe(&g.message))?;
+            writeln!(out, "      impact: {}", safe(g.impact))?;
         }
     }
 
     if !a.trust.limitations.is_empty() {
-        println!();
-        println!("  Trust limitations");
+        writeln!(out)?;
+        writeln!(out, "  Trust limitations")?;
         for l in &a.trust.limitations {
-            println!("    - {l}");
+            writeln!(out, "    - {}", safe(l))?;
         }
     }
+    Ok(())
 }
 
-fn statement_detail(facts: &StatementFacts) {
-    println!();
-    println!("  Statement");
-    println!("    claim digest        {}", facts.claim_digest);
-    println!("    signed bytes        {}", facts.signed_statement_len);
-    println!(
+fn statement_detail(out: &mut impl Write, facts: &StatementFacts) -> io::Result<()> {
+    writeln!(out)?;
+    writeln!(out, "  Statement")?;
+    writeln!(out, "    claim digest        {}", facts.claim_digest)?;
+    writeln!(
+        out,
+        "    signed bytes        {}",
+        facts.signed_statement_len
+    )?;
+    writeln!(
+        out,
         "    algorithm           {}",
         facts
             .alg
             .map(scitt_receipt::labels::alg::name)
             .unwrap_or_else(|| "(none)".into())
-    );
-    println!("    signature           {}", tri(facts.signature_valid));
+    )?;
+    writeln!(
+        out,
+        "    signature           {}",
+        tri(facts.signature_valid)
+    )?;
     if let Some(subject) = &facts.leaf_subject {
-        println!("    signer              {subject}");
+        writeln!(out, "    signing cert subject {}", safe(subject))?;
     }
     if let Some(iss) = &facts.cwt.iss {
-        println!("    cwt iss             {iss}");
+        writeln!(out, "    statement issuer    {}", safe(iss))?;
     }
     if let Some(sub) = &facts.cwt.sub {
-        println!("    cwt sub             {sub}");
+        writeln!(out, "    statement subject   {}", safe(sub))?;
     }
 
     for problem in &facts.problems {
-        println!("    ! {problem}");
+        writeln!(out, "    ! {}", safe(problem))?;
     }
+    Ok(())
 }
 
-fn receipts_detail(facts: &StatementFacts) {
+fn receipts_detail(out: &mut impl Write, facts: &StatementFacts) -> io::Result<()> {
     if facts.receipts.is_empty() {
-        println!();
-        println!("  Receipts");
-        println!("    none — this statement is signed, but not transparent");
-        return;
+        writeln!(out)?;
+        writeln!(out, "  Receipts")?;
+        writeln!(
+            out,
+            "    none — this statement is signed, but not transparent"
+        )?;
+        return Ok(());
     }
     for (index, r) in facts.receipts.iter().enumerate() {
-        println!();
-        println!("  Receipt {}", index + 1);
-        println!(
-            "    issuer              {}",
-            r.issuer.as_deref().unwrap_or("(none)")
-        );
-        println!(
-            "    kid                 {}",
-            r.kid.as_deref().unwrap_or("(none)")
-        );
-        println!(
-            "    registered at       {}",
-            r.registered_at
-                .map(|t| t.to_string())
-                .unwrap_or_else(|| "(none)".into())
-        );
-        println!(
+        writeln!(out)?;
+        writeln!(out, "  Receipt {}", index + 1)?;
+        writeln!(
+            out,
+            "    receipt issuer      {}",
+            safe(r.issuer.as_deref().unwrap_or("(none)"))
+        )?;
+        writeln!(
+            out,
+            "    receipt key id      {}",
+            safe(r.kid.as_deref().unwrap_or("(none)"))
+        )?;
+        writeln!(
+            out,
+            "    registered at UTC   {}",
+            crate::display::optional_timestamp(r.registered_at)
+        )?;
+        writeln!(
+            out,
             "    merkle root         {}",
-            r.root.as_deref().unwrap_or("(not computed)")
-        );
-        println!(
+            safe(r.root.as_deref().unwrap_or("(not computed)"))
+        )?;
+        writeln!(
+            out,
             "    key lookup          {}",
             r.key_lookup
                 .as_ref()
                 .map(describe_lookup)
                 .unwrap_or("(not attempted)")
-        );
-        println!("    root signature      {}", tri(r.root_signature_valid));
-        println!("    bound to statement  {}", tri(r.bound_to_statement));
+        )?;
+        writeln!(
+            out,
+            "    root signature      {}",
+            tri(r.root_signature_valid)
+        )?;
+        writeln!(out, "    bound to statement  {}", tri(r.bound_to_statement))?;
         for problem in &r.problems {
-            println!("    ! {problem}");
+            writeln!(out, "    ! {}", safe(problem))?;
         }
     }
+    Ok(())
 }
 
-fn policy_detail(decision: &PolicyDecision) {
-    println!();
-    println!(
+fn policy_detail(out: &mut impl Write, decision: &PolicyDecision) -> io::Result<()> {
+    writeln!(out)?;
+    writeln!(
+        out,
         "  Policy {} v{}",
-        decision.policy_id, decision.policy_version
-    );
+        safe(&decision.policy_id),
+        safe(&decision.policy_version)
+    )?;
     for r in &decision.results {
         // Spelled out rather than symbolic. "????" was memorable but told an
         // auditor nothing about whether the rule was skipped or unanswerable.
@@ -216,8 +465,15 @@ fn policy_detail(decision: &PolicyDecision) {
             Outcome::Fail => CheckState::Fail,
             Outcome::CannotEvaluate => CheckState::CannotEvaluate,
         };
-        println!("    [{}] {} — {}", mark.label(), r.name, r.detail);
+        writeln!(
+            out,
+            "    [{}] {} — {}",
+            mark.label(),
+            safe(&r.name),
+            safe(&r.detail)
+        )?;
     }
+    Ok(())
 }
 
 /// Describe a statement without verifying any part of it.
@@ -643,7 +899,7 @@ fn print_cwt_claims(value: &CborValue, verbose: bool, parent: Option<i64>) {
             CborValue::Int(i)
                 if matches!(*i, labels::CWT_IAT | labels::CWT_NBF | labels::CWT_EXP) =>
             {
-                timestamp(cbor::as_numeric_date(claim).ok())
+                crate::display::optional_timestamp(cbor::as_numeric_date(claim).ok())
             }
             _ => scalar(claim, verbose, known),
         };
@@ -794,18 +1050,21 @@ fn inspect_receipts(statement: &Sign1, verbose: bool) {
                 .unwrap_or_else(|| "(none)".into())
         );
         println!(
-            "  kid                 {}",
+            "  receipt key id      {}",
             summary.kid.as_deref().unwrap_or("(none)")
         );
         println!(
-            "  iss                 {}",
+            "  receipt issuer      {}",
             summary.issuer.as_deref().unwrap_or("(none)")
         );
         println!(
-            "  sub                 {}",
+            "  receipt subject     {}",
             summary.subject.as_deref().unwrap_or("(none)")
         );
-        println!("  registered at       {}", timestamp(summary.registered_at));
+        println!(
+            "  registered at UTC   {}",
+            crate::display::optional_timestamp(summary.registered_at)
+        );
         println!(
             "  data structure      {}",
             match summary.vds {
@@ -862,46 +1121,13 @@ fn print_labels(prefix: &str, labels: &[String]) {
     println!("{prefix} {}", labels.join(", "));
 }
 
-/// Render a Unix timestamp as both the raw value and a UTC instant.
-///
-/// The raw seconds are kept because they are what a policy compares against;
-/// the formatted form is there so a human notices a statement dated 1970.
-fn timestamp(seconds: Option<i64>) -> String {
-    let Some(s) = seconds else {
-        return "(none)".into();
-    };
-    match utc_rfc3339(s) {
-        Some(text) => format!("{s} ({text})"),
-        None => format!("{s} (not a representable date)"),
+fn styled_verdict(banner: &str, verdict: &str, color: bool) -> String {
+    let text = format!("{banner} {verdict}");
+    if !color {
+        return text;
     }
-}
-
-/// Format a Unix timestamp as RFC 3339 UTC, without pulling in a date crate.
-///
-/// Uses Howard Hinnant's civil-from-days algorithm, which is exact for the
-/// proleptic Gregorian calendar. Returns `None` rather than a wrong date for
-/// values that cannot be represented.
-fn utc_rfc3339(seconds: i64) -> Option<String> {
-    let days = seconds.div_euclid(86_400);
-    let secs_of_day = seconds.rem_euclid(86_400);
-
-    let z = days.checked_add(719_468)?;
-    let era = if z >= 0 { z } else { z - 146_096 }.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = if m <= 2 { y + 1 } else { y };
-
-    Some(format!(
-        "{year:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
-        secs_of_day / 3_600,
-        (secs_of_day % 3_600) / 60,
-        secs_of_day % 60
-    ))
+    let code = if banner == "PASS" { "1;32" } else { "1;31" };
+    format!("\u{1b}[{code}m{text}\u{1b}[0m")
 }
 
 /// Render a tri-state honestly.
@@ -926,8 +1152,206 @@ fn describe_lookup(lookup: &KeyLookup) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::path_segment;
+    use super::{path_segment, styled_verdict};
     use scitt_receipt::CborValue;
+
+    /// The completed report escapes what the transcript escapes.
+    ///
+    /// Node ids, policy ids and the adapter details quoting them come from the
+    /// ledger and the policy file. An unescaped newline in the verbose report
+    /// is enough to print a line that reads like a verdict; an unescaped
+    /// control sequence can scroll the real one away. The compact path already
+    /// escaped these, which made the verbose path — the one an auditor reads —
+    /// the weaker of the two.
+    #[test]
+    fn untrusted_values_are_escaped_in_the_verbose_report_too() {
+        use crate::outcome::{
+            AdapterCheck, Assessment, Category, CheckState, Diagnostic, Trust, Verdict,
+        };
+
+        let hostile = "ok\nPASS statement-transparent\r\u{1b}[2J";
+        let mut assessment = Assessment::incomplete(
+            Verdict::ResourceFailed,
+            Trust::acquired_key_set(),
+            Diagnostic::error("Hostile", Category::Binding, hostile, hostile),
+            Vec::new(),
+        );
+        assessment.checks.adapter.push(AdapterCheck {
+            name: "node".into(),
+            label: hostile.into(),
+            state: CheckState::Fail,
+            detail: hostile.into(),
+        });
+        assessment.binding.detail = hostile.into();
+
+        let mut bytes = Vec::new();
+        super::verify(&mut bytes, &assessment, true, false).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+
+        assert!(text.contains("\\n"), "{text}");
+        assert!(text.contains("\\r"), "{text}");
+        assert!(text.contains("\\u{1b}"), "{text}");
+        assert!(!text.contains('\r'), "{text}");
+        assert!(!text.contains('\u{1b}'), "{text}");
+        // The forged verdict must not reach the start of a line, where a
+        // reader — or a pipeline matching on the transcript — would take it
+        // for this run's own.
+        assert!(
+            !text.contains("\nPASS statement-transparent"),
+            "a hostile value produced a line that reads as a verdict:\n{text}"
+        );
+    }
+
+    #[test]
+    fn compact_resource_final_has_one_scope_no_duplicate_checks_and_keeps_distinct_warnings() {
+        use crate::cli::{self, BindingMode, Command};
+        use crate::outcome::{
+            AdapterCheck, AdapterFinding, Assessment, Category, CheckState, Diagnostic, Trust,
+            Verdict,
+        };
+        let args: Vec<_> = [
+            "verify",
+            "--statement",
+            "statement.cose",
+            "--policy",
+            "policy.json",
+            "--online",
+            "--adapter",
+            "azure-confidential-ledger",
+            "--binding-mode",
+            "live-evidence",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        let Command::Verify(mut args) = cli::parse(&args).unwrap() else {
+            panic!("verify")
+        };
+        let warning = Diagnostic::warning(
+            "DistinctWarning",
+            Category::Trust,
+            "do not hide this\nwarning",
+            "Read the evidence.",
+        );
+        let mut assessment = Assessment::incomplete(
+            Verdict::ResourceTransparent,
+            Trust::acquired_key_set(),
+            warning,
+            Vec::new(),
+        );
+        assessment.primary = None;
+        assessment.checks.adapter.push(AdapterCheck {
+            name: "ledger-identity-binding".into(),
+            label: "Test binding".into(),
+            state: CheckState::Pass,
+            detail: "full-measurement-must-not-repeat".into(),
+        });
+        assessment.adapter_findings.push(AdapterFinding {
+            check: "cce-policy-host-data".into(),
+            subject: "long-node-id".into(),
+            state: CheckState::Pass,
+            detail: "full-measurement-must-not-repeat".into(),
+            expected: None,
+            observed: None,
+        });
+        for name in [
+            "freshness",
+            "connection-binding",
+            "freshness",
+            "future-excluded-check",
+        ] {
+            assessment.checks.adapter.push(AdapterCheck {
+                name: name.into(),
+                label: name.into(),
+                state: CheckState::CannotEvaluate,
+                detail: format!("full detail for {name}"),
+            });
+        }
+        assessment.diagnostics.push(Diagnostic::warning(
+            "ResourceAppraisalScoped",
+            Category::Binding,
+            "full scope with long-node-id",
+            "Interpret within this scope.",
+        ));
+        for (mode, provenance) in [
+            (
+                BindingMode::LiveEvidence,
+                "Evidence from the authenticated target during this run",
+            ),
+            (
+                BindingMode::SavedEvidence,
+                "bundle origin and service anchor are collector-asserted",
+            ),
+        ] {
+            args.binding_mode = mode;
+            let mut bytes = Vec::new();
+            let mut progress = crate::progress::Text::compact(
+                &mut bytes,
+                false,
+                vec![(
+                    crate::progress::Stage::Adapter,
+                    "Appraise node evidence".into(),
+                )],
+            );
+            for check in &assessment.checks.adapter {
+                crate::progress::Sink::emit(
+                    &mut progress,
+                    crate::adapters::check_event(
+                        args.adapter.unwrap(),
+                        check,
+                        check.detail.clone(),
+                        &assessment.adapter_findings,
+                    ),
+                );
+            }
+            progress.finish().unwrap();
+            super::compact(&mut bytes, &assessment, &args, false).unwrap();
+            let text = String::from_utf8(bytes).unwrap();
+            assert!(text.contains("\nPASS resource-transparent\n"));
+            assert_eq!(text.matches("Scope:").count(), 1);
+            assert!(text.contains(provenance), "{text}");
+            assert!(
+                text.contains("assessed snapshot only") || text.contains("Assessed snapshot only")
+            );
+            assert!(text.contains("NOTICE DistinctWarning do not hide this\\nwarning"));
+            assert!(!text.contains("full-measurement") && !text.contains("long-node-id"));
+            assert!(!text.contains("Test binding:"));
+            assert_eq!(
+                text.matches("Artifact binding was not requested").count(),
+                1
+            );
+            assert!(text.contains("No independent publisher authorization"));
+            let (_, limitations) = text.split_once("Limitations:\n").unwrap();
+            for message in [
+                "Report freshness was not established.",
+                "Binding to the serving connection was not established.",
+            ] {
+                assert_eq!(text.matches(message).count(), 1, "{text}");
+                assert!(limitations.contains(message), "{text}");
+            }
+            assert!(!text.contains("CANNOT EVALUATE freshness"), "{text}");
+            assert!(
+                !text.contains("CANNOT EVALUATE connection-binding"),
+                "{text}"
+            );
+            assert!(
+                text.contains(
+                    "CANNOT EVALUATE future-excluded-check full detail for future-excluded-check"
+                ),
+                "{text}"
+            );
+        }
+        let mut bytes = Vec::new();
+        super::verify(&mut bytes, &assessment, false, false).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains("Test binding:"));
+        assert!(
+            text.contains("full-measurement-must-not-repeat"),
+            "the standalone report remains complete without a transcript"
+        );
+        assert!(text.contains("full detail for freshness"));
+        assert!(text.contains("full detail for connection-binding"));
+    }
 
     /// The bracketed label is meant to be pasted into a policy `path`, so an
     /// integer label must print bare rather than quoted.
@@ -963,5 +1387,17 @@ mod tests {
     fn a_key_no_policy_can_name_has_no_path() {
         assert!(path_segment(&CborValue::ByteString(vec![1, 2, 3])).is_none());
         assert!(path_segment(&CborValue::Array(vec![])).is_none());
+    }
+
+    #[test]
+    fn verdict_color_is_limited_to_the_verdict_line() {
+        assert_eq!(
+            styled_verdict("PASS", "statement-transparent", false),
+            "PASS statement-transparent"
+        );
+        assert_eq!(
+            styled_verdict("STOP", "untrusted", true),
+            "\u{1b}[1;31mSTOP untrusted\u{1b}[0m"
+        );
     }
 }

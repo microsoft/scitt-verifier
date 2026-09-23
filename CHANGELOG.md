@@ -2,6 +2,236 @@
 
 ## Unreleased
 
+### The ledger adapter is now named `azure-confidential-ledger` (breaking)
+
+The adapter appraises a deployed Azure Confidential Ledger. It was named after
+MST, which is one service built on that ledger and not the thing being
+appraised — the same conflation that lets a statement notarised by one ledger
+be mistaken for evidence about another. The policy key is now
+`adapters.azure-confidential-ledger`, the CLI value `--adapter
+azure-confidential-ledger`, and the build feature
+`adapter-azure-confidential-ledger`. There is no alias: an existing policy is
+rejected by `deny_unknown_fields` rather than silently reinterpreted, and must
+be updated.
+
+### Node coverage counts attested keys, not names
+
+Every aggregate rule asks whether all N nodes agreed, and `node_id` is a label
+the collector chose. A saved bundle is unsigned, so one agreeing node copied
+under three names satisfied a requirement for three nodes. Coverage now counts
+distinct attested keys — the SHA-256 of the node's own public key that CCF
+places in `REPORT_DATA`, which the hardware signature authenticates — and fails
+when fewer distinct keys were attested than nodes were presented. Live
+acquisition was never affected; this closes the saved-evidence path.
+
+### Saved bundles are read within fixed bounds
+
+A bundle supplied on the command line is untrusted input that was read without
+limit, and its paths were checked lexically, so a component named entirely
+normally could still leave the directory through a link. Manifest, per-file and
+total sizes and the node count are now capped, and every path is canonicalised
+and required to remain inside the bundle before its bytes are read.
+
+### `relyingPartyPolicy.satisfied` accounts for adapter checks
+
+The field reported only whether the statement assertions held, so it could read
+`true` on a run where a required adapter check failed or could not run. It now
+requires both, and the narrower fact is retained as `assertionsSatisfied`. What
+"both" means is the adapter's own contract — the checks it declares as required
+— so the two checks it can never perform against CCF, freshness and connection
+binding, do not make every successful appraisal read as unsatisfied. The
+verdict and exit code are unchanged — they were already correct — but the
+record no longer disagrees with them. `schemaVersion` stays `v0`, which is
+still moving by design.
+
+### A TCB floor is now required to cover the node it appraises
+
+The attestation library compares a minimum TCB only against a node of the same
+CPU generation and skips every other entry, so a floor naming only `milan`
+appraised a Genoa node against nothing and reported a pass. The adapter now
+refuses a node whose generation the configured floor does not name, once the
+report has authenticated and its generation is a fact rather than a claim.
+This is reported as cannot-evaluate rather than a node failure: nothing about
+the node is at fault, the policy simply configured no floor applicable to it.
+
+### Two node ids can no longer write one evidence file
+
+`--save-evidence` reduces a ledger-supplied node id to a filename, which is not
+a reversible step: dropped characters and the length cap can map two distinct
+ids onto one stem, and the second node's files then replaced the first while
+the manifest went on naming both. The bundle reloaded cleanly and no longer
+held the evidence that was appraised. A collision is now refused before
+anything is written.
+
+### Records can no longer be written over saved evidence
+
+`--result` or `--facts` naming a path inside the `--save-evidence` or
+`--save-trust` directory overwrote a bundle file — typically `snapshot.json` —
+with a verification record, and because the record write itself succeeded the
+run still exited 0 having made the bundle unreplayable. The combination is now
+refused while the command line is parsed, before any evidence is collected.
+
+### Output failures are no longer silent
+
+Errors from the progress transcript and from the final text or JSON write were
+discarded, so a truncated or entirely missing result could accompany exit 0.
+Both are now folded into the verdict: a pass whose output could not be
+delivered is demoted, while a run that had already failed keeps its own verdict.
+The final write is flushed as part of the write, since a buffered writer can
+accept every byte and then fail to hand them on.
+
+### The verbose report escapes what the transcript escapes
+
+Node ids, policy ids and the diagnostics quoting them reached the completed
+`--verbose` report as raw bytes, so a hostile value could emit newlines and
+terminal control sequences — enough to print a line that reads like a verdict,
+or to scroll the real one out of view. Every value in that report which did not
+originate as a literal is now escaped and bounded, as the compact transcript
+already did.
+
+### Text verification reports progress as checks run
+
+Human-readable `verify` output now begins with an append-only transcript emitted
+at real input, statement, online key acquisition, artifact-binding, policy, and
+adapter boundaries. The transcript is driven by typed events and does not
+participate in verdict selection. JSON stdout remains the final verification
+record only and stays equivalent to `--result`.
+Untrusted transcript values are bounded and terminal control characters are
+escaped before display, including an adapter-supplied check name.
+Diagnostic severity survives into the transcript: one that decided the verdict
+is reported as a failure rather than sitting among the trust limitations.
+The adapter stage reports its aggregate checks, so an appraisal that stopped
+before reaching any node still names the reason at the point it happened. A
+reason shared by several checks is stated once and afterwards referred to by
+the check that carries it.
+Receipt outcomes and policy assertion results now appear at their real
+statement and policy execution boundaries.
+Statement identity facts are reported when verification completes, followed by
+a typed assessment summary of diagnostics, omitted checks, and trust limits.
+Default text output now stops after the concise verdict block; `--verbose`
+retains the completed evidence report.
+Human output now uses explicit identity labels, UTC timestamp renderings,
+grouped receipt/ledger/node findings, a separated verdict block, and restrained
+TTY-only color that respects `NO_COLOR` and never affects JSON or redirection.
+
+MST adapter node outcomes now survive as generic structured
+`appraisal.adapterFindings`, including separate expected and observed policy
+commitments where the comparison ran. The same findings drive node-level
+progress without making transcript order part of the acceptance contract.
+This is an added field, so the record's `schemaVersion` does not move;
+`docs/output.md` now states which changes do.
+
+### Statement verification and optional adapters have separate boundaries
+
+The README now starts with transparent statements and relying-party policy,
+not deployment appraisal. Artifact binding and resource adapters are opt-in;
+receipt support remains limited to the CCF VDS profile.
+
+Network acquisition is renamed from `scitt-acquire` to `scitt-network`.
+The pure MST appraisal package moves from `crates/scitt-attest` to
+`adapters/azure-confidential-ledger`, named `scitt-adapter-azure-confidential-ledger`. There is no generic
+attestation crate. CLI dispatch, MST orchestration, and bundle handling live in
+`crates/scitt-verifier/src/adapters/`; networking stays in `scitt-network`.
+
+The unpublished adapter policy shape is replaced, not retained as an alias:
+`ledger` moves to `adapters.azure-confidential-ledger.target`, `trust` to
+`adapters.azure-confidential-ledger.trust`, and `assertions.bindLedgerPolicy` to
+`adapters.azure-confidential-ledger.binding`. Statement rules remain in `assertions`.
+Unknown adapters/fields are rejected, and `Policy::evaluate` cannot silently
+pass requirements that need adapter execution.
+
+The CLI rejects policy/adapter-selector mismatches before acquisition and
+requires a passing statement verdict before appraisal. Shared adapter results
+derive success from explicit required checks rather than an independent
+boolean. TLS evidence collection is in `scitt_network::acl::collect`;
+the CLI decodes and joins the responses into the pure adapter's evidence types.
+Saved bundles retain their existing trust limitations: their manifests and
+service-certificate provenance are not authenticated on offline replay.
+
+The `adapter-azure-confidential-ledger` build feature, `--adapter azure-confidential-ledger`,
+`saved-evidence`/`live-evidence` modes, and acquisition behavior are unchanged.
+`--online` selects receipt-key acquisition; live resource acquisition is an
+additional explicit mode that currently requires it. See
+[adapters](docs/adapters.md).
+
+### Evidence can now be collected from the ledger itself
+
+`--binding-mode live-evidence` collects the ledger's attestation evidence
+during the run instead of reading a bundle someone recorded earlier. It
+requires `--online`, and the ledger it contacts is the one named by
+`adapters.azure-confidential-ledger.target.host` in the policy — never a flag, for the same reason the allowlist
+is not a flag.
+
+This is a security change, not a convenience. A saved bundle carries
+`service.pem`, the certificate identity binding is checked *against*, so the
+subject of the appraisal also supplies its own anchor: a self-consistent bundle
+produced by an attacker's own ledger satisfies every check in the appraisal and
+is wrong only in which service it describes. The previous release could catch
+that by comparing the collector's unsigned manifest to the policy target, which
+detects the wrong bundle but not a forged one.
+
+A live run takes the service certificate from the public identity service over
+the public web PKI, and pins the connection that carries the node reports to
+exactly that certificate. Substituting a ledger no longer substitutes the
+anchor with it. `bootstrap` in `scitt-network` was separated out of key
+acquisition so both uses share one authenticated path and one network deadline.
+
+`--save-evidence <DIR>` writes what a live run collected, in the same form
+`--binding-mode saved-evidence` reads, so a verdict can be re-examined offline
+later. Saving is part of the run: if the copy cannot be written the run fails
+rather than reporting a verdict it did not preserve.
+
+What has not changed: freshness and connection binding remain
+`cannot-evaluate`. CCF offers no challenge-response attestation, so a report is
+a recording whether this run fetched it or not; the endpoint load-balances, so
+the node that served a response cannot be tied to the report it carried. A live
+run now says *observed at* a time it knows rather than *recorded at* a time
+someone else asserted, which is the only part of the scope that improves.
+
+An unreachable ledger is `cannot-evaluate`, never a failure: a service that did
+not answer is not a service that answered badly.
+
+### The evidence must come from the ledger the policy names
+
+The target host was parsed, validated non-empty, and then never compared against
+anything. A bundle captured from one service was appraised against a policy
+written for another, and the whole report — scope notice included — named the
+subject the operator had asked about rather than the one the evidence came
+from.
+
+This is easy to get wrong in exactly the case the adapter exists for. A
+production transparency service notarises builds for many deployments, so the
+service that issued the receipt is usually *not* the service the statement
+describes. Pointing the adapter at the notary's own evidence produced a
+confident, wrong answer.
+
+The bundle's `ledger` is now compared against `adapters.azure-confidential-ledger.target.host` before any node is
+appraised, and a mismatch fails the run. Hostnames are compared case-insensitively
+and tolerate a URL, a trailing root dot, or surrounding whitespace; a differing
+port is a differing endpoint and is not normalised away. A policy with no
+`adapters.azure-confidential-ledger` section no longer runs the adapter at all.
+
+The comparison is against the collector's unsigned manifest, so it catches the
+wrong bundle, not a forged one. Pinning the bundle's service certificate to the
+one the public identity service publishes for that host is the adversarial
+form; `live-evidence`, above, is that form.
+
+### Ledger findings have their own verdicts
+
+Adapter checks report on a service, not on the policy document, and the two
+were previously collapsed. A run whose policy assertions all passed but whose
+ledger check failed printed `STOP policy-failed` above `Policy decision: pass`,
+which reads as a contradiction and invites the reader to distrust the report
+rather than the ledger.
+
+There are now two verdicts for adapter outcomes: `resource-transparent`
+(exit 0) when the appraised nodes enforce the policy the statement embeds, and
+`resource-failed` (exit 2) when a requirement about the ledger was not met.
+`resource-failed` keeps `policy-failed`'s exit code, because to a pipeline
+"the ledger does not enforce the policy you demanded" and "the signer is not
+the one you demanded" call for the same stop — but the headline now names the
+check that actually stopped the run.
+
 ### The conformance corpus can be regenerated
 
 Every fixture was signed against one person's test ledger. When that ledger was

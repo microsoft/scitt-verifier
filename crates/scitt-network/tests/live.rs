@@ -8,7 +8,7 @@
 //!
 //! ```console
 //! SCITT_LIVE_LEDGER=<name>.confidential-ledger.azure.com \
-//!   cargo test -p scitt-acquire --test live -- --ignored --nocapture
+//!   cargo test -p scitt-network --test live -- --ignored --nocapture
 //! ```
 //!
 //! What this covers that the offline tests cannot: that the identity service
@@ -17,7 +17,7 @@
 //! key set actually satisfies the service-key binding rule. Each of those is a
 //! claim about a system outside this repository.
 
-use scitt_acquire::{acquire, Diagnostic};
+use scitt_network::{acquire, Diagnostic};
 
 fn ledger() -> Option<String> {
     std::env::var("SCITT_LIVE_LEDGER")

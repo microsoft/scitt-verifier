@@ -1,33 +1,122 @@
 # The output contract
 
 Everything in this document is a contract. A pipeline branches on these values,
-so changing one is a breaking change and moves the record's `schemaVersion`.
+so removing a field, renaming one, or changing what an existing one means is a
+breaking change and moves the record's `schemaVersion`. Adding a field is not:
+a consumer that does not read it is unaffected, and requiring a version bump
+for every addition would make the version say nothing about compatibility.
 
 ## The verdict
 
 `verify` produces exactly one verdict.
 
+Text output defaults to a compact, append-only explanatory transcript followed
+by the verdict, its claim, scope, and limitations. `--verbose` (or `-v`) retains
+detailed progress and the completed evidence report, including successful
+measurements, certificate subjects, full node identities, and matching digests.
+No new flag is needed:
+
+```console
+scitt-verifier verify --statement statement.cose --scitt-keys keys.cbor --policy policy.json
+scitt-verifier verify --statement statement.cose --scitt-keys keys.cbor --policy policy.json --verbose
+scitt-verifier verify --statement statement.cose --scitt-keys keys.cbor --policy policy.json --format json
+```
+
+The compact transcript numbers the stages actually requested: inputs, statement
+verification (including receipt-key acquisition when online), optional artifact
+binding, relying-party policy, and optional resource evidence collection and
+appraisal. Resource mode does not add an artifact stage; the omitted binding is
+disclosed once in the limitations. Saved evidence is labelled as loading a
+bundle, never as an authenticated live connection. Missing prerequisites leave
+later stages visibly `NOT RUN`.
+
+Progress is emitted at the execution boundary of each stage; it is not
+reconstructed from the final result. Stage order and display numbering are
+presentation details, not an acceptance contract. The verdict, checks, and
+exit code continue to come only from the completed assessment.
+Transcript values are bounded and terminal control characters are escaped so
+an issuer, path, or remote diagnostic cannot forge another displayed line.
+The completed `--verbose` report applies the same escaping and bounding to
+every value it did not originate itself, at a larger limit because that report
+exists to be read in full.
+Individual receipt outcomes and policy assertion results are emitted during
+their respective stages; the later report remains a completed evidence view,
+not the source from which the transcript is reconstructed.
+The compact final block does not repeat the completed check list. It retains
+diagnostics (including output-write errors), trust limitations, and omitted
+checks. Verbose progress also has an assessment-summary stage. Neither view
+participates in deriving the verdict. Diagnostics retain their severity; a
+failure must not read like a notice. Where one cause blocks several adapter
+checks, its reason is given once and the remaining checks refer to that check.
+
+Compact rendering explains work once, summarizes each subject, and expands
+exceptions. The MST checklist is printed **before** node appraisal. Each row is
+emitted only when that node completes, with separate service binding, SNP/UVM,
+and policy-match states. This is not a sequence of fleet-wide crypto passes.
+Node labels use a visibly shortened unique prefix plus a row number; the row
+number disambiguates identical IDs or prefixes too long to display safely.
+Row numbers are display references, not evidence of distinct authenticated nodes.
+Successes omit measurements and matching expected/observed values. Failures,
+cannot-evaluate findings, and other nonpassing states retain their details and
+available expected/observed values. Unknown adapter checks remain visible.
+After MST node appraisal, its two known excluded `cannot-evaluate` checks
+(report freshness and serving-connection binding) appear once as concise human
+sentences under the final `Limitations`, rather than again beneath the node
+table. Failures, prerequisite errors, and unknown checks are not filtered this
+way. Verbose output and JSON retain the full original findings.
+
+An authenticated-target success is emitted only after a pinned HTTPS request
+succeeds, not after constructing a TLS client. Collection/save completion is
+shown only after the corresponding operation succeeds. A resource pass covers
+the assessed snapshot, not full service membership. Existing TCB, coverage,
+report-freshness, and serving-connection-binding limitations are unchanged.
+Signature text distinguishes internal consistency with an embedded root from
+anchoring to supplied trust roots. Receipt-issuer acceptance does not establish
+independent publisher authorization.
+
+Human timestamps are labelled UTC and include both Unix seconds and an RFC 3339
+instant. JSON keeps the original numeric values. Identity labels distinguish
+the statement issuer and subject, signing-certificate subject, receipt issuer
+and key ID, acquisition ledger, and appraised ledger node.
+
+Detailed receipt, acquisition-ledger, and adapter-node findings are grouped under
+their subject. Compact output uses short receipt results and node rows instead.
+The final verdict is separated by a blank line; verbose output additionally
+labels its completed assessment `Verdict`.
+
+When stdout is an interactive terminal, state and verdict tokens use restrained
+ANSI color. Redirected output, `TERM=dumb`, `NO_COLOR`, and JSON output remain
+plain text/data with no escape sequences.
+
+`--format json` emits no transcript on stdout. Stdout remains the final JSON
+record only, preserving its equivalence with `--result`.
+
 | Verdict | Exit | What it claims |
 |---|---|---|
 | `artifact-transparent` | 0 | The artifact you supplied is the one that was registered, the receipt proves inclusion, and your policy is satisfied. |
 | `statement-transparent` | 0 | The statement is transparent and your policy is satisfied — but **no artifact was checked**. |
+| `resource-transparent` | 0 | The statement is transparent, and the appraised ledger nodes enforce the execution policy it embeds. Always scoped to the nodes assessed. |
 | `untrusted` | 1 | The statement's own signature or the artifact binding did not hold. Do not deploy. |
 | `policy-failed` | 2 | Everything is cryptographically sound; your own rules rejected it. |
+| `resource-failed` | 2 | The statement is sound, but an adapter's requirement about the ledger was not met. |
 | `cannot-evaluate` | 3 | The tool could not answer the question. **This is not a pass.** |
 | `usage-error` | 4 | The invocation or its inputs were wrong. Nothing was established. |
 
-### Why exit 0 is two verdicts
+### Why exit 0 has distinct verdicts
 
-These are different claims, and only one of them is what a release gate is
-actually asking:
+These are different claims; select the one your task requires:
 
 - `statement-transparent` — *some* statement was registered on a transparency
   service and satisfies your policy.
 - `artifact-transparent` — *the bytes you are about to deploy* were registered.
+- `resource-transparent` — the selected adapter's resource requirements held
+  within the reported evidence scope.
 
 A tool that prints one word for both lets a run that never opened the artifact
 look identical to one that compared it byte for byte. If you are gating a
-deployment, **gate on `artifact-transparent`**, not on exit 0.
+file deployment, **gate on `artifact-transparent`**, not on exit 0. A resource
+appraisal instead requires `resource-transparent` and its scope; neither is
+a substitute for the other.
 
 Exit 0 is shared deliberately: a team adopting the gate incrementally should not
 have their build break the day they add `--artifact`. The distinction lives in
@@ -35,7 +124,7 @@ the verdict, where it can be checked explicitly.
 
 ## Check states
 
-Each of the four checks reports one of four states. They are not
+Every check reports one of four states. They are not
 interchangeable, and the human output spells them out rather than using symbols.
 
 | State | Meaning |
@@ -50,8 +139,81 @@ an answer of "no" — receipts are unauthenticated in transit, so a broken one
 may never have come from a transparency service at all. Transparency is either
 established by a verified receipt (`pass`) or left open (`cannot-evaluate`).
 
-`not-checked` and `cannot-evaluate` are the pair most worth keeping apart. The
-first is an incomplete invocation; the second is a broken one.
+`not-checked` and `cannot-evaluate` are the pair most worth keeping apart.
+The first may be intentional (for example, no artifact in a statement-only
+run); the second says a requested check could not be completed.
+
+### Adapter checks
+
+Alongside the four core checks, `appraisal.checks.adapter` carries an ordered
+list of checks contributed by a selected adapter. The four core checks are
+fixed fields because every run has an answer for each of them; the adapter list
+is open, because only the selected adapter knows what it establishes.
+
+```json
+"checks": {
+  "statementSignature": "pass",
+  "receiptInclusion": "pass",
+  "artifactBinding": "not-checked",
+  "policy": "pass",
+  "adapter": []
+}
+```
+
+The key is **always present**, and empty when no adapter ran, so a consumer
+never has to tell a missing key from an empty list. Each entry carries a stable
+machine `name`, a human `label`, one of the four `state` values above, and a
+`detail` explaining what was established or why it could not be.
+
+An adapter reports checks; it does not report a verdict. Adapter results may
+narrow the verdict but never widen it, so an adapter cannot turn a failed core
+check, or evidence it could not gather, into a pass.
+
+Per-subject adapter results are also retained under
+`appraisal.adapterFindings`. Each entry identifies the adapter check and
+subject, carries the same four-state vocabulary, and may include structured
+`expected` and `observed` values. For example, an MST policy-commitment mismatch
+records the statement-derived digest and authenticated `HOST_DATA` separately;
+consumers do not need to parse either value out of an English diagnostic.
+
+The array is always present and empty when no adapter produced subject-level
+findings. Aggregate adapter checks remain the acceptance surface. Findings
+explain those checks and drive the human transcript; their presence or display
+order never grants a pass.
+
+Internally, the shared assessment derives success from an explicit, non-empty
+set of required check names, rather than trusting a separate pass boolean.
+Each required name must occur exactly once and have state `pass`; missing or
+duplicate results cannot pass. Checks outside that set still disclose limits
+of the scoped claim, such as MST freshness and connection binding.
+
+#### Where the evidence came from
+
+`--binding-mode live-evidence` collects the evidence during the run;
+`saved-evidence` replays a bundle captured earlier. The checks are identical.
+What differs is the anchor: a saved bundle supplies the service certificate
+that identity binding is checked against. Its unsigned manifest must match
+`adapters.azure-confidential-ledger.target.host`, but a forged, self-consistent bundle can
+substitute both evidence and anchor. A live run takes that certificate from the
+public identity service and pins the connection to it.
+
+Saving a live bundle does not preserve independently verifiable acquisition
+provenance: offline replay trusts the supplied bundle's origin. File digests
+detect changes relative to its unsigned manifest, not substitution of both.
+
+The scope sentence and acquisition stage distinguish the two. The detailed
+report/record names nodes and records live evidence as *observed at* a time this
+run knows, or saved evidence as *recorded at* a collector-asserted time. Compact
+scope states the provenance without repeating full node IDs. Freshness and
+connection binding are `cannot-evaluate` either way.
+
+A ledger that could not be reached yields `cannot-evaluate`, not a failure: a
+service that did not answer is not a service that answered badly.
+
+Receipt-key acquisition (`--online`) is distinct from resource evidence
+acquisition (`live-evidence`), though the latter currently requires the former.
+See [adapters](adapters.md) for policy, invocation, and the checks that determine
+a scoped resource success.
 
 ## Diagnostics
 
@@ -239,6 +401,12 @@ once every other write outcome is known. In the other order a successful
 after the terminal output is gone.
 
 The most common cause is an output path whose parent directory does not exist.
+
+The same rule applies to stdout. A pass whose final text or JSON document could
+not be written — or could not be flushed, which a buffered writer defers until
+after every byte was accepted — is downgraded the same way, with the cause
+reported on stderr. A failure to emit the progress transcript is treated
+identically: a gate reading an incomplete record must not be told it is whole.
 
 ## Every failure names its cause
 
@@ -452,6 +620,15 @@ and decide for itself.
 The policy is `relyingPartyPolicy`, named for *whose* rules they are, because
 RFC 9943 §3 reserves "Registration Policy" for the transparency service's own
 admission rules. It is populated from the `--policy` document.
+
+`relyingPartyPolicy.satisfied` answers whether the whole document was met, so
+it requires both the statement assertions and every configured adapter check to
+have passed; a check that did not run counts against it. The narrower fact —
+whether the assertions alone held — is kept as `assertionsSatisfied`. Both are
+`null` when no policy was supplied. The verdict and exit code are unaffected:
+this changes what the record says, not what the tool decided. The change of
+meaning would ordinarily move `schemaVersion`, but the schema is `v0` and still
+moving by design.
 
 Every observation block carries a `provenance` object and a `status`.
 

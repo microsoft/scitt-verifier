@@ -47,7 +47,10 @@ use scitt_receipt::{KeyLookup, ReceiptFacts};
 use serde_json::{json, Map, Value};
 
 use crate::cli::{BindingMode, TrustSource, VerifyArgs};
-use crate::outcome::{Acquisition, Assessment, Binding, Checks, Diagnostic, Gap, Trust};
+use crate::outcome::{
+    required_checks_pass, Acquisition, AdapterCheck, AdapterFinding, Assessment, Binding, Checks,
+    Diagnostic, Gap, Trust,
+};
 
 /// The full record: observations, rules, and decision.
 ///
@@ -294,7 +297,7 @@ fn acquisition_json(a: &Acquisition) -> Value {
     })
 }
 
-fn provenance_json(p: &scitt_acquire::Provenance, acquired: bool) -> Value {
+fn provenance_json(p: &scitt_network::Provenance, acquired: bool) -> Value {
     json!({
         "issuer": p.issuer,
         "acquired": acquired,
@@ -440,6 +443,12 @@ fn binding_json(args: &VerifyArgs, assessment: &Assessment) -> Value {
         BindingMode::None => "none",
         BindingMode::PayloadBytes => "payload-bytes",
         BindingMode::PayloadDigest => "payload-digest",
+        // Recorded in the artifact-binding block as `none`, because that is
+        // exactly what it is here: this mode binds the statement to a service,
+        // not to a file, and the artifact block must not imply an artifact
+        // comparison happened. The resource appraisal is recorded separately,
+        // under the adapter checks.
+        BindingMode::SavedEvidence | BindingMode::LiveEvidence => "none",
     };
 
     // Derived from the outcome, not from whether `--artifact` was passed.
@@ -461,6 +470,14 @@ fn binding_json(args: &VerifyArgs, assessment: &Assessment) -> Value {
              define a relationship between a statement and a deployed file",
         ),
         "mode": mode,
+        // Which adapter, if any, was asked to appraise a resource. Recorded
+        // beside the binding mode because that is what selected it, and
+        // because the adapter's identity is part of what a future reader needs
+        // in order to know what the adapter checks below actually mean.
+        "adapter": match args.adapter {
+            Some(a) => Value::String(a.as_str().to_string()),
+            None => Value::Null,
+        },
         "declared": args.artifact.is_some(),
         "bound": assessment.binding.as_json_bool(),
         "detail": assessment.binding.detail,
@@ -473,13 +490,39 @@ fn binding_json(args: &VerifyArgs, assessment: &Assessment) -> Value {
 /// reserves "Registration Policy" for the transparency service's own admission
 /// rules. Someone reading `policy` in a SCITT context will reasonably assume
 /// the latter. Populated from the `--policy` document.
+///
+/// `satisfied` answers "was the relying party's policy met", and the policy
+/// document configures adapter requirements as well as statement assertions.
+/// It therefore cannot be the assertion outcome alone: a required adapter check
+/// that failed, or that could not run, means the document was not satisfied
+/// however well the statement itself read. The narrower fact is not lost —
+/// `assertionsSatisfied` keeps it, and `assertions` still lists each result —
+/// but the field a gate is most likely to read is the one that accounts for
+/// everything the policy asked for.
 fn policy_json(assessment: &Assessment) -> Value {
+    // Every check the adapter declared *required* must have passed. Its other
+    // checks are excluded deliberately: an adapter reports findings that bound
+    // a claim as well as ones that decide it, and `freshness` against CCF can
+    // never pass, so reading "every reported check passed" here would make
+    // every genuine `resource-transparent` run report an unsatisfied policy.
+    //
+    // The rule is `required_checks_pass`, the same one the verdict is derived
+    // from, so this field cannot come to disagree with the exit code beside it.
+    // A run that selected no adapter has no contract and no results, and keeps
+    // the old meaning.
+    let adapters_satisfied = assessment.checks.adapter.is_empty()
+        && assessment.checks.adapter_required.is_empty()
+        || required_checks_pass(
+            &assessment.checks.adapter,
+            &assessment.checks.adapter_required,
+        );
     match &assessment.decision {
         Some(d) => json!({
             "status": EVALUATED,
             "policyId": d.policy_id,
             "policyVersion": d.policy_version,
-            "satisfied": d.satisfied(),
+            "satisfied": d.satisfied() && adapters_satisfied,
+            "assertionsSatisfied": d.satisfied(),
             "assertions": d.results,
         }),
         None => json!({
@@ -487,6 +530,7 @@ fn policy_json(assessment: &Assessment) -> Value {
             "policyId": null,
             "policyVersion": null,
             "satisfied": null,
+            "assertionsSatisfied": null,
             "assertions": [],
         }),
     }
@@ -499,6 +543,9 @@ fn appraisal_json(assessment: &Assessment) -> Value {
         "exitCode": assessment.verdict.exit_code(),
         "pass": assessment.verdict.is_pass(),
         "checks": checks_json(&assessment.checks),
+        "adapterFindings": Value::Array(
+            assessment.adapter_findings.iter().map(adapter_finding_json).collect()
+        ),
         // The single field that answers "what stopped my deployment".
         // Everything else here is supporting detail for that one question.
         "primaryDiagnostic": match &assessment.primary {
@@ -518,6 +565,30 @@ fn checks_json(c: &Checks) -> Value {
         "receiptInclusion": c.receipt_inclusion.as_str(),
         "artifactBinding": c.artifact_binding.as_str(),
         "policy": c.policy.as_str(),
+        // Always present, empty when no adapter ran. A consumer must not have
+        // to tell an absent key from an empty list to know whether an adapter
+        // contributed anything.
+        "adapter": Value::Array(c.adapter.iter().map(adapter_check_json).collect()),
+    })
+}
+
+fn adapter_check_json(c: &AdapterCheck) -> Value {
+    json!({
+        "name": c.name,
+        "label": c.label,
+        "state": c.state.as_str(),
+        "detail": c.detail,
+    })
+}
+
+fn adapter_finding_json(f: &AdapterFinding) -> Value {
+    json!({
+        "check": f.check,
+        "subject": f.subject,
+        "state": f.state.as_str(),
+        "detail": f.detail,
+        "expected": f.expected,
+        "observed": f.observed,
     })
 }
 
@@ -552,6 +623,7 @@ fn key_lookup_name(lookup: &KeyLookup) -> &'static str {
 mod tests {
     use super::*;
     use crate::cli::Format;
+    use crate::outcome::{AdapterFinding, CheckState};
     use crate::outcome::{Category, Verdict};
     use std::path::PathBuf;
 
@@ -562,7 +634,11 @@ mod tests {
             policy: PathBuf::from("p.json"),
             artifact: None,
             binding_mode: BindingMode::None,
+            adapter: None,
+            evidence: None,
+            save_evidence: None,
             format: Format::Text,
+            verbose: false,
             result: None,
             facts: None,
             save_trust: None,
@@ -620,6 +696,168 @@ mod tests {
         let record = build(&args(), &incomplete(), 0);
         assert_eq!(record["artifactBinding"]["status"], NOT_REQUESTED);
         assert_eq!(record["artifactBinding"]["bound"], Value::Null);
+    }
+
+    /// A consumer must not have to tell a missing key from an empty list to
+    /// know whether an adapter contributed anything. If this key ever becomes
+    /// conditional, "no adapter ran" and "an older verifier wrote this record"
+    /// stop being distinguishable, and the second one is not a claim about the
+    /// deployment at all.
+    #[test]
+    fn adapter_checks_are_always_an_array_even_when_none_ran() {
+        let record = build(&args(), &incomplete(), 0);
+        let adapter = &record["appraisal"]["checks"]["adapter"];
+        assert!(
+            adapter.is_array(),
+            "adapter checks must always be an array, got {adapter:?}"
+        );
+        assert_eq!(adapter.as_array().map(Vec::len), Some(0));
+    }
+
+    #[test]
+    fn adapter_findings_keep_structured_expected_and_observed_values() {
+        let mut assessment = incomplete();
+        assessment.adapter_findings.push(AdapterFinding {
+            check: "cce-policy-host-data".into(),
+            subject: "node-a".into(),
+            state: CheckState::Fail,
+            detail: "different commitments".into(),
+            expected: Some("expected".into()),
+            observed: Some("observed".into()),
+        });
+
+        let record = build(&args(), &assessment, 0);
+        let finding = &record["appraisal"]["adapterFindings"][0];
+        assert_eq!(finding["check"], "cce-policy-host-data");
+        assert_eq!(finding["subject"], "node-a");
+        assert_eq!(finding["state"], "fail");
+        assert_eq!(finding["expected"], "expected");
+        assert_eq!(finding["observed"], "observed");
+    }
+
+    /// A policy document configures adapter requirements as well as statement
+    /// assertions, so its `satisfied` may not report only the latter.
+    ///
+    /// A gate reading the record is the primary consumer, and a field that
+    /// says the relying party's policy was met while a required appraisal
+    /// failed is a trap — the more so because the verdict and exit code are
+    /// correct, so the record disagrees with the process that wrote it.
+    #[test]
+    fn a_failed_adapter_check_leaves_the_policy_unsatisfied() {
+        use scitt_policy::{AssertionResult, Outcome, PolicyDecision};
+
+        let satisfied_assertions = || PolicyDecision {
+            policy_id: "p".into(),
+            policy_version: "1".into(),
+            results: vec![AssertionResult {
+                name: "issuer".into(),
+                outcome: Outcome::Pass,
+                detail: "d".into(),
+            }],
+        };
+
+        let with_adapter = |state: Option<CheckState>| {
+            let mut assessment = incomplete();
+            assessment.decision = Some(satisfied_assertions());
+            if let Some(state) = state {
+                assessment.checks.adapter.push(AdapterCheck {
+                    name: "cce-policy-host-data".into(),
+                    label: "CCE policy / HOST_DATA".into(),
+                    state,
+                    detail: "d".into(),
+                });
+                assessment.checks.adapter_required = vec!["cce-policy-host-data".into()];
+            }
+            build(&args(), &assessment, 0)
+        };
+
+        // With no adapter selected the meaning is unchanged.
+        let record = with_adapter(None);
+        assert_eq!(record["relyingPartyPolicy"]["satisfied"], true);
+        assert_eq!(record["relyingPartyPolicy"]["assertionsSatisfied"], true);
+
+        for state in [
+            CheckState::Fail,
+            CheckState::CannotEvaluate,
+            CheckState::NotChecked,
+        ] {
+            let record = with_adapter(Some(state));
+            assert_eq!(
+                record["relyingPartyPolicy"]["satisfied"], false,
+                "an adapter check in state {state:?} must not read as a satisfied policy"
+            );
+            // The narrower fact survives rather than being overwritten.
+            assert_eq!(record["relyingPartyPolicy"]["assertionsSatisfied"], true);
+        }
+
+        let record = with_adapter(Some(CheckState::Pass));
+        assert_eq!(record["relyingPartyPolicy"]["satisfied"], true);
+    }
+
+    /// The regression this field invited: the adapter reports checks that can
+    /// never pass, and counting those would make every real success look like
+    /// an unsatisfied policy.
+    #[test]
+    fn a_check_outside_the_contract_does_not_unsatisfy_the_policy() {
+        use scitt_policy::{AssertionResult, Outcome, PolicyDecision};
+
+        let mut assessment = incomplete();
+        assessment.decision = Some(PolicyDecision {
+            policy_id: "p".into(),
+            policy_version: "1".into(),
+            results: vec![AssertionResult {
+                name: "issuer".into(),
+                outcome: Outcome::Pass,
+                detail: "d".into(),
+            }],
+        });
+        let check = |name: &str, state: CheckState| AdapterCheck {
+            name: name.into(),
+            label: name.into(),
+            state,
+            detail: "d".into(),
+        };
+        assessment.checks.adapter = vec![
+            check("cce-policy-host-data", CheckState::Pass),
+            // Permanently unevaluable against CCF, and deliberately not in the
+            // contract below.
+            check("freshness", CheckState::CannotEvaluate),
+        ];
+        assessment.checks.adapter_required = vec!["cce-policy-host-data".into()];
+
+        let record = build(&args(), &assessment, 0);
+        assert_eq!(
+            record["relyingPartyPolicy"]["satisfied"], true,
+            "a check the adapter never required must not decide the policy"
+        );
+
+        // A contract naming a check the adapter did not report is unmet: the
+        // appraisal is incomplete, not satisfied by omission.
+        assessment
+            .checks
+            .adapter_required
+            .push("node-coverage".into());
+        let record = build(&args(), &assessment, 0);
+        assert_eq!(record["relyingPartyPolicy"]["satisfied"], false);
+    }
+
+    /// The four core checks are the compatibility surface. Adding adapter
+    /// checks must not move or rename them.
+    #[test]
+    fn adding_adapter_checks_leaves_the_core_four_in_place() {
+        let record = build(&args(), &incomplete(), 0);
+        let checks = &record["appraisal"]["checks"];
+        for key in [
+            "statementSignature",
+            "receiptInclusion",
+            "artifactBinding",
+            "policy",
+        ] {
+            assert_eq!(
+                checks[key], "not-checked",
+                "core check {key} missing or changed"
+            );
+        }
     }
 
     /// Receipts arrive in the unprotected header. If this block ever claims the

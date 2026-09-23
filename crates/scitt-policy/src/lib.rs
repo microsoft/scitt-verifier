@@ -22,6 +22,11 @@
 //! The crate takes no clock. `now` is passed in, so evaluation is reproducible
 //! and testable.
 
+pub mod adapters;
+pub mod claim;
+
+pub use adapters::Adapters;
+
 use scitt_receipt::cbor;
 use scitt_receipt::chain::Outcome as ChainOutcome;
 use scitt_receipt::external::{self, DetachedSigner};
@@ -40,6 +45,9 @@ pub struct Policy {
     pub policy_version: String,
     #[serde(default)]
     pub description: Option<String>,
+    /// Optional requirements that need evidence beyond statement facts.
+    #[serde(default)]
+    pub adapters: Adapters,
     pub assertions: Assertions,
 }
 
@@ -1299,6 +1307,7 @@ impl Policy {
                 ));
             }
         }
+        policy.adapters.validate()?;
         Ok(policy)
     }
 
@@ -1311,7 +1320,7 @@ impl Policy {
     fn is_empty(&self) -> bool {
         match serde_json::to_value(&self.assertions) {
             Ok(serde_json::Value::Object(fields)) => {
-                fields.values().all(serde_json::Value::is_null)
+                fields.values().all(serde_json::Value::is_null) && self.adapters.is_empty()
             }
             _ => false,
         }
@@ -1319,11 +1328,25 @@ impl Policy {
 
     /// Evaluate the policy against verified facts.
     ///
+    /// Adapter requirements yield `CannotEvaluate`: this API has no adapter
+    /// evidence and must not report success for requirements it did not check.
+    ///
     /// `now` is a Unix timestamp supplied by the caller. Passing it in rather
     /// than reading the clock keeps the same inputs producing the same decision
     /// on every machine, which matters when a build agent and a human are
     /// arguing about why a gate failed.
     pub fn evaluate(&self, facts: &StatementFacts, now: i64) -> PolicyDecision {
+        let mut decision = self.evaluate_statement(facts, now);
+        decision.results.extend(self.adapters.unavailable_results());
+        decision
+    }
+
+    /// Evaluate only statement assertions, as the first stage of orchestration.
+    ///
+    /// This is not a decision on the whole policy: callers must separately
+    /// evaluate every requested adapter before accepting it. With no statement
+    /// assertions, the decision has no results and is not satisfied.
+    pub fn evaluate_statement(&self, facts: &StatementFacts, now: i64) -> PolicyDecision {
         let mut results = Vec::new();
         let a = &self.assertions;
 
