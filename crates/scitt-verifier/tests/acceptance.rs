@@ -1555,6 +1555,39 @@ fn a_path_read_from_inspect_can_be_pasted_into_a_policy() {
     );
 }
 
+/// `inspect` displays a file it has not verified, so every value it prints is
+/// chosen by whoever produced that file. Unescaped, the subject in this
+/// fixture ends its line and writes a green `PASS` on the next one — a verdict
+/// `inspect` never reaches, in a command whose entire purpose is to show what
+/// is there without judging it.
+#[test]
+fn a_statement_cannot_write_its_own_verdict_into_inspect() {
+    let statement = corpus(&["fixtures", "hostile-subject.cose"]);
+    let r = run(&["inspect", "--statement", &statement]);
+
+    assert!(
+        !r.stdout.contains('\u{1b}'),
+        "no escape character from the statement may reach the terminal: {:?}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains('\r'),
+        "a carriage return can repaint the line above it: {:?}",
+        r.stdout
+    );
+    for line in r.stdout.lines() {
+        assert!(
+            !line.trim_start().starts_with("PASS"),
+            "a statement wrote a line that reads like a verdict: {line:?}"
+        );
+    }
+    assert!(
+        r.stdout.contains(r"a\r\n PASS \u{1b}[32m"),
+        "the value must still be shown in full, escaped: {}",
+        r.stdout
+    );
+}
+
 /// A header this build does not interpret still has to be legible. Naming its
 /// shape — "array of 1" — proves it is there and says nothing an author can
 /// write a rule against, which sent them to a separate CBOR decoder. The

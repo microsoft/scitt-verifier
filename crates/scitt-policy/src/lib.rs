@@ -1217,6 +1217,30 @@ pub fn resolve_json_path<'a>(
     Ok(Some(node))
 }
 
+/// How much of an observed value a diagnostic will quote.
+///
+/// Matches the summary threshold `inspect` uses, so the two commands agree on
+/// what counts as long. The expected side of a comparison is never shortened:
+/// it is the policy's own literal, it is as long as its author made it, and it
+/// is the string an operator needs to read in full to fix a mismatch.
+const OBSERVED_LIMIT: usize = 64;
+
+/// Quote an observed value, summarising one too long to print.
+///
+/// The value came off the wire. A statement we tested against carries a
+/// 684-character detached signature in a header, and a `startsWith` rule over
+/// it put every character of that signature into the assertion detail, in the
+/// terminal report and in the record. The prefix that decided the comparison
+/// is at the front, which is what a reader is checking.
+fn observed(value: &str) -> String {
+    let count = value.chars().count();
+    if count <= OBSERVED_LIMIT {
+        return format!("'{value}'");
+    }
+    let head: String = value.chars().take(32).collect();
+    format!("'{head}…' ({count} chars)")
+}
+
 /// Name a JSON value's type for a report, without quoting its contents.
 ///
 /// Mirrors `render_scalar` for CBOR: a diagnostic should say what was found
@@ -2084,12 +2108,16 @@ fn evaluate_claim(
             serde_json::Value::String(s) if expected.matches(s) => result(
                 name,
                 Outcome::Pass,
-                format!("{at}: '{s}' {}", expected.describe()),
+                format!("{at}: {} {}", observed(s), expected.describe()),
             ),
             serde_json::Value::String(s) => result(
                 name,
                 Outcome::Fail,
-                format!("{at}: '{s}' does not match: it {}", expected.describe()),
+                format!(
+                    "{at}: {} does not match: it {}",
+                    observed(s),
+                    expected.describe()
+                ),
             ),
             other => result(
                 name,
@@ -2181,12 +2209,16 @@ fn evaluate_header(header: &HeaderAssertion, at: &str, value: &CborValue) -> Ass
             CborValue::TextString(s) if expected.matches(s) => result(
                 name,
                 Outcome::Pass,
-                format!("{at}: '{s}' {}", expected.describe()),
+                format!("{at}: {} {}", observed(s), expected.describe()),
             ),
             CborValue::TextString(s) => result(
                 name,
                 Outcome::Fail,
-                format!("{at}: '{s}' does not match: it {}", expected.describe()),
+                format!(
+                    "{at}: {} does not match: it {}",
+                    observed(s),
+                    expected.describe()
+                ),
             ),
             other => result(
                 name,
@@ -2722,6 +2754,12 @@ mod tests {
         decision.results[0].outcome
     }
 
+    fn detail_of(policy: &Policy, facts: &StatementFacts) -> String {
+        let decision = policy.evaluate(facts, 0);
+        assert_eq!(decision.results.len(), 1, "expected exactly one result");
+        decision.results[0].detail.clone()
+    }
+
     #[test]
     fn a_validated_chain_satisfies_the_chain_assertion() {
         let policy = chain_policy(r#""certificateChainValidated":true"#);
@@ -2976,6 +3014,40 @@ mod tests {
         let policy = header_policy(r#"{"path":[9],"text":{"equals":"array of 3"}}"#);
         assert_eq!(outcome_of(&policy, &decoy), Outcome::Pass);
         assert_eq!(outcome_of(&policy, &real), Outcome::Fail);
+    }
+
+    /// A long observed value is summarised; a long *expected* value is not.
+    ///
+    /// The observed side came off the wire and can be any length its producer
+    /// chose. The expected side is the policy's own literal — it is exactly
+    /// what an operator has to compare against to fix a mismatch, so cutting
+    /// it short would remove the one string the diagnostic exists to show.
+    #[test]
+    fn a_long_observed_value_is_summarised_and_the_policy_literal_is_not() {
+        let long = "F".repeat(684);
+        let facts = facts_with_protected(map(vec![(
+            CborValue::TextString("external-signature".into()),
+            CborValue::TextString(long.clone()),
+        )]));
+        let prefix = "F".repeat(70);
+        let policy = header_policy(&format!(
+            r#"{{"path":["external-signature"],"text":{{"startsWith":"{prefix}"}}}}"#
+        ));
+
+        let detail = detail_of(&policy, &facts);
+        assert_eq!(outcome_of(&policy, &facts), Outcome::Pass);
+        assert!(
+            !detail.contains(&long),
+            "the observed value must not be echoed in full: {detail}"
+        );
+        assert!(
+            detail.contains("(684 chars)"),
+            "the reader must be told what was summarised: {detail}"
+        );
+        assert!(
+            detail.contains(&prefix),
+            "the policy's own literal stays readable in full: {detail}"
+        );
     }
 
     /// Two byte strings sharing a 16-byte prefix render identically, because
