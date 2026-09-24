@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### An empty `issuer` list is refused when the policy is loaded (breaking)
+
+`{"issuer": []}` used to parse and then fail every statement, because no
+issuer can be a member of an empty list. It is now refused at load, like
+`oneOf: []` and `startsWith: ""`, so an unsatisfiable policy is reported as an
+authoring error instead of as a stream of rejected artifacts. A policy that
+relied on it as a deny-all must now say so some other way.
+
 ### `inspect` no longer lets a statement drive the terminal
 
 Every value `inspect` printed came straight from the file, unescaped, and

@@ -1287,6 +1287,17 @@ impl Policy {
                 "policy declares no assertions; an empty policy would accept anything".into(),
             );
         }
+        // Refused rather than evaluated, like `oneOf: []`: no issuer can be a
+        // member of an empty list, so it would silently become a deny-all and
+        // the operator would chase every artifact's failure instead of the
+        // policy's authoring error.
+        if policy.assertions.issuer.as_ref().is_some_and(Vec::is_empty) {
+            return Err(
+                "issuer is empty; no receipt issuer could ever satisfy it. List the transparency \
+                 services you accept, or omit the assertion to accept any issuer"
+                    .into(),
+            );
+        }
         if let Some(subject) = &policy.assertions.statement_subject {
             subject.validate("statementSubject")?;
         }
@@ -2666,6 +2677,25 @@ mod tests {
         assert!(policy_accepting("trusted.example")
             .evaluate(&facts, 0)
             .satisfied());
+    }
+
+    #[test]
+    fn an_empty_issuer_list_is_refused_when_the_policy_is_parsed() {
+        // Accepted, it would fail every statement: an authoring error surfacing
+        // as a stream of rejected artifacts rather than as one refused policy.
+        let json = br#"{"policyId":"p","policyVersion":"1","assertions":{"issuer":[]}}"#;
+        let err = Policy::from_json(json).unwrap_err();
+        assert!(err.contains("issuer is empty"), "{err}");
+    }
+
+    #[test]
+    fn an_empty_issuer_list_is_refused_alongside_other_assertions() {
+        // The refusal must not depend on `issuer` being the only assertion;
+        // a policy that is otherwise valid is still a deny-all with it.
+        let json = br#"{"policyId":"p","policyVersion":"1",
+            "assertions":{"issuer":[],"receiptCount":1}}"#;
+        let err = Policy::from_json(json).unwrap_err();
+        assert!(err.contains("issuer is empty"), "{err}");
     }
 
     fn kid_policy() -> Policy {
