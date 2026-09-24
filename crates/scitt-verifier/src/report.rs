@@ -161,56 +161,50 @@ pub fn compact(
             )?;
         }
     }
-    writeln!(out, "Limitations:")?;
-    if let Some(adapter) = args.adapter {
-        let mut shown = Vec::new();
-        for check in &a.checks.adapter {
-            if let Some(message) =
-                crate::adapters::compact_limitation(adapter, check, &a.adapter_findings)
-            {
-                if !shown.contains(&message) {
-                    writeln!(out, "  {message}")?;
-                    shown.push(message);
-                }
-            }
+    // Limitations and the service configuration are verbose-only. What was
+    // not checked is still named, by code, so a compact pass never reads as
+    // covering more than it did.
+    if !a.not_checked.is_empty() {
+        let codes: Vec<&str> = a.not_checked.iter().map(|g| g.code).collect();
+        writeln!(out, "Not checked: {}.", safe_text(&codes.join(", "), 384))?;
+    }
+    let configured = a
+        .acquisition
+        .as_ref()
+        .is_some_and(|x| !x.configurations.is_empty());
+    writeln!(
+        out,
+        "{} shown with --verbose.",
+        if configured {
+            "Limitations and the service configuration are"
+        } else {
+            "Limitations are"
         }
-    }
-    for gap in &a.not_checked {
-        let message = match gap.code {
-            "ArtifactBindingNotRequested" => "artifact binding was not requested; no artifact identity is established.",
-            "CertificateChainNotAnchoredExternally" => "Signing chain is internally consistent with its embedded root, not independently trusted.",
-            "RevocationNotChecked" => "Signing certificate revocation was not checked.",
-            _ => &gap.message,
-        };
-        writeln!(out, "  [{}] {}", gap.code, safe_text(message, 384))?;
-    }
-    if args.binding_mode.is_evidence() {
-        writeln!(
-            out,
-            "  Artifact binding was not requested; this is a resource appraisal."
-        )?;
-    }
-    if !a.facts.as_ref().is_some_and(|facts| {
+    )?;
+    Ok(())
+}
+
+/// Caveats that apply to the run as a whole rather than to one gap.
+fn run_limitations(a: &Assessment) -> Vec<&'static str> {
+    let mut lines = Vec::new();
+    let anchored = a.facts.as_ref().is_some_and(|facts| {
         matches!(&facts.chain_outcome,
-        Some(scitt_receipt::chain::Outcome::Valid(details)) if details.anchored_externally)
-    }) && !a.decision.as_ref().is_some_and(|decision| {
+            Some(scitt_receipt::chain::Outcome::Valid(details)) if details.anchored_externally)
+    });
+    let pinned_root = a.decision.as_ref().is_some_and(|decision| {
         decision.results.iter().any(|r| {
             r.name == "requireChainToRootSha256" && r.outcome == scitt_policy::Outcome::Pass
         })
-    }) {
-        writeln!(out, "  No independent publisher authorization is established by a receipt issuer assertion.")?;
-    }
-    for limitation in &a.trust.limitations {
-        writeln!(out, "  {}", safe_text(limitation, 384))?;
+    });
+    if !anchored && !pinned_root {
+        lines.push(
+            "No independent publisher authorization is established by a receipt issuer assertion.",
+        );
     }
     if a.trust.mode == "acquired-key-set" {
-        writeln!(
-            out,
-            "  Receipt-key freshness is not established by acquisition."
-        )?;
+        lines.push("Receipt-key freshness is not established by acquisition.");
     }
-    service_configuration(out, a)?;
-    Ok(())
+    lines
 }
 
 /// Each selected service's current configuration, after everything that
@@ -494,11 +488,15 @@ fn detail(out: &mut impl Write, a: &Assessment) -> io::Result<()> {
         }
     }
 
-    if !a.trust.limitations.is_empty() {
+    let run = run_limitations(a);
+    if !a.trust.limitations.is_empty() || !run.is_empty() {
         writeln!(out)?;
-        writeln!(out, "  Trust limitations")?;
+        writeln!(out, "  Limitations")?;
         for l in &a.trust.limitations {
             writeln!(out, "    - {}", safe(l))?;
+        }
+        for l in run {
+            writeln!(out, "    - {l}")?;
         }
     }
     service_configuration(out, a)?;
@@ -1512,18 +1510,21 @@ mod tests {
             assert!(text.contains("NOTICE DistinctWarning do not hide this\\nwarning"));
             assert!(!text.contains("full-measurement") && !text.contains("long-node-id"));
             assert!(!text.contains("Test binding:"));
-            assert_eq!(
-                text.matches("Artifact binding was not requested").count(),
-                1
+            assert!(
+                !text.contains("Artifact binding was not requested"),
+                "{text}"
             );
-            assert!(text.contains("No independent publisher authorization"));
-            let (_, limitations) = text.split_once("Limitations:\n").unwrap();
+            assert!(!text.contains("No independent publisher authorization"));
+            assert!(!text.contains("Limitations:\n"), "{text}");
+            assert!(
+                text.contains("Limitations are shown with --verbose."),
+                "{text}"
+            );
             for message in [
                 "Report freshness was not established.",
                 "Binding to the serving connection was not established.",
             ] {
-                assert_eq!(text.matches(message).count(), 1, "{text}");
-                assert!(limitations.contains(message), "{text}");
+                assert!(!text.contains(message), "{text}");
             }
             assert!(!text.contains("CANNOT EVALUATE freshness"), "{text}");
             assert!(
@@ -1547,6 +1548,19 @@ mod tests {
         );
         assert!(text.contains("full detail for freshness"));
         assert!(text.contains("full detail for connection-binding"));
+
+        let mut bytes = Vec::new();
+        super::verify(&mut bytes, &assessment, true, false).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains("  Limitations\n"), "{text}");
+        assert!(
+            text.contains("No independent publisher authorization"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Receipt-key freshness is not established"),
+            "{text}"
+        );
     }
 
     /// The bracketed label is meant to be pasted into a policy `path`, so an
@@ -1667,8 +1681,8 @@ mod service_configuration_tests {
         let body = r#"{"authentication":{"allowUnauthenticated":true},"policy":{"policyScript":"export function apply(phdr) {\n  return true;\n}"}}"#;
         let a = with(vec![retrieved("ledger.example", body)]);
 
-        for verbose in [false, true] {
-            let text = render(&a, verbose);
+        {
+            let text = render(&a, true);
             assert!(
                 text.contains("Service configuration (informational; does not affect the verdict)"),
                 "{text}"
@@ -1700,8 +1714,8 @@ mod service_configuration_tests {
         let body = r#"{"x\u001b[2J":"a\u007fb\u0085c\u202ed","policy":{"policyScript":"ok\nFORGED-VERDICT\r\u001b[2J"}}"#;
         let a = with(vec![retrieved("ledger.example", body)]);
 
-        for verbose in [false, true] {
-            let text = render(&a, verbose);
+        {
+            let text = render(&a, true);
             for raw in ['\u{1b}', '\r', '\u{7f}', '\u{85}', '\u{202e}'] {
                 assert!(!text.contains(raw), "{raw:?} reached the terminal:\n{text}");
             }
@@ -1723,7 +1737,7 @@ mod service_configuration_tests {
             "https://b.example/configuration returned HTTP 404",
         ));
         let skipped = Observation::not_attempted("a.example", "key set not acquired", 0);
-        let text = render(&with(vec![skipped, failed]), false);
+        let text = render(&with(vec![skipped, failed]), true);
 
         assert!(
             text.contains("not asked           key set not acquired"),
@@ -1740,6 +1754,29 @@ mod service_configuration_tests {
     fn an_offline_run_prints_no_configuration_section() {
         let mut a = with(Vec::new());
         a.acquisition = None;
-        assert!(!render(&a, false).contains("Service configuration"));
+        assert!(!render(&a, true).contains("Service configuration"));
+        let compact = render(&a, false);
+        assert!(
+            compact.contains("Limitations are shown with --verbose."),
+            "{compact}"
+        );
+        assert!(!compact.contains("service configuration"), "{compact}");
+    }
+
+    /// Compact output points to the section and prints none of it: no policy
+    /// text, no limitations.
+    #[test]
+    fn compact_output_leaves_the_configuration_and_limitations_to_verbose() {
+        let body = r#"{"policy":{"policyScript":"export function apply() { return true; }"}}"#;
+        let text = render(&with(vec![retrieved("ledger.example", body)]), false);
+
+        assert!(
+            text.contains("Limitations and the service configuration are shown with --verbose."),
+            "{text}"
+        );
+        assert!(!text.contains("Service configuration ("), "{text}");
+        assert!(!text.contains("policyScript"), "{text}");
+        assert!(!text.contains("not runtime attestation"), "{text}");
+        assert!(!text.contains("Receipt-key freshness"), "{text}");
     }
 }

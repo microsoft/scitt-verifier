@@ -95,7 +95,8 @@ fn a_genuine_statement_without_an_artifact_is_only_statement_transparent() {
         r.stdout
     );
     assert!(
-        r.stdout.contains("artifact binding was not requested"),
+        r.stdout
+            .contains("Not checked: ArtifactBindingNotRequested"),
         "an unbound pass must say so: {}",
         r.stdout
     );

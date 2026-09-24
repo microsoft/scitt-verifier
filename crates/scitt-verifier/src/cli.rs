@@ -56,8 +56,8 @@ VERIFY OPTIONS:
                              One of --scitt-keys or --online is required.
     --online                 Acquire the signing keys from a ledger the policy
                              allowlists, over an authenticated connection,
-                             and show each ledger's current configuration
-                             (informational; never affects the verdict).
+                             and read each ledger's current configuration
+                             (shown with --verbose; never affects the verdict).
                              One of --scitt-keys or --online is required.
     --ledger <HOST>          Acquire from this ledger only. It must appear in
                              the policy's assertions.issuer allowlist: this
@@ -102,10 +102,13 @@ A live fetch establishes who served the keys. It does not establish that a key
 is unrevoked, that the set is current, or anything about the statement's signer.
 
 With --online, each acquired ledger is also asked for its current configuration
-over the same authenticated connection, and it is shown after the verdict. It is
-what the service says now, not the policy a statement was registered under; it
-is not signed, it is never executed, and it cannot change the verdict or exit
-code. A ledger that does not serve it is reported as such.
+over the same authenticated connection; --verbose shows it after the verdict.
+It is what the service says now, not the policy a statement was registered
+under; it is not signed, it is never executed, and it cannot change the verdict
+or exit code. A ledger that does not serve it is reported as such.
+
+Compact output names what was not checked by code; --verbose explains each gap
+and lists the run's limitations.
 
 EXIT CODES:
     0  transparent, and the policy is satisfied

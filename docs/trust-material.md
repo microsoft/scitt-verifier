@@ -92,8 +92,8 @@ on every run.
 
 After the key sets, `--online` asks each acquired ledger for `/configuration`
 over the same connection, pinned to the same service certificate, within the
-same overall time limit. The document is shown after the verdict, in full and
-escaped, and recorded under `serviceConfiguration` (see
+same overall time limit. With `--verbose` the document is shown after the
+verdict, in full and escaped; it is always recorded under `serviceConfiguration` (see
 [output.md](output.md#serviceconfiguration)). For a SCITT CCF ledger it
 includes the registration policy script and whether unauthenticated
 registration is allowed.

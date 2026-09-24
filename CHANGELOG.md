@@ -6,14 +6,22 @@
 
 After acquiring the key sets, `--online` now also reads each acquired ledger's
 `/configuration` over the same pinned connection and within the same overall
-time limit — one extra request per ledger. The document, including a SCITT
-ledger's registration policy script, is printed in full and escaped after the
-verdict, recorded in a new top-level `serviceConfiguration` block in both the
+time limit — one extra request per ledger. With `--verbose` the document,
+including a SCITT ledger's registration policy script, is printed in full and
+escaped after the verdict. It is always recorded in a new top-level `serviceConfiguration` block in both the
 result and facts documents, and saved as `<issuer>.configuration.json` by
 `--save-trust`. It is informational only: it never affects the verdict, exit
 code or diagnostics, and a ledger that does not serve it is reported as such.
 It is the service's configuration now, not the policy a statement was
 registered under. Offline runs are unchanged and make no request.
+
+### Compact output leaves limitations to `--verbose`
+
+The default text output no longer ends with a `Limitations:` block. It names
+each not-checked gap by code on one line (`Not checked: …`) and points to
+`--verbose`, which now prints the gap explanations, trust-material caveats,
+and service configuration under `Not checked`, `Limitations` and `Service
+configuration`. JSON records are unchanged.
 
 ### `inspect` no longer lets a statement drive the terminal
 

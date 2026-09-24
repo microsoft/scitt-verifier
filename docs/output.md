@@ -65,10 +65,17 @@ Successes omit measurements and matching expected/observed values. Failures,
 cannot-evaluate findings, and other nonpassing states retain their details and
 available expected/observed values. Unknown adapter checks remain visible.
 After MST node appraisal, its two known excluded `cannot-evaluate` checks
-(report freshness and serving-connection binding) appear once as concise human
-sentences under the final `Limitations`, rather than again beneath the node
-table. Failures, prerequisite errors, and unknown checks are not filtered this
-way. Verbose output and JSON retain the full original findings.
+(report freshness and serving-connection binding) are omitted from compact
+output rather than repeated beneath the node table. Failures, prerequisite
+errors, and unknown checks are not filtered this way. Verbose output and JSON
+retain the full original findings.
+
+Compact output ends with the verdict, any diagnostics, and one line naming
+each not-checked gap by code (`Not checked: ArtifactBindingNotRequested, …`).
+The prose limitations — gap explanations, trust-material caveats, and the
+service configuration from `--online` — are printed only with `--verbose`,
+under `Not checked`, `Limitations`, and `Service configuration`. JSON always
+carries all of them.
 
 An authenticated-target success is emitted only after a pinned HTTPS request
 succeeds, not after constructing a TLS client. Collection/save completion is

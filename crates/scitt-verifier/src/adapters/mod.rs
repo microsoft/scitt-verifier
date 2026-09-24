@@ -83,16 +83,6 @@ pub fn check_event(
     }
 }
 
-pub fn compact_limitation(
-    adapter: Adapter,
-    check: &AdapterCheck,
-    findings: &[AdapterFinding],
-) -> Option<&'static str> {
-    match adapter {
-        Adapter::AzureConfidentialLedger => acl::compact_limitation(check, findings),
-    }
-}
-
 pub fn appraise(
     adapter: Adapter,
     source: EvidenceSource<'_>,
