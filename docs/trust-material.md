@@ -64,7 +64,10 @@ whole design, not a safety check bolted on:
 
 `--save-trust <DIR>` writes what was fetched — the key sets and service
 certificates as served, plus a manifest of digests — so a later run can replay
-the same material offline with `--scitt-keys`. It refuses to overwrite an
+the same material offline with `--scitt-keys`. Each service configuration that
+was read is saved beside them as `<issuer>.configuration.json`, byte for byte,
+with its digest in the manifest; it is kept for audit and nothing replays it.
+It refuses to overwrite an
 existing snapshot, and it refuses to let `--result` or `--facts` write over a
 file it produced in the same run: a record is a description of a conclusion,
 the snapshot is evidence, and the write that would destroy the evidence is the
@@ -84,6 +87,36 @@ the key that certificate binds to. It does **not** establish that a key is
 unrevoked, that the set is current rather than replayed, or anything about the
 statement's signer. The limitations recorded under `trust.limitations` say so
 on every run.
+
+### The service's current configuration
+
+After the key sets, `--online` asks each acquired ledger for `/configuration`
+over the same connection, pinned to the same service certificate, within the
+same overall time limit. With `--verbose` the document is shown after the
+verdict, in full and escaped; it is always recorded under `serviceConfiguration` (see
+[output.md](output.md#serviceconfiguration)). For a SCITT CCF ledger it
+includes the registration policy script and whether unauthenticated
+registration is allowed.
+
+It is shown so a reader can see what the service accepts, and it is limited in
+exactly the ways that matter:
+
+- It is what the service says **now**, not the policy any statement was
+  registered under, and not a prediction that this statement would be accepted
+  today.
+- It is **not signed** and not bound to any receipt. The TLS connection is its
+  only authentication, and a saved copy loses that.
+- A registration policy is the **service's**, not the relying party's. It is
+  never executed, and it cannot relax, satisfy, or replace an assertion in your
+  policy.
+- It says nothing about the code the service runs.
+
+It never changes the verdict or the exit code. A ledger that does not serve the
+endpoint, refuses it, times out, redirects, or returns something that is not a
+JSON object is reported as such in that section, and nothing else changes. A
+ledger whose keys were not acquired is not asked, because no authenticated
+connection to it was established. This is one extra request per acquired
+ledger.
 
 ## Why the pinned path is a separate tool
 

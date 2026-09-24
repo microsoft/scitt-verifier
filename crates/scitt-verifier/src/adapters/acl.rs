@@ -61,8 +61,10 @@ pub fn check_event(check: &AdapterCheck, detail: String, findings: &[AdapterFind
     }
 }
 
-/// Only excluded, unevaluable checks after node appraisal are moved to the
-/// final limitations. Prerequisite errors and future required checks stay visible.
+/// Only excluded, unevaluable checks after node appraisal are known
+/// limitations. Compact output omits them, like every other limitation, and
+/// `--verbose` shows them in full. Prerequisite errors and future required
+/// checks stay visible.
 pub fn compact_limitation(
     check: &AdapterCheck,
     findings: &[AdapterFinding],

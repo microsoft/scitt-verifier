@@ -134,6 +134,7 @@ pub fn build(args: &VerifyArgs, assessment: &Assessment, now: i64) -> Value {
     // without having to read its contents.
     if let Some(a) = &assessment.acquisition {
         root.insert("acquisition".into(), acquisition_json(a));
+        root.insert("serviceConfiguration".into(), configuration_json(a));
     }
     root.insert("signedStatement".into(), statement_json(assessment));
     root.insert("receipts".into(), receipts_json(assessment));
@@ -161,6 +162,9 @@ pub fn facts(args: &VerifyArgs, assessment: &Assessment, now: i64) -> Value {
     // nothing at all saying from where.
     if let Some(a) = &assessment.acquisition {
         root.insert("acquisition".into(), acquisition_json(a));
+        // An observation too — what the service said, when, over which
+        // connection — so it belongs here by the same rule.
+        root.insert("serviceConfiguration".into(), configuration_json(a));
     }
     root.insert("signedStatement".into(), statement_json(assessment));
     root.insert("receipts".into(), receipts_json(assessment));
@@ -294,6 +298,84 @@ fn acquisition_json(a: &Acquisition) -> Value {
         // `selected` rather than leaving the reader to guess between "nothing
         // was allowlisted" and "nothing was asked".
         "notAttempted": a.not_attempted,
+    })
+}
+
+/// What a service's current configuration can and cannot be used for.
+///
+/// Fixed strings, carried in every record that has the block, because the
+/// record outlives the run and a reader six months later has only the record.
+pub const CONFIGURATION_LIMITATIONS: [&str; 4] = [
+    "This is the service's configuration when this run asked, not the policy any \
+     statement was registered under, and not a prediction of whether this statement \
+     would be accepted today.",
+    "It is not signed and not bound to any receipt. It was authenticated only by the \
+     TLS connection it arrived on; a saved copy keeps the bytes and loses that.",
+    "A registration policy is the transparency service's, not the relying party's. It \
+     was not executed, and it did not relax, satisfy, or replace any assertion in the \
+     relying-party policy.",
+    "It says nothing about the code the service runs; it is not runtime attestation.",
+];
+
+/// The current configuration of each selected service, for audit.
+///
+/// Its own top-level block rather than part of `acquisition`, because
+/// everything in `acquisition` fed the verdict and nothing here did.
+/// `affectsVerdict: false` says so to a consumer that reads fields rather than
+/// documentation.
+fn configuration_json(a: &Acquisition) -> Value {
+    use scitt_network::configuration::Outcome;
+
+    let ledgers: Vec<Value> = a
+        .configurations
+        .iter()
+        .map(|o| {
+            let (status, configuration, bytes, sha256, failure, reason) = match &o.outcome {
+                Outcome::Retrieved(c) => (
+                    "retrieved",
+                    Value::Object(c.document.clone()),
+                    json!(c.bytes.len()),
+                    json!(c.sha256),
+                    Value::Null,
+                    Value::Null,
+                ),
+                Outcome::Failed(e) => (
+                    "failed",
+                    Value::Null,
+                    Value::Null,
+                    Value::Null,
+                    json!({ "code": e.diagnostic.code(), "detail": e.detail }),
+                    Value::Null,
+                ),
+                Outcome::NotAttempted(why) => (
+                    "not-attempted",
+                    Value::Null,
+                    Value::Null,
+                    Value::Null,
+                    Value::Null,
+                    json!(why),
+                ),
+            };
+            json!({
+                "issuer": o.issuer,
+                "endpoint": o.url,
+                "status": status,
+                "observedAt": o.observed_at,
+                "tlsServiceCertSha256": o.service_cert_sha256,
+                "responseSha256": sha256,
+                "responseBytes": bytes,
+                "configuration": configuration,
+                "failure": failure,
+                "reason": reason,
+            })
+        })
+        .collect();
+
+    json!({
+        "kind": "current-observation",
+        "affectsVerdict": false,
+        "limitations": CONFIGURATION_LIMITATIONS,
+        "ledgers": ledgers,
     })
 }
 
@@ -904,5 +986,124 @@ mod tests {
         let record = build(&args(), &incomplete(), 0);
         let schema = record["schemaVersion"].as_str().unwrap();
         assert!(!schema.contains("evidence"), "{schema}");
+    }
+}
+
+#[cfg(test)]
+mod service_configuration_tests {
+    use super::*;
+    use crate::cli::Format;
+    use crate::outcome::{Category, Verdict};
+    use scitt_network::configuration::{Configuration, Observation, Outcome};
+    use std::path::PathBuf;
+
+    fn args() -> VerifyArgs {
+        VerifyArgs {
+            statement: PathBuf::from("s.cose"),
+            trust: TrustSource::Local(PathBuf::from("k.cbor")),
+            policy: PathBuf::from("p.json"),
+            artifact: None,
+            binding_mode: BindingMode::None,
+            adapter: None,
+            evidence: None,
+            save_evidence: None,
+            format: Format::Json,
+            verbose: false,
+            result: None,
+            facts: None,
+            save_trust: None,
+            trusted_roots: None,
+            now: None,
+        }
+    }
+
+    fn assessment(acquisition: Option<Acquisition>) -> Assessment {
+        let mut a = Assessment::incomplete(
+            Verdict::CannotEvaluate,
+            Trust::acquired_key_set(),
+            Diagnostic::error("ReceiptKeyUnknown", Category::Trust, "m", "a"),
+            Vec::new(),
+        );
+        a.acquisition = acquisition;
+        a
+    }
+
+    fn online() -> Acquisition {
+        let body = br#"{"policy":{"policyScript":"x"},"extra":[1]}"#;
+        Acquisition {
+            selected: vec!["b.example".into(), "a.example".into()],
+            acquired: Vec::new(),
+            failed: Vec::new(),
+            not_attempted: None,
+            configurations: vec![
+                Observation::not_attempted("a.example", "key set not acquired", 5),
+                Observation {
+                    issuer: "b.example".into(),
+                    url: Some("https://b.example/configuration".into()),
+                    service_cert_sha256: Some("cc".into()),
+                    observed_at: 7,
+                    outcome: Outcome::Retrieved(Configuration {
+                        bytes: body.to_vec(),
+                        sha256: scitt_receipt::sha256_hex(body),
+                        document: serde_json::from_slice(body).unwrap(),
+                    }),
+                },
+            ],
+        }
+    }
+
+    /// Present in both documents, marked as not part of the decision, with
+    /// every selected service accounted for.
+    #[test]
+    fn online_records_carry_the_configuration_as_an_informational_block() {
+        let a = assessment(Some(online()));
+        for record in [build(&args(), &a, 0), facts(&args(), &a, 0)] {
+            let block = &record["serviceConfiguration"];
+            assert_eq!(block["kind"], "current-observation");
+            assert_eq!(block["affectsVerdict"], false);
+            assert_eq!(block["limitations"].as_array().unwrap().len(), 4);
+
+            let ledgers = block["ledgers"].as_array().unwrap();
+            assert_eq!(ledgers.len(), 2);
+            assert_eq!(ledgers[0]["issuer"], "a.example");
+            assert_eq!(ledgers[0]["status"], "not-attempted");
+            assert_eq!(ledgers[0]["reason"], "key set not acquired");
+            assert!(ledgers[0]["configuration"].is_null());
+
+            let b = &ledgers[1];
+            assert_eq!(b["status"], "retrieved");
+            assert_eq!(b["observedAt"], 7);
+            assert_eq!(b["tlsServiceCertSha256"], "cc");
+            assert_eq!(
+                b["responseBytes"],
+                br#"{"policy":{"policyScript":"x"},"extra":[1]}"#.len()
+            );
+            assert_eq!(b["configuration"]["policy"]["policyScript"], "x");
+            assert_eq!(b["configuration"]["extra"][0], 1);
+            assert!(b["failure"].is_null());
+        }
+    }
+
+    #[test]
+    fn a_failed_read_records_its_code_and_detail() {
+        let mut acquisition = online();
+        acquisition.configurations[1].outcome = Outcome::Failed(scitt_network::AcquireError::new(
+            scitt_network::Diagnostic::AccessDenied,
+            "HTTP 401",
+        ));
+        let record = build(&args(), &assessment(Some(acquisition)), 0);
+        let b = &record["serviceConfiguration"]["ledgers"][1];
+        assert_eq!(b["status"], "failed");
+        assert_eq!(b["failure"]["code"], "accessDenied");
+        assert_eq!(b["failure"]["detail"], "HTTP 401");
+        assert!(b["responseSha256"].is_null());
+    }
+
+    /// No fetch, no block: "did not ask" must not look like "asked, got nothing".
+    #[test]
+    fn offline_records_have_no_configuration_block() {
+        let a = assessment(None);
+        assert!(build(&args(), &a, 0).get("serviceConfiguration").is_none());
+        assert!(facts(&args(), &a, 0).get("serviceConfiguration").is_none());
     }
 }

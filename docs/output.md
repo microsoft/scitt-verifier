@@ -65,10 +65,17 @@ Successes omit measurements and matching expected/observed values. Failures,
 cannot-evaluate findings, and other nonpassing states retain their details and
 available expected/observed values. Unknown adapter checks remain visible.
 After MST node appraisal, its two known excluded `cannot-evaluate` checks
-(report freshness and serving-connection binding) appear once as concise human
-sentences under the final `Limitations`, rather than again beneath the node
-table. Failures, prerequisite errors, and unknown checks are not filtered this
-way. Verbose output and JSON retain the full original findings.
+(report freshness and serving-connection binding) are omitted from compact
+output rather than repeated beneath the node table. Failures, prerequisite
+errors, and unknown checks are not filtered this way. Verbose output and JSON
+retain the full original findings.
+
+Compact output ends with the verdict, any diagnostics, and one line naming
+each not-checked gap by code (`Not checked: ArtifactBindingNotRequested, …`).
+The prose limitations — gap explanations, trust-material caveats, and the
+service configuration from `--online` — are printed only with `--verbose`,
+under `Not checked`, `Limitations`, and `Service configuration`. JSON always
+carries all of them.
 
 An authenticated-target success is emitted only after a pinned HTTPS request
 succeeds, not after constructing a TLS client. Collection/save completion is
@@ -374,6 +381,55 @@ it keeps `acquisition` verbatim. Provenance is an observation — which endpoint
 was asked, what it served, when — rather than a conclusion, and a reader asking
 "whose key was this checked against" would otherwise see `trust` reporting an
 acquired key set with nothing at all saying where it came from.
+`serviceConfiguration` is carried for the same reason.
+
+## `serviceConfiguration`
+
+Present exactly when `acquisition` is. It records each selected service's
+current configuration, as read after the key sets over the same pinned
+connection. It is a separate block because everything in `acquisition` fed
+the verdict and nothing here did:
+
+```json
+"serviceConfiguration": {
+  "kind": "current-observation",
+  "affectsVerdict": false,
+  "limitations": ["…four fixed statements…"],
+  "ledgers": [
+    {
+      "issuer": "contoso.confidential-ledger.azure.com",
+      "endpoint": "https://contoso.confidential-ledger.azure.com/configuration",
+      "status": "retrieved",
+      "observedAt": 1767225600,
+      "tlsServiceCertSha256": "…",
+      "responseSha256": "…",
+      "responseBytes": 121,
+      "configuration": {
+        "authentication": { "allowUnauthenticated": true },
+        "policy": { "policyScript": "export function apply(phdr) { return true; }" }
+      },
+      "failure": null,
+      "reason": null
+    }
+  ]
+}
+```
+
+- Every selected issuer appears once, sorted by issuer. `status` is
+  `retrieved`, `failed` (with `failure.code` and `failure.detail`), or
+  `not-attempted` (with `reason`) for a service whose key set was not acquired
+  and which was therefore never asked.
+- `configuration` is the document as served, with every field kept and none
+  defaulted. `responseSha256` is over the exact response bytes, not a
+  re-serialisation.
+- `failure.code` uses the acquire layer's vocabulary. Three codes appear only
+  here: `endpointNotServed` (HTTP 404, 405 or 501), `accessDenied` (401 or
+  403) and `malformedConfiguration` (not a JSON object). None of them is
+  restated in `diagnostics`, because none of them bears on the verdict.
+- `observedAt` is the real clock, never `--now`.
+- `limitations` says what the block is not: not the policy at registration
+  time, not signed or bound to any receipt, not the relying party's policy and
+  never executed, and not runtime attestation.
 
 ## A record is written on every path
 

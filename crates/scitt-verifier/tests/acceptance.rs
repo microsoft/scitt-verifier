@@ -95,7 +95,8 @@ fn a_genuine_statement_without_an_artifact_is_only_statement_transparent() {
         r.stdout
     );
     assert!(
-        r.stdout.contains("artifact binding was not requested"),
+        r.stdout
+            .contains("Not checked: ArtifactBindingNotRequested"),
         "an unbound pass must say so: {}",
         r.stdout
     );
@@ -2188,6 +2189,11 @@ fn an_offline_run_records_no_acquisition() {
     assert!(
         !r.stdout.contains("\"acquisition\""),
         "an offline run must not claim to have acquired anything: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains("\"serviceConfiguration\""),
+        "an offline run asked no service for its configuration: {}",
         r.stdout
     );
     assert!(

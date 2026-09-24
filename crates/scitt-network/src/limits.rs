@@ -52,6 +52,14 @@ pub const MAX_QUOTES_BYTES: usize = 8 * 1024 * 1024;
 /// One certificate and a little metadata per node, around 16 KB observed.
 pub const MAX_NODES_BYTES: usize = 4 * 1024 * 1024;
 
+/// Largest service-configuration response we will read.
+///
+/// A few hundred bytes observed, most of it the registration policy script.
+/// This leaves room for a long Rego policy while still refusing an endless
+/// stream, and it bounds how much untrusted text the report can be asked to
+/// print.
+pub const MAX_CONFIGURATION_BYTES: usize = 256 * 1024;
+
 /// Most nodes one run will appraise.
 ///
 /// Bounds the work before any parsing, so a response claiming an implausible

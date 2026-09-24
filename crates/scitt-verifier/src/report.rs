@@ -48,6 +48,27 @@ fn safe_whole(value: &str) -> String {
 /// Text longer than this is summarised unless `--verbose` is given.
 const TEXT_LIMIT: usize = 64;
 
+/// Escape service-supplied configuration text, in full.
+///
+/// Stricter than [`safe_whole`]: bidirectional formatting characters are
+/// escaped as well. They are not control characters, so the shared escaper
+/// passes them, but in a policy script printed as code they can make the
+/// terminal display a line in an order other than the one the service sent.
+fn safe_config(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in safe_whole(value).chars() {
+        match c {
+            '\u{061c}'
+            | '\u{200e}'
+            | '\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2066}'..='\u{2069}' => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 pub fn verify(out: &mut impl Write, a: &Assessment, verbose: bool, color: bool) -> io::Result<()> {
     writeln!(out)?;
     headline(out, a, color)?;
@@ -140,55 +161,164 @@ pub fn compact(
             )?;
         }
     }
-    writeln!(out, "Limitations:")?;
-    if let Some(adapter) = args.adapter {
-        let mut shown = Vec::new();
-        for check in &a.checks.adapter {
-            if let Some(message) =
-                crate::adapters::compact_limitation(adapter, check, &a.adapter_findings)
-            {
-                if !shown.contains(&message) {
-                    writeln!(out, "  {message}")?;
-                    shown.push(message);
-                }
-            }
+    // Limitations and the service configuration are verbose-only. What was
+    // not checked is still named, by code, so a compact pass never reads as
+    // covering more than it did.
+    if !a.not_checked.is_empty() {
+        let codes: Vec<&str> = a.not_checked.iter().map(|g| g.code).collect();
+        writeln!(out, "Not checked: {}.", safe_text(&codes.join(", "), 384))?;
+    }
+    let configured = a
+        .acquisition
+        .as_ref()
+        .is_some_and(|x| !x.configurations.is_empty());
+    writeln!(
+        out,
+        "{} shown with --verbose.",
+        if configured {
+            "Limitations and the service configuration are"
+        } else {
+            "Limitations are"
         }
-    }
-    for gap in &a.not_checked {
-        let message = match gap.code {
-            "ArtifactBindingNotRequested" => "artifact binding was not requested; no artifact identity is established.",
-            "CertificateChainNotAnchoredExternally" => "Signing chain is internally consistent with its embedded root, not independently trusted.",
-            "RevocationNotChecked" => "Signing certificate revocation was not checked.",
-            _ => &gap.message,
-        };
-        writeln!(out, "  [{}] {}", gap.code, safe_text(message, 384))?;
-    }
-    if args.binding_mode.is_evidence() {
-        writeln!(
-            out,
-            "  Artifact binding was not requested; this is a resource appraisal."
-        )?;
-    }
-    if !a.facts.as_ref().is_some_and(|facts| {
+    )?;
+    Ok(())
+}
+
+/// Caveats that apply to the run as a whole rather than to one gap.
+fn run_limitations(a: &Assessment) -> Vec<&'static str> {
+    let mut lines = Vec::new();
+    let anchored = a.facts.as_ref().is_some_and(|facts| {
         matches!(&facts.chain_outcome,
-        Some(scitt_receipt::chain::Outcome::Valid(details)) if details.anchored_externally)
-    }) && !a.decision.as_ref().is_some_and(|decision| {
+            Some(scitt_receipt::chain::Outcome::Valid(details)) if details.anchored_externally)
+    });
+    let pinned_root = a.decision.as_ref().is_some_and(|decision| {
         decision.results.iter().any(|r| {
             r.name == "requireChainToRootSha256" && r.outcome == scitt_policy::Outcome::Pass
         })
-    }) {
-        writeln!(out, "  No independent publisher authorization is established by a receipt issuer assertion.")?;
-    }
-    for limitation in &a.trust.limitations {
-        writeln!(out, "  {}", safe_text(limitation, 384))?;
+    });
+    if !anchored && !pinned_root {
+        lines.push(
+            "No independent publisher authorization is established by a receipt issuer assertion.",
+        );
     }
     if a.trust.mode == "acquired-key-set" {
-        writeln!(
-            out,
-            "  Receipt-key freshness is not established by acquisition."
-        )?;
+        lines.push("Receipt-key freshness is not established by acquisition.");
+    }
+    lines
+}
+
+/// Each selected service's current configuration, after everything that
+/// decided the verdict.
+///
+/// Placed last, under a heading that says it changed nothing, so it cannot be
+/// read as part of the reasoning above it. Every key and value came from the
+/// service and is escaped; the document is printed in full because showing
+/// the policy text is the whole point of the section.
+fn service_configuration(out: &mut impl Write, a: &Assessment) -> io::Result<()> {
+    use scitt_network::configuration::Outcome;
+
+    let Some(acquisition) = &a.acquisition else {
+        return Ok(());
+    };
+    if acquisition.configurations.is_empty() {
+        return Ok(());
+    }
+    writeln!(out)?;
+    writeln!(
+        out,
+        "Service configuration (informational; does not affect the verdict)"
+    )?;
+    for o in &acquisition.configurations {
+        writeln!(out, "  {}", safe_config(&o.issuer))?;
+        if let Some(url) = &o.url {
+            writeln!(out, "    endpoint            {}", safe_config(url))?;
+        }
+        match &o.outcome {
+            Outcome::Retrieved(c) => {
+                writeln!(
+                    out,
+                    "    observed at UTC     {}",
+                    crate::display::timestamp(o.observed_at)
+                )?;
+                if let Some(cert) = &o.service_cert_sha256 {
+                    writeln!(out, "    TLS service cert    sha256:{cert}")?;
+                }
+                writeln!(
+                    out,
+                    "    response            sha256:{} ({} bytes)",
+                    c.sha256,
+                    c.bytes.len()
+                )?;
+                if c.document.is_empty() {
+                    writeln!(out, "    (empty object)")?;
+                }
+                for (key, value) in &c.document {
+                    json_lines(out, key, value, 2)?;
+                }
+            }
+            Outcome::Failed(e) => {
+                writeln!(
+                    out,
+                    "    not read            [{}] {}",
+                    e.diagnostic.code(),
+                    safe(&e.detail)
+                )?;
+            }
+            Outcome::NotAttempted(why) => {
+                writeln!(out, "    not asked           {}", safe(why))?;
+            }
+        }
+    }
+    writeln!(out, "  Limitations:")?;
+    for l in crate::record::CONFIGURATION_LIMITATIONS {
+        writeln!(out, "    - {l}")?;
     }
     Ok(())
+}
+
+/// Print one JSON member as indented `key: value` lines.
+///
+/// Generic on purpose: the tool does not know, and should not pretend to
+/// know, what a given service's configuration fields mean. A multi-line string
+/// such as a policy script is printed as an indented block so it reads as
+/// code rather than as one escaped line.
+fn json_lines(
+    out: &mut impl Write,
+    key: &str,
+    value: &serde_json::Value,
+    depth: usize,
+) -> io::Result<()> {
+    use serde_json::Value;
+
+    let pad = "  ".repeat(depth);
+    let key = safe_config(key);
+    match value {
+        Value::Object(members) if members.is_empty() => writeln!(out, "{pad}{key}: {{}}"),
+        Value::Object(members) => {
+            writeln!(out, "{pad}{key}:")?;
+            for (k, v) in members {
+                json_lines(out, k, v, depth + 1)?;
+            }
+            Ok(())
+        }
+        Value::Array(items) if items.is_empty() => writeln!(out, "{pad}{key}: []"),
+        Value::Array(items) => {
+            writeln!(out, "{pad}{key}:")?;
+            for (i, v) in items.iter().enumerate() {
+                json_lines(out, &format!("[{i}]"), v, depth + 1)?;
+            }
+            Ok(())
+        }
+        Value::String(s) if s.contains('\n') => {
+            writeln!(out, "{pad}{key}: |")?;
+            for line in s.split('\n') {
+                writeln!(out, "{pad}  {}", safe_config(line.trim_end_matches('\r')))?;
+            }
+            Ok(())
+        }
+        Value::String(s) => writeln!(out, "{pad}{key}: {}", safe_config(s)),
+        other => writeln!(out, "{pad}{key}: {other}"),
+    }
 }
 
 /// Everything a reader needs in order to act, before any evidence.
@@ -358,13 +488,18 @@ fn detail(out: &mut impl Write, a: &Assessment) -> io::Result<()> {
         }
     }
 
-    if !a.trust.limitations.is_empty() {
+    let run = run_limitations(a);
+    if !a.trust.limitations.is_empty() || !run.is_empty() {
         writeln!(out)?;
-        writeln!(out, "  Trust limitations")?;
+        writeln!(out, "  Limitations")?;
         for l in &a.trust.limitations {
             writeln!(out, "    - {}", safe(l))?;
         }
+        for l in run {
+            writeln!(out, "    - {l}")?;
+        }
     }
+    service_configuration(out, a)?;
     Ok(())
 }
 
@@ -1375,18 +1510,21 @@ mod tests {
             assert!(text.contains("NOTICE DistinctWarning do not hide this\\nwarning"));
             assert!(!text.contains("full-measurement") && !text.contains("long-node-id"));
             assert!(!text.contains("Test binding:"));
-            assert_eq!(
-                text.matches("Artifact binding was not requested").count(),
-                1
+            assert!(
+                !text.contains("Artifact binding was not requested"),
+                "{text}"
             );
-            assert!(text.contains("No independent publisher authorization"));
-            let (_, limitations) = text.split_once("Limitations:\n").unwrap();
+            assert!(!text.contains("No independent publisher authorization"));
+            assert!(!text.contains("Limitations:\n"), "{text}");
+            assert!(
+                text.contains("Limitations are shown with --verbose."),
+                "{text}"
+            );
             for message in [
                 "Report freshness was not established.",
                 "Binding to the serving connection was not established.",
             ] {
-                assert_eq!(text.matches(message).count(), 1, "{text}");
-                assert!(limitations.contains(message), "{text}");
+                assert!(!text.contains(message), "{text}");
             }
             assert!(!text.contains("CANNOT EVALUATE freshness"), "{text}");
             assert!(
@@ -1410,6 +1548,19 @@ mod tests {
         );
         assert!(text.contains("full detail for freshness"));
         assert!(text.contains("full detail for connection-binding"));
+
+        let mut bytes = Vec::new();
+        super::verify(&mut bytes, &assessment, true, false).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains("  Limitations\n"), "{text}");
+        assert!(
+            text.contains("No independent publisher authorization"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Receipt-key freshness is not established"),
+            "{text}"
+        );
     }
 
     /// The bracketed label is meant to be pasted into a policy `path`, so an
@@ -1458,5 +1609,174 @@ mod tests {
             styled_verdict("STOP", "untrusted", true),
             "\u{1b}[1;31mSTOP untrusted\u{1b}[0m"
         );
+    }
+}
+
+#[cfg(test)]
+mod service_configuration_tests {
+    use crate::outcome::{Acquisition, Assessment, Category, Diagnostic, Trust, Verdict};
+    use scitt_network::configuration::{Configuration, Observation, Outcome};
+
+    fn with(observations: Vec<Observation>) -> Assessment {
+        let mut a = Assessment::incomplete(
+            Verdict::StatementTransparent,
+            Trust::acquired_key_set(),
+            Diagnostic::warning("Placeholder", Category::Trust, "cleared", "None."),
+            Vec::new(),
+        );
+        a.primary = None;
+        a.diagnostics.clear();
+        a.acquisition = Some(Acquisition {
+            selected: observations.iter().map(|o| o.issuer.clone()).collect(),
+            acquired: Vec::new(),
+            failed: Vec::new(),
+            not_attempted: None,
+            configurations: observations,
+        });
+        a
+    }
+
+    fn retrieved(issuer: &str, body: &str) -> Observation {
+        Observation {
+            issuer: issuer.into(),
+            url: Some(format!("https://{issuer}/configuration")),
+            service_cert_sha256: Some("cc".into()),
+            observed_at: 0,
+            outcome: Outcome::Retrieved(Configuration {
+                bytes: body.as_bytes().to_vec(),
+                sha256: scitt_receipt::sha256_hex(body.as_bytes()),
+                document: serde_json::from_str(body).unwrap(),
+            }),
+        }
+    }
+
+    fn render(a: &Assessment, verbose: bool) -> String {
+        let mut bytes = Vec::new();
+        if verbose {
+            super::verify(&mut bytes, a, true, false).unwrap();
+        } else {
+            let argv: Vec<String> = [
+                "verify",
+                "--statement",
+                "s.cose",
+                "--policy",
+                "p.json",
+                "--online",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+            let crate::cli::Command::Verify(args) = crate::cli::parse(&argv).unwrap() else {
+                panic!("verify")
+            };
+            super::compact(&mut bytes, a, &args, false).unwrap();
+        }
+        String::from_utf8(bytes).unwrap()
+    }
+
+    /// The policy script is the point of the section, so it is printed in
+    /// full, as indented code, under a heading that says it decided nothing.
+    #[test]
+    fn a_retrieved_policy_script_is_shown_in_full_and_marked_informational() {
+        let body = r#"{"authentication":{"allowUnauthenticated":true},"policy":{"policyScript":"export function apply(phdr) {\n  return true;\n}"}}"#;
+        let a = with(vec![retrieved("ledger.example", body)]);
+
+        {
+            let text = render(&a, true);
+            assert!(
+                text.contains("Service configuration (informational; does not affect the verdict)"),
+                "{text}"
+            );
+            assert!(text.contains("allowUnauthenticated: true"), "{text}");
+            assert!(text.contains("policyScript: |"), "{text}");
+            assert!(
+                text.contains("      export function apply(phdr) {\n"),
+                "{text}"
+            );
+            assert!(text.contains("        return true;\n"), "{text}");
+            assert!(
+                text.contains(&format!(
+                    "sha256:{} ({} bytes)",
+                    scitt_receipt::sha256_hex(body.as_bytes()),
+                    body.len()
+                )),
+                "{text}"
+            );
+            assert!(text.contains("not runtime attestation"), "{text}");
+        }
+    }
+
+    /// Every key and value came from the service. A script line must not be
+    /// able to reach the start of a line, clear the terminal, or reorder
+    /// itself on screen.
+    #[test]
+    fn hostile_configuration_text_is_escaped() {
+        let body = r#"{"x\u001b[2J":"a\u007fb\u0085c\u202ed","policy":{"policyScript":"ok\nFORGED-VERDICT\r\u001b[2J"}}"#;
+        let a = with(vec![retrieved("ledger.example", body)]);
+
+        {
+            let text = render(&a, true);
+            for raw in ['\u{1b}', '\r', '\u{7f}', '\u{85}', '\u{202e}'] {
+                assert!(!text.contains(raw), "{raw:?} reached the terminal:\n{text}");
+            }
+            assert!(text.contains("\\u{1b}[2J"), "{text}");
+            assert!(text.contains("\\u{202e}"), "{text}");
+            assert!(
+                !text.lines().any(|l| l.starts_with("FORGED-VERDICT")),
+                "a script line reached the start of a line:\n{text}"
+            );
+            assert!(text.contains("      FORGED-VERDICT\\r"), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_service_that_was_not_asked_or_did_not_answer_says_so() {
+        let mut failed = retrieved("b.example", "{}");
+        failed.outcome = Outcome::Failed(scitt_network::AcquireError::new(
+            scitt_network::Diagnostic::EndpointNotServed,
+            "https://b.example/configuration returned HTTP 404",
+        ));
+        let skipped = Observation::not_attempted("a.example", "key set not acquired", 0);
+        let text = render(&with(vec![skipped, failed]), true);
+
+        assert!(
+            text.contains("not asked           key set not acquired"),
+            "{text}"
+        );
+        assert!(
+            text.contains("not read            [endpointNotServed]"),
+            "{text}"
+        );
+    }
+
+    /// Offline runs have no section: nothing was asked.
+    #[test]
+    fn an_offline_run_prints_no_configuration_section() {
+        let mut a = with(Vec::new());
+        a.acquisition = None;
+        assert!(!render(&a, true).contains("Service configuration"));
+        let compact = render(&a, false);
+        assert!(
+            compact.contains("Limitations are shown with --verbose."),
+            "{compact}"
+        );
+        assert!(!compact.contains("service configuration"), "{compact}");
+    }
+
+    /// Compact output points to the section and prints none of it: no policy
+    /// text, no limitations.
+    #[test]
+    fn compact_output_leaves_the_configuration_and_limitations_to_verbose() {
+        let body = r#"{"policy":{"policyScript":"export function apply() { return true; }"}}"#;
+        let text = render(&with(vec![retrieved("ledger.example", body)]), false);
+
+        assert!(
+            text.contains("Limitations and the service configuration are shown with --verbose."),
+            "{text}"
+        );
+        assert!(!text.contains("Service configuration ("), "{text}");
+        assert!(!text.contains("policyScript"), "{text}");
+        assert!(!text.contains("not runtime attestation"), "{text}");
+        assert!(!text.contains("Receipt-key freshness"), "{text}");
     }
 }
