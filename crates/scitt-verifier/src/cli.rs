@@ -55,15 +55,18 @@ VERIFY OPTIONS:
     --scitt-keys <FILE>      Transparency service signing keys (COSE_KeySet).
                              One of --scitt-keys or --online is required.
     --online                 Acquire the signing keys from a ledger the policy
-                             allowlists, over an authenticated connection.
+                             allowlists, over an authenticated connection,
+                             and show each ledger's current configuration
+                             (informational; never affects the verdict).
                              One of --scitt-keys or --online is required.
     --ledger <HOST>          Acquire from this ledger only. It must appear in
                              the policy's assertions.issuer allowlist: this
                              narrows what the policy already accepts and can
                              never add to it.                        [--online only]
     --save-trust <DIR>       Write the acquired key sets, service certificates,
-                             and a provenance manifest here, for audit and for
-                             replay with --scitt-keys.               [--online only]
+                             any service configurations read, and a provenance
+                             manifest here, for audit and for replay with
+                             --scitt-keys.                           [--online only]
     --policy <FILE>          Relying-party policy document (JSON).         [required]
     --trusted-roots <FILE>   PEM file of CA certificates the signing chain must
                              lead to. Without it the chain is still validated,
@@ -97,6 +100,12 @@ reported as not selected, and no request is made for it.
 
 A live fetch establishes who served the keys. It does not establish that a key
 is unrevoked, that the set is current, or anything about the statement's signer.
+
+With --online, each acquired ledger is also asked for its current configuration
+over the same authenticated connection, and it is shown after the verdict. It is
+what the service says now, not the policy a statement was registered under; it
+is not signed, it is never executed, and it cannot change the verdict or exit
+code. A ledger that does not serve it is reported as such.
 
 EXIT CODES:
     0  transparent, and the policy is satisfied

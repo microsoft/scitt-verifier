@@ -18,6 +18,7 @@
 //! keys*, and nothing more.
 
 pub mod acl;
+pub mod configuration;
 pub mod error;
 pub mod http;
 pub mod limits;
@@ -367,7 +368,25 @@ pub fn acquire_all(issuers: &[String], now: i64) -> Vec<Outcome> {
 /// The observer is presentation-only. One deadline still covers the entire
 /// list, including issuers that time out before their request begins.
 pub fn acquire_all_with(issuers: &[String], now: i64, observer: &mut dyn Observer) -> Vec<Outcome> {
-    let deadline = Instant::now() + limits::TOTAL_DEADLINE;
+    acquire_all_before(
+        issuers,
+        now,
+        Instant::now() + limits::TOTAL_DEADLINE,
+        observer,
+    )
+}
+
+/// [`acquire_all_with`] under a deadline the caller owns.
+///
+/// For a caller with more to fetch after the key sets — the service
+/// configuration — that must fit inside the same bound. Two independent
+/// deadlines would let one run take twice the time an operator was told.
+pub fn acquire_all_before(
+    issuers: &[String],
+    now: i64,
+    deadline: Instant,
+    observer: &mut dyn Observer,
+) -> Vec<Outcome> {
     let mut out = Vec::with_capacity(issuers.len());
 
     for issuer in issuers {

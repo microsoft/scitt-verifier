@@ -830,6 +830,7 @@ fn resolve_online(
                     acquired: Vec::new(),
                     failed: Vec::new(),
                     not_attempted: Some(why),
+                    configurations: Vec::new(),
                 }),
             });
         }
@@ -845,11 +846,17 @@ fn resolve_online(
     ));
     // The real clock, never `--now`: this records when the fetch happened, and
     // `--now` answers a different question entirely.
+    //
+    // One deadline covers the key sets and the configuration reads after them,
+    // so the informational fetch can only spend time the key sets left over and
+    // the run stays inside the bound it always had.
+    let deadline = std::time::Instant::now() + scitt_network::limits::TOTAL_DEADLINE;
     let outcomes = {
         let mut observer = AcquisitionProgress { progress };
-        scitt_network::acquire_all_with(&selected, wall_clock(), &mut observer)
+        scitt_network::acquire_all_before(&selected, wall_clock(), deadline, &mut observer)
     };
     let (acquired, failed) = online::partition(outcomes);
+    let configurations = observe_configurations(&acquired, &failed, deadline, progress);
 
     // The mode describes what this run actually holds, not what it set out to
     // do. Every fetch failing leaves it with nothing, and that is what it says.
@@ -908,6 +915,7 @@ fn resolve_online(
         acquired,
         failed,
         not_attempted: None,
+        configurations,
     };
 
     // Carried onto the failure too. Requests were made and their outcomes are
@@ -1002,7 +1010,77 @@ fn acquisition_code(d: scitt_network::Diagnostic) -> &'static str {
         D::ServiceKeyMismatch => "AcquisitionServiceKeyMismatch",
         D::DeadlineExceeded => "AcquisitionDeadlineExceeded",
         D::UnsupportedPlatform => "AcquisitionUnsupportedPlatform",
+        D::EndpointNotServed => "AcquisitionEndpointNotServed",
+        D::AccessDenied => "AcquisitionAccessDenied",
+        D::MalformedConfiguration => "AcquisitionMalformedConfiguration",
     }
+}
+
+/// Read each selected service's current configuration, for display only.
+///
+/// Every selected issuer gets exactly one observation. A service whose key set
+/// was not acquired is recorded as not asked rather than asked over a
+/// connection whose identity nobody established, and rather than omitted,
+/// which would let a partial picture read as a complete one.
+///
+/// Nothing returned here reaches the verdict, the diagnostics, or the exit
+/// code. A service that does not serve the endpoint, or serves nonsense, is
+/// reported as exactly that in its own section.
+fn observe_configurations(
+    acquired: &[scitt_network::Acquired],
+    failed: &[scitt_network::Failed],
+    deadline: std::time::Instant,
+    progress: &mut dyn progress::Sink,
+) -> Vec<scitt_network::configuration::Observation> {
+    use scitt_network::configuration::{self, Observation, Outcome};
+
+    let mut observations: Vec<Observation> = failed
+        .iter()
+        .map(|f| {
+            Observation::not_attempted(
+                &f.provenance.issuer,
+                "the key set for this service was not acquired, so no authenticated \
+                 connection to it was established",
+                wall_clock(),
+            )
+        })
+        .collect();
+
+    for a in acquired {
+        let observation = configuration::observe(a, wall_clock(), deadline);
+        let event = match &observation.outcome {
+            Outcome::Retrieved(c) => Some(progress::Event::finding(
+                progress::Stage::ReceiptKeys,
+                "configuration",
+                Some(a.issuer.clone()),
+                progress::State::Done,
+                format!(
+                    "current service configuration read ({} bytes); informational, not part \
+                     of the verdict",
+                    c.bytes.len()
+                ),
+            )),
+            Outcome::Failed(e) => Some(progress::Event::finding(
+                progress::Stage::ReceiptKeys,
+                "configuration",
+                Some(a.issuer.clone()),
+                progress::State::Notice,
+                format!(
+                    "service configuration not read [{}]: {}; the verdict is unaffected",
+                    e.diagnostic.code(),
+                    e.detail
+                ),
+            )),
+            Outcome::NotAttempted(_) => None,
+        };
+        if let Some(event) = event {
+            progress.emit(event.detail());
+        }
+        observations.push(observation);
+    }
+
+    observations.sort_by(|l, r| l.issuer.cmp(&r.issuer));
+    observations
 }
 
 fn verify_or_fail(
@@ -1064,8 +1142,23 @@ fn save_trust(dir: &Path, assessment: &Assessment) -> Result<Vec<PathBuf>, Diagn
         debug_assert!(scitt_network::validate_host(&a.issuer).is_ok());
         let keys = dir.join(format!("{}.keys.cbor", a.issuer));
         let cert = dir.join(format!("{}.service-cert.der", a.issuer));
+        // The configuration is saved as served, beside the keys, but it is not
+        // trust material and nothing replays it: `--scitt-keys` never reads it.
+        let configuration = acquisition
+            .configurations
+            .iter()
+            .find(|o| o.issuer == a.issuer)
+            .and_then(|o| match &o.outcome {
+                scitt_network::configuration::Outcome::Retrieved(c) => Some(c),
+                _ => None,
+            });
+        let config_path = dir.join(format!("{}.configuration.json", a.issuer));
 
-        for path in [&keys, &cert] {
+        let mut targets = vec![&keys, &cert];
+        if configuration.is_some() {
+            targets.push(&config_path);
+        }
+        for path in targets {
             if path.exists() {
                 return Err(fail(format!(
                     "{} already exists; refusing to overwrite trust material",
@@ -1080,6 +1173,11 @@ fn save_trust(dir: &Path, assessment: &Assessment) -> Result<Vec<PathBuf>, Diagn
             .map_err(|e| fail(format!("could not write {}: {e}", cert.display())))?;
         written.push(keys.clone());
         written.push(cert.clone());
+        if let Some(c) = configuration {
+            std::fs::write(&config_path, &c.bytes)
+                .map_err(|e| fail(format!("could not write {}: {e}", config_path.display())))?;
+            written.push(config_path.clone());
+        }
 
         manifest.push(serde_json::json!({
             "issuer": a.issuer,
@@ -1091,6 +1189,9 @@ fn save_trust(dir: &Path, assessment: &Assessment) -> Result<Vec<PathBuf>, Diagn
             "identityUrl": a.provenance.identity_url,
             "keysetUrl": a.provenance.keyset_url,
             "acquiredAt": a.provenance.acquired_at,
+            "configuration": configuration
+                .and(config_path.file_name().and_then(|n| n.to_str())),
+            "configurationSha256": configuration.map(|c| &c.sha256),
         }));
     }
 
@@ -1107,7 +1208,9 @@ fn save_trust(dir: &Path, assessment: &Assessment) -> Result<Vec<PathBuf>, Diagn
         // snapshot is a record of what a service served at a moment, so
         // replaying it reproduces that moment and nothing fresher.
         "note": "Bytes as served, for offline replay with --scitt-keys. Replaying reproduces \
-                 the keys held at acquisition time; it does not re-check the service.",
+                 the keys held at acquisition time; it does not re-check the service. Any \
+                 *.configuration.json file is the service's configuration as observed at \
+                 acquisition, kept for audit; it is not trust material and is never replayed.",
         "ledgers": manifest,
     });
     std::fs::write(&manifest_path, format!("{doc:#}\n"))
@@ -2719,5 +2822,155 @@ mod path_tests {
     #[test]
     fn a_directory_is_not_a_written_file() {
         assert!(!same_file(Path::new("/tmp"), Path::new("/")));
+    }
+}
+
+#[cfg(test)]
+mod save_trust_tests {
+    use super::*;
+    use scitt_network::configuration::{Configuration, Observation, Outcome};
+
+    const ISSUER: &str = "ledger.confidential-ledger.azure.com";
+
+    fn acquired() -> scitt_network::Acquired {
+        let keyset_bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../corpus/fixtures/mst-test-scitt-keys.cbor"
+        ))
+        .unwrap();
+        let keys = scitt_receipt::LedgerKeySet::from_cose_key_set(&keyset_bytes).unwrap();
+        scitt_network::Acquired {
+            issuer: ISSUER.into(),
+            keyset_bytes,
+            keys,
+            service_cert_der: vec![0x30, 0x00],
+            provenance: scitt_network::Provenance {
+                issuer: ISSUER.into(),
+                provider: "test",
+                identity_url: "https://identity.example/".into(),
+                keyset_url: format!("https://{ISSUER}/.well-known/scitt-keys"),
+                service_cert_sha256: Some("aa".into()),
+                keyset_sha256: Some("bb".into()),
+                service_key_kid: None,
+                acquired_at: 0,
+                ambiguous_kids: Vec::new(),
+                failure: None,
+            },
+        }
+    }
+
+    fn assessment(outcome: Outcome) -> Assessment {
+        let mut a = Assessment::incomplete(
+            Verdict::StatementTransparent,
+            Trust::unsigned_key_set(),
+            Diagnostic::warning("Placeholder", Category::Trust, "cleared", "None."),
+            Vec::new(),
+        );
+        a.acquisition = Some(Acquisition {
+            selected: vec![ISSUER.into()],
+            acquired: vec![acquired()],
+            failed: Vec::new(),
+            not_attempted: None,
+            configurations: vec![Observation {
+                issuer: ISSUER.into(),
+                url: Some(format!("https://{ISSUER}/configuration")),
+                service_cert_sha256: Some("aa".into()),
+                observed_at: 0,
+                outcome,
+            }],
+        });
+        a
+    }
+
+    fn fresh_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "scitt-verifier-save-trust-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// The configuration is kept byte for byte, and the manifest says what
+    /// it is so nobody replays it as trust material.
+    #[test]
+    fn a_retrieved_configuration_is_saved_exactly_as_served() {
+        let bytes = br#"{ "policy" : {"b":1, "a":2} }"#.to_vec();
+        let document = serde_json::from_slice(&bytes).unwrap();
+        let sha256 = scitt_receipt::sha256_hex(&bytes);
+        let dir = fresh_dir("retrieved");
+
+        let written = save_trust(
+            &dir,
+            &assessment(Outcome::Retrieved(Configuration {
+                bytes: bytes.clone(),
+                sha256: sha256.clone(),
+                document,
+            })),
+        )
+        .unwrap();
+
+        let path = dir.join(format!("{ISSUER}.configuration.json"));
+        assert!(written.contains(&path));
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("manifest.json")).unwrap()).unwrap();
+        let entry = &manifest["ledgers"][0];
+        assert_eq!(
+            entry["configuration"],
+            format!("{ISSUER}.configuration.json")
+        );
+        assert_eq!(entry["configurationSha256"], sha256);
+        assert!(manifest["note"]
+            .as_str()
+            .unwrap()
+            .contains("not trust material"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// No configuration, no file: a placeholder would read as something the
+    /// service sent.
+    #[test]
+    fn a_configuration_that_was_not_read_writes_no_file() {
+        let dir = fresh_dir("failed");
+        save_trust(
+            &dir,
+            &assessment(Outcome::Failed(scitt_network::AcquireError::new(
+                scitt_network::Diagnostic::EndpointNotServed,
+                "404",
+            ))),
+        )
+        .unwrap();
+
+        assert!(!dir.join(format!("{ISSUER}.configuration.json")).exists());
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("manifest.json")).unwrap()).unwrap();
+        assert!(manifest["ledgers"][0]["configuration"].is_null());
+        assert!(manifest["ledgers"][0]["configurationSha256"].is_null());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The no-overwrite rule covers the new file too.
+    #[test]
+    fn an_existing_configuration_file_is_not_overwritten() {
+        let dir = fresh_dir("exists");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{ISSUER}.configuration.json"));
+        std::fs::write(&path, b"original").unwrap();
+        let bytes = b"{}".to_vec();
+
+        let err = save_trust(
+            &dir,
+            &assessment(Outcome::Retrieved(Configuration {
+                sha256: scitt_receipt::sha256_hex(&bytes),
+                bytes,
+                document: serde_json::Map::new(),
+            })),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code, "TrustMaterialNotSaved");
+        assert_eq!(std::fs::read(&path).unwrap(), b"original");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

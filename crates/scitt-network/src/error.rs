@@ -33,6 +33,12 @@ pub enum Diagnostic {
     DeadlineExceeded,
     /// This CPU lacks an instruction set the bundled TLS crypto requires.
     UnsupportedPlatform,
+    /// The service does not serve the endpoint that was asked for.
+    EndpointNotServed,
+    /// The service refused to answer an unauthenticated caller.
+    AccessDenied,
+    /// The service configuration was not a JSON object.
+    MalformedConfiguration,
 }
 
 impl Diagnostic {
@@ -49,6 +55,9 @@ impl Diagnostic {
             Diagnostic::ServiceKeyMismatch => "serviceKeyMismatch",
             Diagnostic::DeadlineExceeded => "deadlineExceeded",
             Diagnostic::UnsupportedPlatform => "unsupportedPlatform",
+            Diagnostic::EndpointNotServed => "endpointNotServed",
+            Diagnostic::AccessDenied => "accessDenied",
+            Diagnostic::MalformedConfiguration => "malformedConfiguration",
         }
     }
 
@@ -104,6 +113,18 @@ impl Diagnostic {
                 "This build's TLS stack needs a newer CPU than this host provides. Run the \
                  fetch on a supported host and pass the key set with --scitt-keys, or run \
                  the verification itself there."
+            }
+            Diagnostic::EndpointNotServed => {
+                "This service does not publish that endpoint. Not every SCITT \
+                 implementation or deployment does."
+            }
+            Diagnostic::AccessDenied => {
+                "The service declined to answer an unauthenticated caller. This build \
+                 sends no credentials."
+            }
+            Diagnostic::MalformedConfiguration => {
+                "The service answered with something that is not a JSON object. Report it \
+                 to the service operator."
             }
         }
     }

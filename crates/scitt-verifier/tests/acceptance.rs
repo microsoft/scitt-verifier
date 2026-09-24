@@ -2150,6 +2150,11 @@ fn an_offline_run_records_no_acquisition() {
         r.stdout
     );
     assert!(
+        !r.stdout.contains("\"serviceConfiguration\""),
+        "an offline run asked no service for its configuration: {}",
+        r.stdout
+    );
+    assert!(
         r.stdout.contains("\"scittKeys\""),
         "an offline run must still record the key set it used: {}",
         r.stdout

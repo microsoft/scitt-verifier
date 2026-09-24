@@ -458,6 +458,12 @@ pub struct Acquisition {
     pub failed: Vec<scitt_network::Failed>,
     /// Set when selection stopped before any request was made, with the reason.
     pub not_attempted: Option<String>,
+    /// Each selected service's current configuration, one per selected issuer.
+    ///
+    /// Held beside the key material rather than inside it because it is not
+    /// trust material: nothing reads it to decide anything, and a reader of the
+    /// record must not be able to mistake it for something that was.
+    pub configurations: Vec<scitt_network::configuration::Observation>,
 }
 
 /// Everything one run of `verify` established, and everything it did not.

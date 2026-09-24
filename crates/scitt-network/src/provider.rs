@@ -27,6 +27,13 @@ pub const QUOTES_PATH: &str = "/node/quotes";
 /// would go on reading the response as though it had not.
 pub const NODES_PATH: &str = "/gov/service/nodes?api-version=2024-07-01";
 
+/// Path on the ledger that serves the SCITT service's current configuration.
+///
+/// Read for display only. Its contents never select a destination, a key, or
+/// an outcome, so a service that changes what it publishes here can change
+/// what the report shows and nothing else.
+pub const CONFIGURATION_PATH: &str = "/configuration";
+
 /// A bootstrap route for one ledger.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Route {
@@ -44,6 +51,9 @@ pub struct Route {
     /// Where node certificates are fetched from, authenticated by that
     /// certificate.
     pub nodes_url: String,
+    /// Where the service's current configuration is fetched from,
+    /// authenticated by that certificate.
+    pub configuration_url: String,
 }
 
 /// Resolve a ledger issuer to a bootstrap route.
@@ -73,6 +83,7 @@ pub fn route_for(issuer: &str) -> Result<Route, AcquireError> {
             keyset_url: format!("https://{issuer}{KEYSET_PATH}"),
             quotes_url: format!("https://{issuer}{QUOTES_PATH}"),
             nodes_url: format!("https://{issuer}{NODES_PATH}"),
+            configuration_url: format!("https://{issuer}{CONFIGURATION_PATH}"),
         });
     }
 
@@ -180,6 +191,10 @@ mod tests {
             r.nodes_url,
             "https://example-ledger.confidential-ledger.azure.com\
              /gov/service/nodes?api-version=2024-07-01"
+        );
+        assert_eq!(
+            r.configuration_url,
+            "https://example-ledger.confidential-ledger.azure.com/configuration"
         );
     }
 

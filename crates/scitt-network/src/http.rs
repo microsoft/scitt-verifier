@@ -135,6 +135,73 @@ pub fn get_bounded(agent: &Agent, url: &str, max_bytes: usize) -> Result<Vec<u8>
         ));
     }
 
+    read_bounded(response, url, max_bytes)
+}
+
+/// [`get_bounded`] for an endpoint a service may legitimately not offer.
+///
+/// Separates "not served here" and "not served to you" from a failed request.
+/// The key-set path has no use for the distinction — without a key set the run
+/// cannot proceed either way — but an optional observation does: an operator
+/// reading "transport" would go looking for an outage that is not there.
+pub fn get_bounded_optional(
+    agent: &Agent,
+    url: &str,
+    max_bytes: usize,
+) -> Result<Vec<u8>, AcquireError> {
+    let by_status = |status: u16| match status {
+        200 => None,
+        401 | 403 => Some(AcquireError::new(
+            Diagnostic::AccessDenied,
+            format!("{url} returned HTTP {status}"),
+        )),
+        404 | 405 | 501 => Some(AcquireError::new(
+            Diagnostic::EndpointNotServed,
+            format!("{url} returned HTTP {status}"),
+        )),
+        300..=399 => Some(AcquireError::new(
+            Diagnostic::Transport,
+            format!(
+                "{url} answered with a redirect (HTTP {status}), which this build does not follow"
+            ),
+        )),
+        _ => Some(AcquireError::new(
+            Diagnostic::Transport,
+            format!("{url} returned HTTP {status}"),
+        )),
+    };
+
+    let response = match agent.get(url).call() {
+        Ok(r) => r,
+        Err(ureq::Error::StatusCode(status)) => {
+            return Err(by_status(status).unwrap_or_else(|| {
+                AcquireError::new(
+                    Diagnostic::Transport,
+                    format!("{url} returned HTTP {status}"),
+                )
+            }))
+        }
+        Err(ureq::Error::TooManyRedirects | ureq::Error::RedirectFailed) => {
+            return Err(AcquireError::new(
+                Diagnostic::Transport,
+                format!("{url} answered with a redirect, which this build does not follow"),
+            ))
+        }
+        Err(e) => return Err(classify(url, e)),
+    };
+
+    if let Some(e) = by_status(response.status().as_u16()) {
+        return Err(e);
+    }
+    read_bounded(response, url, max_bytes)
+}
+
+/// Read a body through a limiter, refusing anything over `max_bytes`.
+fn read_bounded(
+    response: ureq::http::Response<ureq::Body>,
+    url: &str,
+    max_bytes: usize,
+) -> Result<Vec<u8>, AcquireError> {
     let mut buf = Vec::new();
     let mut reader = response
         .into_body()

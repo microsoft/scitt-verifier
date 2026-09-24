@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### `--online` shows each ledger's current configuration
+
+After acquiring the key sets, `--online` now also reads each acquired ledger's
+`/configuration` over the same pinned connection and within the same overall
+time limit — one extra request per ledger. The document, including a SCITT
+ledger's registration policy script, is printed in full and escaped after the
+verdict, recorded in a new top-level `serviceConfiguration` block in both the
+result and facts documents, and saved as `<issuer>.configuration.json` by
+`--save-trust`. It is informational only: it never affects the verdict, exit
+code or diagnostics, and a ledger that does not serve it is reported as such.
+It is the service's configuration now, not the policy a statement was
+registered under. Offline runs are unchanged and make no request.
+
 ### `inspect` no longer lets a statement drive the terminal
 
 Every value `inspect` printed came straight from the file, unescaped, and
