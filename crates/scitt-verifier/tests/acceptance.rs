@@ -1286,6 +1286,47 @@ fn a_matching_statement_issuer_passes() {
 }
 
 #[test]
+fn an_empty_receipt_issuer_list_is_a_usage_error() {
+    // Evaluated, `issuer: []` would reject every statement with exit 2, which
+    // reads as a problem with the artifact. It is a problem with the policy.
+    let dir = std::env::temp_dir().join("scitt-verifier-empty-issuer-list");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let policy = dir.join("policy.json");
+    std::fs::write(
+        &policy,
+        r#"{"policyId":"empty","policyVersion":"1","assertions":{"receiptCount":1,"issuer":[]}}"#,
+    )
+    .unwrap();
+
+    let statement = corpus(&["fixtures", "transparent-statement.cose"]);
+    let keys = corpus(&["fixtures", "mst-test-scitt-keys.cbor"]);
+    let r = run(&[
+        "verify",
+        "--statement",
+        &statement,
+        "--scitt-keys",
+        &keys,
+        "--policy",
+        &policy.display().to_string(),
+    ]);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(r.code, 4, "stdout:\n{}\nstderr:\n{}", r.stdout, r.stderr);
+    assert!(
+        !has_pass_verdict(&r.stdout),
+        "a refused policy must never print a pass: {}",
+        r.stdout
+    );
+    assert!(
+        format!("{}{}", r.stdout, r.stderr).contains("issuer is empty"),
+        "the refusal must name the assertion: stdout:\n{}\nstderr:\n{}",
+        r.stdout,
+        r.stderr
+    );
+}
+
+#[test]
 fn a_statement_from_another_issuer_fails_the_policy() {
     // Cryptographically identical run, refused on identity alone: the receipt
     // verifies, the signature verifies, and the gate still says no.
