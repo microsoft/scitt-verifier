@@ -223,9 +223,9 @@ policy rejects could satisfy the rule anyway.
 
 If no receipt fully verified, the outcome is `cannotEvaluate`, not `fail`.
 
-An empty list is accepted when the policy is parsed and then fails everything,
-since no issuer can be a member of it. That is safe but rarely intended; if you
-mean "any issuer", omit the assertion and understand what you are giving up.
+An empty list is refused when the policy is parsed, because no issuer can be a
+member of it and the policy would fail every statement. If you mean "any
+issuer", omit the assertion and understand what you are giving up.
 
 ### `receiptCount`
 
