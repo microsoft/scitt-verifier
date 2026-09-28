@@ -64,10 +64,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Both crates make the same promise — callers supply bytes, we decide
+          # These crates make the same promise — callers supply bytes, we decide
           # nothing about time, exit status, or the network — so both are held
           # to it here. A crate that claims purity and is never scanned drifts.
-          roots="crates/scitt-receipt/src adapters/azure-confidential-ledger/src"
+          roots="crates/scitt-receipt/src adapters/azure-confidential-ledger/src adapters/image-reproduction/src"
           io_pattern='std::fs|File::open|read_to_string'
 
           # `if grep` cannot tell "found nothing" from "looked at nothing": both
@@ -133,6 +133,8 @@ jobs:
           # rather than merely discouraged.
           check adapters/azure-confidential-ledger/src 'scitt_verifier' \
                 'scitt-adapter-azure-confidential-ledger must not depend on the CLI; it reports checks, not verdicts.'
+          check adapters/image-reproduction/src 'scitt_verifier|scitt_network|std::process::Command' \
+                'scitt-adapter-image-reproduction must not depend on the CLI or the network, or run a build; it compares records.'
           exit $violations
 
       - name: Reject dependency drift in the core manifests
@@ -161,6 +163,9 @@ jobs:
           check_manifest adapters/azure-confidential-ledger/Cargo.toml \
             '^(scitt-verifier|scitt-network)' \
             'scitt-adapter-azure-confidential-ledger must not depend on scitt-verifier or scitt-network.'
+          check_manifest adapters/image-reproduction/Cargo.toml \
+            '^(scitt-verifier|scitt-network)' \
+            'scitt-adapter-image-reproduction must not depend on scitt-verifier or scitt-network.'
 
   size:
     name: Binary size budget

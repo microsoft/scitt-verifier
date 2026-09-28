@@ -10,3 +10,6 @@
 # They are JSON, so `text=auto` would otherwise normalise their line endings
 # and silently change every digest computed from them.
 corpus/fixtures/*.spdx.json  binary
+
+# Reproduction records are authenticated by the SHA-256 of their exact bytes.
+corpus/fixtures/image-reproduction/*.json  binary

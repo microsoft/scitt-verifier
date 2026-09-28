@@ -1,0 +1,17 @@
+{
+  "policyId": "corpus/image-reproduction",
+  "policyVersion": "1",
+  "description": "Matches the committed image-reproduction fixture. The publisher is a throwaway corpus identity; a real policy pins the publisher it trusts to commit to reproduction records.",
+  "assertions": {
+    "issuer": ["mst-test-scitt-verifier.confidential-ledger.azure.com"],
+    "statementIssuer": { "equals": "did:x509:0:sha256:RzWLarHK6L5GyjX3N8CWtyBw3u4GLE5N3AwUPE_pimc::eku:2.999" },
+    "receiptCount": 1,
+    "requireKidBoundToKey": true
+  },
+  "adapters": {
+    "image-reproduction": {
+      "profile": "scitt-ccf-ledger/reproduce-v1",
+      "sourceRepository": "https://github.com/microsoft/scitt-ccf-ledger"
+    }
+  }
+}

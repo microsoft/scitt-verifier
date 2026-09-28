@@ -1,0 +1,30 @@
+[package]
+name = "scitt-adapter-image-reproduction"
+description = "Appraisal of a supplied image rebuild against a statement-committed reproduction record"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# Like the ledger adapter, this crate appraises bytes someone else gathered and
+# hands back typed findings. It performs no file I/O, opens no sockets, reads
+# no clock and runs no build — the CI `boundary` job enforces the first three.
+#
+# It must never depend on `scitt-verifier`, so that it has no way to construct
+# a verdict, nor on `scitt-network`, which is where networking lives.
+[dependencies]
+# SHA-256 over the exact record bytes, the same primitive every other digest in
+# this project comes from.
+scitt-receipt = { path = "../../crates/scitt-receipt", default-features = false }
+# The strict JSON parser that refuses duplicate keys. A record or payload with
+# two values for one field has two answers, and this crate must read the same
+# one the policy engine reads.
+scitt-policy = { path = "../../crates/scitt-policy", default-features = false }
+serde_json = "1"
+
+[features]
+default = ["crypto_pure_rust"]
+crypto_pure_rust = ["scitt-receipt/crypto_pure_rust", "scitt-policy/crypto_pure_rust"]
+crypto_openssl = ["scitt-receipt/crypto_openssl", "scitt-policy/crypto_openssl"]

@@ -73,8 +73,10 @@ VERIFY OPTIONS:
                              but only against the root the statement carries —
                              internally consistent, not externally trusted.
     --artifact <FILE>        The artifact the statement should describe.
-    --binding-mode <MODE>    none | payload-bytes | payload-digest. Builds with
-                             a ledger adapter offer more — see below. [default: none]
+    --binding-mode <MODE>    none | payload-bytes | payload-digest |
+                             saved-evidence (with --adapter; see below). Builds
+                             with a ledger adapter also offer live-evidence.
+                                                                   [default: none]
     --format <FORMAT>        text | json                                   [default: text]
     --verbose, -v            Show detailed progress, full evidence values, and
                              the completed evidence report. Default text is
@@ -122,6 +124,31 @@ VERDICTS (exit 0 is more than one claim — see docs/output.md):
     statement-transparent  the statement is transparent, but no artifact was checked
 
 Exit 3 is not a pass. It means the tool could not answer the question.
+"#;
+
+/// Help for the image-reproduction adapter, which every build has.
+pub const REPRODUCTION_USAGE: &str = r#"
+IMAGE REPRODUCTION (image-reproduction adapter):
+    --binding-mode saved-evidence --adapter image-reproduction --evidence <DIR>
+                             DIR holds published-reproduce.json, the publisher's
+                             reproduction record, and rebuilt-reproduce.json,
+                             the record your rebuild wrote.
+
+Answers one question: does the rebuild you supplied match the reproduction
+record this statement commits to — the same recorded inputs and the same
+ordered filesystem layers?
+
+The published record is trusted only because its SHA-256 is the one the
+accepted statement commits to. The rebuilt record is yours: this tool runs no
+build, and a copy of the published record passes. A pass does not establish
+that the rebuild was independent, that any published image has these layers,
+that any deployment runs them, or that the source is safe.
+
+The profile and the allowed source repository come from
+`adapters.image-reproduction` in the policy — never from the command line.
+
+    resource-transparent   the statement is transparent, and the supplied
+                           rebuild matches the record it commits to
 "#;
 
 /// Help for the ledger-evidence binding mode, when this build has it.
@@ -215,19 +242,23 @@ impl BindingMode {
 
 /// Which adapter supplies the resource appraisal.
 ///
-/// Named on the command line even though there is one of them, because the
-/// adapter decides what the evidence *means*, and a run's record has to say
-/// which set of rules produced its result.
+/// Named on the command line because the adapter decides what the evidence
+/// *means*, and a run's record has to say which set of rules produced its
+/// result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Adapter {
     /// Azure Confidential Ledger nodes attested with SEV-SNP.
     AzureConfidentialLedger,
+    /// A supplied image rebuild compared with a statement-committed
+    /// reproduction record.
+    ImageReproduction,
 }
 
 impl Adapter {
     pub fn as_str(self) -> &'static str {
         match self {
             Adapter::AzureConfidentialLedger => "azure-confidential-ledger",
+            Adapter::ImageReproduction => "image-reproduction",
         }
     }
 }
@@ -404,9 +435,11 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 let raw = value(&mut it, flag)?;
                 adapter = Some(match raw.as_str() {
                     "azure-confidential-ledger" => Adapter::AzureConfidentialLedger,
+                    "image-reproduction" => Adapter::ImageReproduction,
                     other => {
                         return Err(format!(
-                            "unknown adapter '{other}'; expected 'azure-confidential-ledger'"
+                            "unknown adapter '{other}'; expected 'azure-confidential-ledger' \
+                             or 'image-reproduction'"
                         ))
                     }
                 });
@@ -535,6 +568,17 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         return Err(
             "--adapter was supplied but --binding-mode is not an evidence mode, so no \
              evidence would be appraised"
+                .into(),
+        );
+    }
+
+    // Refused here rather than reported as cannot-evaluate later: there is no
+    // live source of reproduction evidence, so the command line asks for
+    // something that does not exist.
+    if adapter == Some(Adapter::ImageReproduction) && binding_mode == BindingMode::LiveEvidence {
+        return Err(
+            "--adapter image-reproduction compares supplied records and has no live evidence; \
+             use --binding-mode saved-evidence --evidence <DIR>"
                 .into(),
         );
     }

@@ -121,9 +121,22 @@ or safety of those bytes.
 ## Optional resource adapters
 
 An adapter can relate an accepted statement to evidence about its subject.
-The only implemented adapter is `azure-confidential-ledger`: it compares an execution policy
+Neither is required for ordinary statement or artifact verification.
+
+`image-reproduction` is in every build. It checks that a rebuild record you
+supply matches the reproduction record the statement commits to — the same
+recorded inputs and the same ordered filesystem layers. It runs no build, so
+it does not establish that the rebuild was independent. See
+[image reproduction](docs/adapters.md#image-reproduction).
+
+```console
+scitt-verifier verify ... --binding-mode saved-evidence \
+  --adapter image-reproduction --evidence DIR
+```
+
+`azure-confidential-ledger` compares an execution policy
 embedded in the statement with policy enforcement evidenced by attested ledger
-nodes. It is not required for ordinary statement or artifact verification.
+nodes.
 
 Build it explicitly:
 

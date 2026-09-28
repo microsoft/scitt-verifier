@@ -18,13 +18,17 @@ implementing SCITT receipt verification independently.
 | `other-service-scitt-keys.cbor` | A key set from a *different* transparency service — parses fine, contains the wrong kid |
 | `cbor-header.cose` | A component manifest carrying a detached supplier signature under a **CBOR-valued text label**, `external-signature`. ES256, a two-certificate chain, one CCF receipt |
 | `nested-sign1.cose` | The same claim in COSE's own shape: a tag-18 COSE_Sign1 with a **detached payload** under the text label `external-statement`. RS256 supplier signature, ES256 envelope, one CCF receipt |
+| `image-reproduction/statement.cose` | A reproduction claim (`application/json`, 426-byte payload) committing to the scitt-ccf-ledger 0.20.1 reproduction record. ES256, one CCF receipt, registered at entry 2.355 |
+| `image-reproduction/published-reproduce.json` | scitt-ccf-ledger's published 0.20.1 `reproduce.json`, exact bytes |
+| `image-reproduction/rebuilt-reproduce.json` | The `reproduce.json` scitt-ccf-ledger's own scheduled rebuild of 0.20.1 wrote, exact bytes |
 
 Every `.cose` file here was registered on a real transparency service, so every
 receipt, inclusion proof and root signature is genuine. The signing identities
 are not: they are throwaway certificates minted by
 `corpus/tools/generate_fixtures.py` for this corpus alone. Nothing here
-corresponds to a real product, part, or signer, and no fixture carries anyone
-else's bytes.
+corresponds to a real product, part, or signer. The only bytes not produced
+here are the two public scitt-ccf-ledger release records under
+`image-reproduction/`, described below.
 
 `payload-tampered.cose` is the most instructive of these. Its receipt is
 genuine, its inclusion proof is valid, and its root signature verifies. It is
@@ -95,6 +99,26 @@ routing the nested case through it reported every real RS256 supplier signature
 as a forgery. The nested path builds its own `Sig_structure` for that reason,
 and this fixture is what proves it.
 
+`image-reproduction/` is the one fixture directory whose content is not
+minted here. The two records are public scitt-ccf-ledger artifacts:
+`published-reproduce.json` is the `reproduce.json` asset of
+[release 0.20.1](https://github.com/microsoft/scitt-ccf-ledger/releases/tag/0.20.1),
+and `rebuilt-reproduce.json` is the `historical-reproduce-manifest` artifact of
+the repository's scheduled
+[Historical docker reproducibility run](https://github.com/microsoft/scitt-ccf-ledger/actions/runs/36372251205),
+which rebuilt 0.20.1 from source. The two are byte-identical, so the pair is a
+real pass, not one constructed to agree. What is minted is the publisher: the
+statement is signed by a throwaway corpus identity, not by scitt-ccf-ledger's
+maintainers, so it demonstrates the comparison and says nothing about who
+vouches for that release. The directory is also a valid evidence bundle, so
+the acceptance tests pass it to `--evidence` as is. `.gitattributes` marks both
+records as binary: the adapter compares their SHA-256, so a rewritten line
+ending would turn the genuine record into a mismatch.
+
+`python corpus/tools/generate_fixtures.py --ledger ... --out corpus/fixtures
+--only image-reproduction` re-signs and re-registers only this statement, and
+refuses if the ledger's key set is no longer the committed one.
+
 ## Pinned values
 
 Computed by `pyscitt` and `cbor2` in `corpus/tools/generate_fixtures.py`,
@@ -148,6 +172,7 @@ Fixtures that cannot be regenerated cannot be corrected.
 | `payload-claims.json` | Asks for a claim inside the payload of a fixture that declares `application/cose`. Must report `cannot-evaluate`, never a pass |
 | `example-release-gate.json` | A starting point for a real deployment gate |
 | `example-dr-pair.json` | A gate for a service running under a primary and a disaster recovery hostname, since `issuer` matching is exact |
+| `image-reproduction.json` | Matches `image-reproduction/statement.cose` and configures the `image-reproduction` adapter. Used by its acceptance tests |
 
 The `example-` policies name invented hosts. They are templates to edit, not
 policies to run: the two `fixture-` entries, `wrong-issuer.json`, and
@@ -161,12 +186,12 @@ worth committing: the content-type gate is the whole safety property of
 change that started sniffing bytes instead of trusting the signed `cty` would
 leave every other test green.
 
-It is also an honest record of a hole in this corpus. There is no fixture with
-a JSON payload, so nothing here demonstrates `payloadJson` *succeeding* end to
-end — that path is covered by unit tests in `scitt-policy` only. Now that
-`generate_fixtures.py` registers statements on a live service, closing it is a
-matter of signing one more statement with `cty: application/json`; it is left
-open deliberately rather than for want of a way to produce the bytes.
+It is also an honest record of a hole in this corpus. Only
+`image-reproduction/statement.cose` has a JSON payload, and no committed policy
+applies `payloadJson` to it, so nothing here demonstrates `payloadJson`
+*succeeding* end to end — that path is covered by unit tests in `scitt-policy`
+only. Closing it is now a matter of one more policy against that statement; it
+is left open deliberately rather than for want of the bytes.
 
 ## Reusing this corpus
 

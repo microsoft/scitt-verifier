@@ -5,10 +5,22 @@ resource adapter. An adapter adds a domain-specific comparison between an
 accepted statement and evidence about its subject. It cannot turn an
 unaccepted statement into a success.
 
-The only implemented adapter is `azure-confidential-ledger`. It appraises evidence that ledger
-nodes enforce the execution policy embedded in a transparent statement.
-Image reproducibility, hardware, and MAA adapters are architectural possibilities,
-not supported commands or evidence formats.
+Two adapters are implemented:
+
+- `azure-confidential-ledger` appraises evidence that ledger nodes enforce the
+  execution policy embedded in a transparent statement. It is behind a build
+  feature; the sections below up to [image reproduction](#image-reproduction)
+  describe it.
+- `image-reproduction` compares a rebuild you supply with the reproduction
+  record a statement commits to. Every build has it; see
+  [image reproduction](#image-reproduction).
+
+Hardware and MAA adapters are architectural possibilities, not supported
+commands or evidence formats.
+
+A policy configures at most one adapter, and a run selects at most one. A
+policy naming two is refused as a usage error: split it into one policy per
+adapter.
 
 ## Build and select the MST ledger adapter
 
@@ -212,3 +224,126 @@ the current runtime state or the safety of the workload.
 Adapter checks appear under `appraisal.checks.adapter`. Always retain their
 details and the scope statement with the verdict; see [output](output.md).
 The code and dependency boundaries are described in [architecture](architecture.md).
+
+## Image reproduction
+
+The `image-reproduction` adapter answers one question: *does the rebuild you
+supplied match the reproduction record this statement commits to — the same
+recorded inputs, and the same ordered filesystem layers?*
+
+It is useful when a publisher registers a statement about how an image was
+built, and you, or a runner you control, have rebuilt that image from the
+same source. It turns "our rebuild matched" from a log line into a verdict
+tied to a statement the publisher signed and a transparency service recorded.
+
+### What it does not establish
+
+- **That the rebuild was independent.** The rebuilt record is whatever you
+  hand in. The tool runs no build, and a copy of the published record passes.
+  Whoever controls the evidence directory controls this half of the
+  comparison.
+- **That a published image has these layers**, or that any deployment runs
+  them. No registry is contacted and no dm-verity root is derived.
+- **That the source is safe.** Reproducibility says the bytes follow from the
+  source; it says nothing about the source.
+
+The scope statement in every record says the same, so it survives being
+quoted without this page.
+
+### Policy
+
+```json
+{
+  "policyId": "image-reproduction-example",
+  "policyVersion": "1",
+  "assertions": {
+    "issuer": ["example.confidential-ledger.azure.com"],
+    "statementIssuer": { "equals": "did:x509:0:sha256:...::eku:..." }
+  },
+  "adapters": {
+    "image-reproduction": {
+      "profile": "scitt-ccf-ledger/reproduce-v1",
+      "sourceRepository": "https://github.com/microsoft/scitt-ccf-ledger"
+    }
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `profile` | Which statement claims and record fields mean what. This build understands only `scitt-ccf-ledger/reproduce-v1`; any other value makes every check `cannot-evaluate`, never a reading under the wrong rules. |
+| `sourceRepository` | The only repository the statement may name. Compared exactly, with no normalisation. |
+
+Both are required and neither may be empty. Neither can be set on the command
+line. Pin `statementIssuer` as well: the adapter trusts the published record
+only because an accepted statement commits to it, so the policy decides whose
+statements count.
+
+### Statement payload
+
+The statement must carry its claim inline with content type
+`application/json`. A detached payload gives `cannot-evaluate`; a payload
+whose content type is missing or not JSON fails, since the publisher signed a
+statement that is not a reproduction claim.
+
+```json
+{
+  "scittReproduction": 1,
+  "profile": "scitt-ccf-ledger/reproduce-v1",
+  "sourceRepository": "https://github.com/microsoft/scitt-ccf-ledger",
+  "sourceCommit": "<40 lowercase hex>",
+  "version": "0.20.1",
+  "contextSha256": "<64 lowercase hex>",
+  "reproductionRecordSha256": "<64 lowercase hex>"
+}
+```
+
+A `scittReproduction` version this build does not read is `cannot-evaluate`.
+A missing claim, a malformed value, or a `profile` that differs from the
+policy's is a failure. Duplicate keys are refused.
+
+### Evidence
+
+```console
+scitt-verifier verify --statement statement.cose --scitt-keys keys.cbor \
+  --policy policy.json \
+  --binding-mode saved-evidence --adapter image-reproduction --evidence DIR
+```
+
+`DIR` holds two files with fixed names:
+
+| File | What it is |
+|---|---|
+| `published-reproduce.json` | The publisher's reproduction record, byte for byte. |
+| `rebuilt-reproduce.json` | The record your rebuild wrote. |
+
+For `scitt-ccf-ledger/reproduce-v1` both are the `reproduce.json` written by
+scitt-ccf-ledger's reproduction script, `schema_version` 1. Each file is read
+within a 64 KiB bound, and a path that resolves outside `DIR` is refused.
+`--binding-mode live-evidence` is refused for this adapter: there is nothing
+live to collect.
+
+### Checks
+
+All five are required, in this order:
+
+| Name | Passes when |
+|---|---|
+| `reproduction-claim` | The statement's claim is readable, its version is supported, and its profile is the policy's. |
+| `source-repository` | The statement names the policy's `sourceRepository`. |
+| `record-binding` | The SHA-256 of `published-reproduce.json` equals `reproductionRecordSha256`, and its `source_commit`, `scitt_version` and `context_sha256` agree with the statement. |
+| `rebuild-inputs` | The rebuild recorded the same `source_commit`, `scitt_version`, `context_sha256`, `source_date_epoch`, `base_image`, `ccf_version`, `ccf_rpm_sha256`, `ccf_reproduce_sha256` and `tdnf_snapshottime`. |
+| `rebuild-layers` | The rebuild's ordered layer digests equal the published record's. |
+
+Input drift fails, even when the layers happen to match: a rebuild from
+different inputs is not evidence about the recorded build. `docker_version`,
+`buildx_version` and `image_id` may legitimately differ between two builds
+with identical layers; a difference is reported as a note and is never
+compared. When layers differ, every differing position is reported with its
+expected and observed digests, so one inserted layer shows as a difference at
+each later position.
+
+A failed check yields `resource-failed` (exit 2). A missing or unreadable
+file, or a record in a schema this profile does not read, yields
+`cannot-evaluate` (exit 3). Only an accepted statement whose five checks all
+pass is `resource-transparent` (exit 0).

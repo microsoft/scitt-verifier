@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### An `image-reproduction` adapter compares a rebuild with its record
+
+`--binding-mode saved-evidence --adapter image-reproduction --evidence DIR`
+checks that the rebuild record you supply matches the reproduction record an
+accepted statement commits to: the record's SHA-256, the recorded inputs and
+the ordered filesystem layers. Every build has it; no feature flag is needed.
+The first profile, `scitt-ccf-ledger/reproduce-v1`, reads the `reproduce.json`
+records scitt-ccf-ledger publishes with each release. The rebuild is
+operator-supplied, so a pass does not establish an independent rebuild, a
+published image, or a deployment; the scope statement says so. See
+[adapters](docs/adapters.md#image-reproduction).
+
+Older binaries refuse a policy containing `adapters.image-reproduction`,
+because unknown policy keys are errors. A policy configuring two adapters is
+now refused as a usage error, and the verbose adapter stage is labelled
+"Appraise resource evidence" instead of "Appraise node evidence".
+
 ### `--online` shows each ledger's current configuration
 
 After acquiring the key sets, `--online` now also reads each acquired ledger's

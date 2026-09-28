@@ -5,6 +5,7 @@ mod acl;
 mod live;
 #[cfg(feature = "adapter-azure-confidential-ledger")]
 mod load;
+mod reproduction;
 
 use scitt_policy::Policy;
 use scitt_receipt::Sign1;
@@ -51,24 +52,55 @@ impl AdapterAssessment {
     }
 }
 
+/// The adapters a policy configures, in a fixed order.
+fn configured(policy: &Policy) -> Vec<Adapter> {
+    let mut out = Vec::new();
+    if policy.adapters.acl.is_some() {
+        out.push(Adapter::AzureConfidentialLedger);
+    }
+    if policy.adapters.image_reproduction.is_some() {
+        out.push(Adapter::ImageReproduction);
+    }
+    out
+}
+
 /// A policy requirement cannot disappear just because its CLI selector was omitted.
 pub fn validate_request(adapter: Option<Adapter>, policy: &Policy) -> Result<(), String> {
-    match (adapter, policy.adapters.acl.as_ref()) {
-        (None, None) | (Some(Adapter::AzureConfidentialLedger), Some(_)) => Ok(()),
-        (None, Some(_)) => Err(
-            "policy requires adapters.azure-confidential-ledger; select --adapter azure-confidential-ledger and an \
-             evidence binding mode so its requirements are evaluated"
-                .into(),
-        ),
-        (Some(Adapter::AzureConfidentialLedger), None) => {
-            Err("--adapter azure-confidential-ledger requires policy.adapters.azure-confidential-ledger".into())
-        }
+    let configured = configured(policy);
+    match adapter {
+        None => match configured.first() {
+            None => Ok(()),
+            Some(required) => Err(format!(
+                "policy requires adapters.{0}; select --adapter {0} and an evidence binding \
+                 mode so its requirements are evaluated",
+                required.as_str()
+            )),
+        },
+        Some(selected) if !configured.contains(&selected) => Err(format!(
+            "--adapter {0} requires policy.adapters.{0}",
+            selected.as_str()
+        )),
+        // A run appraises one adapter. Accepting a policy that configures two
+        // would evaluate one and leave the other's requirements unexamined
+        // while the run reported the policy satisfied.
+        Some(_) if configured.len() > 1 => Err(format!(
+            "policy configures {} adapters ({}), but a run appraises one; split it into one \
+             policy per adapter so no requirement goes unevaluated",
+            configured.len(),
+            configured
+                .iter()
+                .map(|a| a.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        Some(_) => Ok(()),
     }
 }
 
 pub fn not_attempted(adapter: Adapter, reason: impl Into<String>) -> AdapterAssessment {
     match adapter {
         Adapter::AzureConfidentialLedger => acl::not_attempted(reason),
+        Adapter::ImageReproduction => reproduction::not_attempted(reason),
     }
 }
 
@@ -80,6 +112,7 @@ pub fn check_event(
 ) -> crate::progress::Event {
     match adapter {
         Adapter::AzureConfidentialLedger => acl::check_event(check, detail, findings),
+        Adapter::ImageReproduction => reproduction::check_event(check, detail),
     }
 }
 
@@ -98,9 +131,12 @@ pub fn appraise(
                 "policy.adapters.azure-confidential-ledger is missing",
             ),
         },
+        Adapter::ImageReproduction => match &policy.adapters.image_reproduction {
+            Some(config) => reproduction::appraise_evidence(source, statement, config, progress),
+            None => not_attempted(adapter, "policy.adapters.image-reproduction is missing"),
+        },
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

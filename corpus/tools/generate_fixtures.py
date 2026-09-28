@@ -410,6 +410,46 @@ def nested_sign1_statement() -> bytes:
 # --------------------------------------------------------------------------
 
 
+# The statement claim format the image-reproduction adapter reads, and the
+# profile it is appraised under. See docs/adapters.md.
+REPRODUCTION_PROFILE = "scitt-ccf-ledger/reproduce-v1"
+REPRODUCTION_REPOSITORY = "https://github.com/microsoft/scitt-ccf-ledger"
+REPRODUCTION_DIR = "image-reproduction"
+
+
+def reproduction_statement(record: bytes) -> bytes:
+    """A statement committing to a public reproduction record by digest.
+
+    The record is scitt-ccf-ledger's own published release record, which is
+    public and redistributable; only the statement around it is minted. The
+    fields repeated from the record are the ones the adapter cross-checks.
+    """
+    fields = json.loads(record)
+    claim = {
+        "scittReproduction": 1,
+        "profile": REPRODUCTION_PROFILE,
+        "sourceRepository": REPRODUCTION_REPOSITORY,
+        "sourceCommit": fields["source_commit"],
+        "version": fields["scitt_version"],
+        "contextSha256": fields["context_sha256"],
+        "reproductionRecordSha256": hashlib.sha256(record).hexdigest(),
+    }
+    leaf_key, chain = envelope_identity()
+    signer = crypto.Signer(
+        private_key=key_pem(leaf_key),
+        issuer=did_x509(chain[1], SUPPLIER_EKU),
+        algorithm="ES256",
+        x5c=[pem(c) for c in chain],
+    )
+    return crypto.sign_statement(
+        signer,
+        json.dumps(claim, indent=2).encode("ascii"),
+        content_type="application/json",
+        feed="example-image",
+        cwt=True,
+    )
+
+
 def receipts_of(statement: bytes) -> list[bytes]:
     tag = cbor2.loads(statement)
     return list(tag.value[1][RECEIPTS])
@@ -532,6 +572,11 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--ledger", required=True, help="transparency service hostname")
     ap.add_argument("--out", required=True, type=Path, help="fixture directory")
+    ap.add_argument(
+        "--only",
+        choices=["image-reproduction"],
+        help="register only this fixture, leaving the rest of the corpus untouched",
+    )
     args = ap.parse_args()
 
     out: Path = args.out
@@ -547,6 +592,22 @@ def main() -> int:
 
     print(f"registering on {args.ledger}", file=sys.stderr)
 
+    # The reproduction statement verifies against the corpus key set, so it
+    # can be added without regenerating everything else only while the
+    # service still signs with that key. Refused otherwise, rather than
+    # committing a statement no committed key set can verify.
+    record = (out / REPRODUCTION_DIR / "published-reproduce.json").read_bytes()
+    if args.only == "image-reproduction":
+        keys = client.get("/.well-known/scitt-keys").read()
+        if keys != (out / KEY_SET_NAME).read_bytes():
+            print("the service's key set changed; regenerate the whole corpus", file=sys.stderr)
+            return 1
+        emit(f"{REPRODUCTION_DIR}/statement.cose", register(client, reproduction_statement(record)))
+        print("\nissuer for corpus/policies/image-reproduction.json:", file=sys.stderr)
+        statement = cbor2.loads((out / REPRODUCTION_DIR / "statement.cose").read_bytes())
+        print(f"  {cbor2.loads(statement.value[0])[CWT][CWT_ISS]}", file=sys.stderr)
+        return 0
+
     transparent = register(client, base_statement())
     emit("transparent-statement.cose", transparent)
     emit("tampered-statement.cose", tampered_receipt(transparent))
@@ -556,6 +617,7 @@ def main() -> int:
 
     emit("cbor-header.cose", register(client, cbor_header_statement()))
     emit("nested-sign1.cose", register(client, nested_sign1_statement()))
+    emit(f"{REPRODUCTION_DIR}/statement.cose", register(client, reproduction_statement(record)))
 
     keys = client.get("/.well-known/scitt-keys").read()
     emit(KEY_SET_NAME, keys)
