@@ -5,10 +5,92 @@ resource adapter. An adapter adds a domain-specific comparison between an
 accepted statement and evidence about its subject. It cannot turn an
 unaccepted statement into a success.
 
-The only implemented adapter is `azure-confidential-ledger`. It appraises evidence that ledger
-nodes enforce the execution policy embedded in a transparent statement.
-Image reproducibility, hardware, and MAA adapters are architectural possibilities,
-not supported commands or evidence formats.
+The `azure-confidential-ledger` adapter appraises evidence that ledger nodes
+enforce an embedded execution policy. `certificate-hbom` is a separate, offline,
+synthetic-profile certificate-to-bytes association. It is not a device attestation
+or a vendor hardware verifier. Image reproducibility and MAA adapters remain
+architectural possibilities, not supported commands or evidence formats.
+
+## Offline certificate-to-HBOM association
+
+The reusable `scitt-adapter-certificate-hbom` workspace crate lives in
+`adapters/certificate-hbom`, alongside the Azure Confidential Ledger adapter.
+`appraise(&Sign1, &HbomPolicy, Evidence, now)` accepts the already-accepted
+in-memory statement, typed requirements, borrowed leaf-first DER certificates
+and independent DER roots, and Unix verification seconds. Its `Appraisal`
+contains `certificate_trust` and `hbom_commitment` findings; it has no I/O,
+clock, network or CLI verdict dependency. Callers must accept the statement
+first and require both findings to pass. The CLI retains PEM loading (at most
+1 MiB and 16 certificates per input), orchestration and verdict mapping.
+The crate defaults to `crypto_pure_rust` and also forwards `crypto_openssl`;
+the CLI keeps it built in, without a new opt-in feature.
+
+The built-in `certificate-hbom` adapter takes a leaf-first PEM certificate chain
+from `--evidence <FILE>` and independently approved CA certificates from
+`--certificate-roots <FILE>`. A reviewed policy also pins the SHA-256 of the
+selected root. These roots are **separate** from `--trusted-roots`, which applies
+only to the *statement signer*. The adapter runs after statement signature,
+receipt, and relying-party assertions pass. It validates the certificate path
+using the existing certificate verifier at the explicit `--now` time (or the
+run's wall clock), enforces the policy's leaf EKU, then compares a single
+specified leaf extension with SHA-384 of the exact accepted HBOM bytes.
+Only the one certificate in the independent root file matching the policy pin
+is eligible as the anchor; zero or duplicate matches fail.
+Certificate trust and digest binding are independent structured checks under
+`appraisal.checks.adapter`.
+
+```console
+scitt-verifier verify --statement hbom.cose --scitt-keys keys.cbor \
+  --policy hbom-policy.json --adapter certificate-hbom \
+  --binding-mode certificate-hbom --evidence device-chain.pem \
+  --certificate-roots approved-ca.pem
+```
+
+Example policy shape (replace the placeholder root pin with the independently
+approved root certificate's DER SHA-256 before use):
+
+```json
+{
+  "policyId": "synthetic/hbom-example",
+  "policyVersion": "1",
+  "assertions": { "issuer": ["example-log.invalid"], "receiptCount": 1 },
+  "adapters": {
+    "certificate-hbom": {
+      "source": { "kind": "statement-payload" },
+      "rootSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "leafEku": "1.3.6.1.4.1.55555.1.2",
+      "profile": {
+        "oid": "1.3.6.1.4.1.55555.1.1",
+        "digest": "sha384",
+        "encoding": "raw"
+      }
+    }
+  }
+}
+```
+
+`source.kind` can be `statement-payload` (the entire attached payload, byte for
+byte) or `encoded-claim` with `path` (nonempty JSON claim path) and `encoding`
+(`base64` or `base64url`). The latter requires a payload declared as JSON in
+the signed header; the strict shared extractor rejects duplicate JSON keys.
+No JSON parsing/canonicalization occurs when hashing the resulting HBOM bytes.
+The synthetic profile supports `raw` (exactly 48 bytes) or `der-octet-string`
+(one DER OCTET STRING containing exactly 48 digest bytes). No extension OID,
+digest, or encoding is inferred from evidence. Unknown fields/profiles fail
+policy parsing or validation. An absent/duplicate/malformed leaf extension
+cannot pass. The chain must not include unused, competing certificates.
+
+**This is a synthetic interoperability test profile only.** OID
+`1.3.6.1.4.1.3704.5.2` is *not* finalized or supported here. The actual AMD
+device certificate and HBOM schema remain under standardization; use no
+production compatibility claim from this example. The committed certificate
+fixtures are generated test-only identities; the existing registered corpus
+statement's arbitrary payload stands in for HBOM bytes in tests and is not an
+HBOM schema fixture. `corpus/tools/generate_hbom_certificates.py` documents
+their provenance. No live device possession, hardware inventory, workload
+state, or certificate revocation is verified; these limits appear in
+`appraisal.notChecked` at runtime. A successful `resource-transparent` verdict
+is scoped to this *static certificate association*, not to a running device.
 
 ## Build and select the MST ledger adapter
 

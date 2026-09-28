@@ -187,6 +187,7 @@ pub fn parse_eku_oids_strict(value: &[u8]) -> Result<Vec<String>> {
             if !remainder.is_empty() {
                 return Err(malformed("trailing bytes after the extension value"));
             }
+
             match read_tlv(contents) {
                 Some((0x30, seq, [])) => seq,
                 _ => return Err(malformed("the value is not a single SEQUENCE")),
@@ -221,6 +222,98 @@ pub fn parse_eku_oids_strict(value: &[u8]) -> Result<Vec<String>> {
         return Err(malformed("the sequence names no key purpose"));
     }
     Ok(oids)
+}
+
+/// Read exactly one X.509 extension's inner OCTET STRING bytes.
+pub fn unique_extension(der: &[u8], wanted: &str) -> Result<Option<Vec<u8>>> {
+    let malformed = || Error::TrustMaterial("certificate extensions are malformed".into());
+    let (0x30, certificate, []) = read_tlv(der).ok_or_else(malformed)? else {
+        return Err(malformed());
+    };
+    let (0x30, tbs, _) = read_tlv(certificate).ok_or_else(malformed)? else {
+        return Err(malformed());
+    };
+    let mut rest = tbs;
+    if let Some((0xA0, _, tail)) = read_tlv(rest) {
+        rest = tail;
+    }
+
+    for tag in [0x02, 0x30, 0x30, 0x30, 0x30, 0x30] {
+        let (actual, _, tail) = read_tlv(rest).ok_or_else(malformed)?;
+        if actual != tag {
+            return Err(malformed());
+        }
+        rest = tail;
+    }
+    while !rest.is_empty() {
+        let (tag, body, tail) = read_tlv(rest).ok_or_else(malformed)?;
+        rest = tail;
+        if tag != 0xA3 {
+            if tag == 0x81 || tag == 0x82 {
+                continue;
+            }
+            return Err(malformed());
+        }
+        if !rest.is_empty() {
+            return Err(malformed());
+        }
+        let (0x30, extensions, []) = read_tlv(body).ok_or_else(malformed)? else {
+            return Err(malformed());
+        };
+        let mut entries = extensions;
+        let mut found = None;
+        while !entries.is_empty() {
+            let (0x30, entry, tail) = read_tlv(entries).ok_or_else(malformed)? else {
+                return Err(malformed());
+            };
+            entries = tail;
+            let (0x06, oid, mut fields) = read_tlv(entry).ok_or_else(malformed)? else {
+                return Err(malformed());
+            };
+            let name = decode_oid(oid).ok_or_else(malformed)?;
+            if let Some((0x01, flag, tail)) = read_tlv(fields) {
+                if flag.len() != 1 || !matches!(flag[0], 0 | 0xff) {
+                    return Err(malformed());
+                }
+                fields = tail;
+            }
+            let (0x04, value, []) = read_tlv(fields).ok_or_else(malformed)? else {
+                return Err(malformed());
+            };
+            if name == wanted && found.replace(value.to_vec()).is_some() {
+                return Err(Error::TrustMaterial(format!(
+                    "certificate contains duplicate {wanted} extensions"
+                )));
+            }
+        }
+        return Ok(found);
+    }
+    Ok(None)
+}
+
+#[cfg(test)]
+mod extension_tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_commitments_are_never_selected_by_position() {
+        let extension = [0x30, 0x07, 0x06, 0x03, 0x55, 0x1d, 0x25, 0x04, 0x00];
+        let mut extensions = Vec::new();
+        extensions.extend_from_slice(&extension);
+        extensions.extend_from_slice(&extension);
+        let mut tbs = vec![0x02, 0x01, 0x01];
+        for _ in 0..5 {
+            tbs.extend_from_slice(&[0x30, 0x00]);
+        }
+        tbs.extend_from_slice(&[0xa3, 0x14, 0x30, 0x12]);
+        tbs.extend_from_slice(&extensions);
+        let mut cert = vec![0x30, 0x25, 0x30, 0x23];
+        cert.extend_from_slice(&tbs);
+        assert!(unique_extension(&cert, "2.5.29.37")
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate"));
+    }
 }
 
 /// The `notBefore` and `notAfter` of a certificate, as Unix seconds.

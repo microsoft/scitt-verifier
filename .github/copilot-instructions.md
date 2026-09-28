@@ -114,10 +114,12 @@ resolve the tension by committing the original.
 | Path | Role |
 |---|---|
 | `crates/scitt-receipt` | Core: parsing, crypto, receipts, binding. Embeddable — no I/O, no clock, no verdicts, no dependency on the other crates. CI's `boundary` job enforces this by grep |
-| `crates/scitt-policy` | Statement assertions and typed requirements in `src/adapters/{mod.rs,acl.rs}`; no I/O |
+| `crates/scitt-policy` | Statement assertions and typed requirements in `src/adapters/{mod.rs,acl.rs,hbom.rs}`; no I/O |
 | `crates/scitt-network` | Network acquisition of receipt keys and resource evidence; no policy decisions |
 | `adapters/azure-confidential-ledger` | `scitt-adapter-azure-confidential-ledger`: pure appraisal of ACL/CCF node evidence; no I/O, no CLI verdicts. Renamed to `acl` inside `scitt-verifier`, because the published name is what a consumer types and `acl` alone means access-control list |
+| `adapters/certificate-hbom` | `scitt-adapter-certificate-hbom`: pure offline synthetic certificate-to-HBOM-byte appraisal; supplied DER evidence, typed requirements and explicit time; no I/O, clock or CLI verdicts. Renamed to `hbom` inside the CLI |
 | `crates/scitt-verifier` | CLI arguments, reporting, exit codes; `src/adapters/` owns dispatch, adapter orchestration, bundle loading and acquisition orchestration |
+| `crates/scitt-verifier/src/adapters/hbom.rs` | Bounded PEM/file loading and mapping certificate-HBOM findings into CLI checks; no certificate appraisal logic |
 | `crates/scitt-wasm` | Browser bindings and the demo page |
 | `corpus/` | Real fixtures and example policies |
 | `docs/` | `policy.md`, `adapters.md`, `output.md`, `trust-material.md`, `limitations.md`, `architecture.md`, `distribution.md` |
@@ -125,6 +127,8 @@ resolve the tension by committing the original.
 Policy JSON separates `assertions` from
 `adapters.azure-confidential-ledger.{target,trust,binding}`. The old top-level `ledger`/`trust`
 and `assertions.bindLedgerPolicy` shape is not supported.
+`adapters.certificate-hbom` specifies a synthetic SHA-384 profile and independently
+pinned certificate root; it is not an AMD device certificate profile.
 `Policy::evaluate` must not pass when required adapters cannot run; the CLI
 evaluates statement assertions and then adapters explicitly. Keep SNP/UVM
 types specific to the Azure Confidential Ledger adapter. There is no generic
@@ -156,13 +160,17 @@ cargo clippy --all-targets      # not --all-features: crypto backends are exclus
 cargo test --workspace
 ```
 
-The adapter is behind a feature and is not built by the commands above. Lint
-and test it explicitly:
+The Azure Confidential Ledger appraiser is behind a feature. Lint its enabled
+paths explicitly:
 
 ```console
 cargo clippy -p scitt-verifier --features adapter-azure-confidential-ledger --all-targets
 cargo clippy -p scitt-adapter-azure-confidential-ledger --features azure-confidential-ledger --all-targets
 ```
+
+The certificate-HBOM adapter is built in and covered by the default commands.
+Its standalone checks are `cargo test -p scitt-adapter-certificate-hbom` and
+`cargo clippy -p scitt-adapter-certificate-hbom --all-targets`.
 
 `RUSTFLAGS: -D warnings` in CI, so a warning is a failure. The release binary
 has a 4 MiB budget and the WASM bundle 1 MiB; both are enforced.

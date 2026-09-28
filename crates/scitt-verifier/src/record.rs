@@ -194,7 +194,7 @@ fn header(schema: &str, now: i64) -> Map<String, Value> {
 /// identical bytes produce records that differ here and nowhere else. A
 /// consumer comparing records should skip this block.
 fn inputs_json(args: &VerifyArgs) -> Value {
-    json!({
+    let mut inputs = json!({
         "canonical": false,
         "statement": args.statement.display().to_string(),
         // Null in online mode: there was no key file. A path here would name a
@@ -212,7 +212,16 @@ fn inputs_json(args: &VerifyArgs) -> Value {
         // A record that mentioned only one would leave half the operator's
         // configuration invisible to an auditor.
         "trustedRoots": args.trusted_roots.as_ref().map(|p| p.display().to_string()),
-    })
+    });
+    if args.binding_mode == BindingMode::CertificateHbom {
+        inputs["certificateRoots"] = json!(args
+            .certificate_roots
+            .as_ref()
+            .map(|p| p.display().to_string()));
+        inputs["certificateEvidence"] =
+            json!(args.evidence.as_ref().map(|p| p.display().to_string()));
+    }
+    inputs
 }
 
 /// What chain validation established, projected verbatim.
@@ -530,7 +539,9 @@ fn binding_json(args: &VerifyArgs, assessment: &Assessment) -> Value {
         // not to a file, and the artifact block must not imply an artifact
         // comparison happened. The resource appraisal is recorded separately,
         // under the adapter checks.
-        BindingMode::SavedEvidence | BindingMode::LiveEvidence => "none",
+        BindingMode::SavedEvidence | BindingMode::LiveEvidence | BindingMode::CertificateHbom => {
+            "none"
+        }
     };
 
     // Derived from the outcome, not from whether `--artifact` was passed.
@@ -725,6 +736,7 @@ mod tests {
             facts: None,
             save_trust: None,
             trusted_roots: None,
+            certificate_roots: None,
             now: None,
         }
     }
@@ -1013,6 +1025,7 @@ mod service_configuration_tests {
             facts: None,
             save_trust: None,
             trusted_roots: None,
+            certificate_roots: None,
             now: None,
         }
     }

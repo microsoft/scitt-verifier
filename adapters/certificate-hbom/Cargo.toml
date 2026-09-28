@@ -1,0 +1,23 @@
+[package]
+name = "scitt-adapter-certificate-hbom"
+description = "Offline synthetic certificate commitment appraisal over accepted HBOM bytes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# Callers supply evidence and time. No CLI or network dependency belongs here.
+[dependencies]
+scitt-receipt = { path = "../../crates/scitt-receipt", default-features = false }
+scitt-policy = { path = "../../crates/scitt-policy", default-features = false }
+sha2.workspace = true
+
+[dev-dependencies]
+serde_json = "1"
+
+[features]
+default = ["crypto_pure_rust"]
+crypto_pure_rust = ["scitt-receipt/crypto_pure_rust", "scitt-policy/crypto_pure_rust"]
+crypto_openssl = ["scitt-receipt/crypto_openssl", "scitt-policy/crypto_openssl"]

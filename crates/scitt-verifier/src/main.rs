@@ -42,14 +42,14 @@ fn main() -> ExitCode {
         // parse, so there is no format to honour. Documented in docs/output.md.
         Err(message) => {
             eprintln!("error: {message}\n");
-            eprintln!("{}{}", cli::USAGE, cli::ADAPTER_USAGE);
+            eprintln!("{}{}{}", cli::USAGE, cli::ADAPTER_USAGE, cli::HBOM_USAGE);
             return ExitCode::from(Verdict::UsageError.exit_code());
         }
     };
 
     match command {
         Command::Help => {
-            println!("{}{}", cli::USAGE, cli::ADAPTER_USAGE);
+            println!("{}{}{}", cli::USAGE, cli::ADAPTER_USAGE, cli::HBOM_USAGE);
             ExitCode::SUCCESS
         }
         Command::Version => {
@@ -217,12 +217,22 @@ fn progress_plan(args: &VerifyArgs) -> Vec<(progress::Stage, String)> {
             Evidence,
             if args.binding_mode == BindingMode::LiveEvidence {
                 "Authenticate target and collect evidence"
+            } else if args.binding_mode == BindingMode::CertificateHbom {
+                "Read certificate chain and independent roots"
             } else {
                 "Load saved evidence"
             }
             .into(),
         ));
-        plan.push((Adapter, "Appraise node evidence".into()));
+        plan.push((
+            Adapter,
+            if args.adapter == Some(cli::Adapter::CertificateHbom) {
+                "Check certificate/HBOM binding"
+            } else {
+                "Appraise node evidence"
+            }
+            .into(),
+        ));
     }
     plan
 }
@@ -390,6 +400,9 @@ fn evaluate(args: &VerifyArgs, now: i64, progress: &mut dyn progress::Sink) -> A
         match args.binding_mode {
             BindingMode::LiveEvidence => "Inputs loaded; live-evidence appraisal requested",
             BindingMode::SavedEvidence => "Inputs loaded; saved-evidence appraisal requested",
+            BindingMode::CertificateHbom => {
+                "Inputs loaded; offline certificate-HBOM binding requested"
+            }
             _ => "Inputs loaded",
         },
     ));
@@ -535,9 +548,9 @@ fn evaluate(args: &VerifyArgs, now: i64, progress: &mut dyn progress::Sink) -> A
     // policy has ruled on it. Appraising node evidence against a statement
     // nobody has authenticated would compare a number to another number.
     let resource = if let Some(adapter) = args.adapter {
-        let resource = run_adapter(args, &policy, &statement_bytes, verdict, progress);
+        let resource = run_adapter(args, &policy, &statement_bytes, verdict, now, progress);
         if let Some(result) = &resource {
-            if result.findings.is_empty() {
+            if adapter == cli::Adapter::AzureConfidentialLedger && result.findings.is_empty() {
                 progress.emit(progress::Event::stage(
                     progress::Stage::Adapter,
                     progress::State::NotRun,
@@ -595,7 +608,7 @@ fn evaluate(args: &VerifyArgs, now: i64, progress: &mut dyn progress::Sink) -> A
         &decision,
         args.trusted_roots.is_some(),
     ));
-    if verdict == Verdict::StatementTransparent && args.binding_mode != BindingMode::SavedEvidence {
+    if verdict == Verdict::StatementTransparent && !args.binding_mode.is_evidence() {
         // A pass, but a narrower one than most readers assume. Recorded as a
         // diagnostic so a pipeline can gate on it without parsing prose.
         diagnostics.push(Diagnostic::warning(
@@ -2138,6 +2151,26 @@ fn gaps(
             "the verdict covers the statement only, not the thing being deployed",
         ));
     }
+    if args.binding_mode == BindingMode::CertificateHbom {
+        gaps.push(Gap::new(
+            "DevicePossessionNotChecked",
+            Category::Binding,
+            "Certificate-HBOM binding is an offline association; no device key possession or live device identity was checked.",
+            "a copied certificate can satisfy the static association without a device being present",
+        ));
+        gaps.push(Gap::new(
+            "WorkloadStateNotChecked",
+            Category::Binding,
+            "No workload state, runtime attestation or live hardware inventory was checked.",
+            "this result cannot establish what any machine is running",
+        ));
+        gaps.push(Gap::new(
+            "DeviceCertificateRevocationNotChecked",
+            Category::SignerIdentity,
+            "The certificate-HBOM adapter does not check revocation of the supplied device certificate path.",
+            "a revoked certificate may still pass the static commitment check",
+        ));
+    }
 
     // The statement signature is checked against the key in its own certificate.
     // Whether the chain around it was validated — and to whose root — decides
@@ -2257,7 +2290,7 @@ fn check_binding(args: &VerifyArgs, statement_bytes: &[u8]) -> Result<BindingRes
         // and a different claim; they are appraised separately and must never
         // reach the core, which would have to invent an artifact to compare
         // against.
-        BindingMode::SavedEvidence | BindingMode::LiveEvidence => {
+        BindingMode::SavedEvidence | BindingMode::LiveEvidence | BindingMode::CertificateHbom => {
             return Ok(BindingResult::not_requested())
         }
         BindingMode::PayloadBytes => CoreBindingMode::PayloadBytes,
@@ -2310,6 +2343,7 @@ fn run_adapter(
     policy: &Policy,
     statement_bytes: &[u8],
     statement_verdict: Verdict,
+    now: i64,
     progress: &mut dyn progress::Sink,
 ) -> Option<adapters::AdapterAssessment> {
     let adapter = args.adapter?;
@@ -2323,6 +2357,19 @@ fn run_adapter(
                 ))
             }
         },
+        BindingMode::CertificateHbom => {
+            match (args.evidence.as_deref(), args.certificate_roots.as_deref()) {
+                (Some(chain), Some(roots)) => {
+                    adapters::EvidenceSource::Certificate { chain, roots, now }
+                }
+                _ => {
+                    return Some(adapters::not_attempted(
+                        adapter,
+                        "certificate chain or independent roots missing",
+                    ))
+                }
+            }
+        }
         BindingMode::LiveEvidence => adapters::EvidenceSource::Live {
             save_to: args.save_evidence.as_deref(),
         },
@@ -2478,6 +2525,70 @@ fn read(path: &Path) -> Result<Vec<u8>, String> {
 mod resource_tests {
     use super::*;
     use crate::outcome::AdapterCheck;
+
+    #[test]
+    fn certificate_adapter_uses_captured_evaluation_time_without_now_flag() {
+        let fixtures =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../corpus/fixtures/synthetic-hbom");
+        let root = fixtures.join("root.pem");
+        let root_pem = std::fs::read_to_string(&root).unwrap();
+        let roots = scitt_receipt::chain::parse_pem_certificates(&root_pem).unwrap();
+        let policy = Policy::from_json(
+            &serde_json::to_vec(&serde_json::json!({
+                "policyId": "test/captured-time", "policyVersion": "1",
+                "assertions": { "issuer": ["example-log.invalid"] },
+                "adapters": { "certificate-hbom": {
+                    "source": { "kind": "statement-payload" },
+                    "rootSha256": scitt_receipt::sha256_hex(&roots[0]),
+                    "leafEku": "1.3.6.1.4.1.55555.1.2",
+                    "profile": { "oid": "1.3.6.1.4.1.55555.1.1", "digest": "sha384", "encoding": "raw" }
+                }}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let args = VerifyArgs {
+            statement: PathBuf::from("unused.cose"),
+            trust: TrustSource::Local(PathBuf::from("unused.cbor")),
+            policy: PathBuf::from("unused.json"),
+            artifact: None,
+            binding_mode: BindingMode::CertificateHbom,
+            adapter: Some(cli::Adapter::CertificateHbom),
+            evidence: Some(fixtures.join("good.pem")),
+            save_evidence: None,
+            format: Format::Json,
+            verbose: false,
+            result: None,
+            facts: None,
+            save_trust: None,
+            trusted_roots: None,
+            certificate_roots: Some(root),
+            now: None,
+        };
+        let statement = include_bytes!("../../../corpus/fixtures/transparent-statement.cose");
+        let mut progress = progress::Noop;
+        let within_validity = run_adapter(
+            &args,
+            &policy,
+            statement,
+            Verdict::StatementTransparent,
+            1785197841,
+            &mut progress,
+        )
+        .unwrap();
+        assert!(within_validity.scoped_pass());
+        let after_expiry = run_adapter(
+            &args,
+            &policy,
+            statement,
+            Verdict::StatementTransparent,
+            1924992000,
+            &mut progress,
+        )
+        .unwrap();
+        assert_eq!(after_expiry.checks[0].state, CheckState::Fail);
+        assert!(!after_expiry.scoped_pass());
+    }
 
     /// A reason given once must still be findable from every check it blocked.
     ///

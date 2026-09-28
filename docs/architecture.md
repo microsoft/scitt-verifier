@@ -11,16 +11,21 @@ not a prerequisite for verifying a transparent statement.
 | `crates/scitt-policy` | Evaluate statement assertions and parse typed adapter requirements; no I/O or clock (`now` is supplied) |
 | `crates/scitt-network` | Acquire receipt keys and live resource evidence; no policy decisions |
 | `adapters/azure-confidential-ledger` (`scitt-adapter-azure-confidential-ledger`) | Pure appraisal of supplied MST ledger evidence against typed requirements |
+| `adapters/certificate-hbom` (`scitt-adapter-certificate-hbom`) | Pure synthetic certificate/HBOM appraisal over supplied DER evidence, an accepted statement, typed requirements and explicit time |
 | `crates/scitt-verifier` | Load inputs, select acquisition and adapter paths, combine checks, report verdicts and exit codes |
 
-`scitt-policy/src/adapters/{mod.rs,acl.rs}` owns the policy namespace
-and MST-specific requirements. CLI
+`scitt-policy/src/adapters/{mod.rs,acl.rs,hbom.rs}` owns the policy namespace
+and domain-specific requirements. CLI
 `scitt-verifier/src/adapters/mod.rs` provides dispatch and the shared appraisal
 result; `acl.rs` translates MST requirements and findings, and `load.rs`
 handles local evidence bundles. `live.rs` calls
 `scitt_network::acl::collect`, then decodes and joins the returned node
 views into a pure evidence bundle. TLS bootstrap, pinned connections, and
 bounded HTTP collection belong to `collect`, not the CLI or pure adapter.
+CLI `hbom.rs` only loads bounded PEM files and maps the certificate-HBOM crate's
+typed findings to CLI checks. The pure crate performs certificate path, root
+pin, EKU, claim decoding and exact-byte commitment checks. It does not load
+files, read a clock, or depend on the CLI/network crates.
 
 Before network acquisition, the CLI rejects a mismatch between the selected
 adapter and the policy's adapter requirements. It then requires the full
@@ -40,7 +45,7 @@ scope limitations; they cannot stand in for a required check.
 
 There is no generic `scitt-attest` crate, plugin loader, or universal SNP
 evidence model. SNP and UVM concepts belong to the Azure Confidential Ledger
-adapter. A future image, hardware, or MAA adapter could use this separation,
+adapter. A future image, live-hardware, or MAA adapter could use this separation,
 but none is implemented
 by the existence of the dispatch seam.
 

@@ -65,7 +65,9 @@ new assertion. That is intended, and worth mentioning in release notes.
 
 Statement assertions belong in `assertions`; domain requirements belong under
 `adapters.<name>`, not in the statement rules. Typed Azure Confidential Ledger
-requirements live in `crates/scitt-policy/src/adapters/acl.rs`. Unknown adapter
+requirements live in `crates/scitt-policy/src/adapters/acl.rs`; requirements for
+the offline synthetic certificate-HBOM profile live in
+`crates/scitt-policy/src/adapters/hbom.rs`. Unknown adapter
 names and unknown fields are refused; there is no plugin discovery mechanism.
 
 `Policy::evaluate` must fail closed when adapter requirements cannot be run.
@@ -76,9 +78,17 @@ The pure `scitt-adapter-azure-confidential-ledger` package lives in `adapters/az
 It consumes evidence and typed requirements, does no I/O, and returns findings
 rather than a CLI verdict. Keep SNP/UVM details there and in ledger-specific
 orchestration, not in a generic attestation model.
+The built-in `scitt-adapter-certificate-hbom` package lives alongside it in
+`adapters/certificate-hbom`. It receives in-memory DER certificates, independent
+roots, an accepted statement, typed HBOM requirements and explicit verification
+time. It returns domain findings, with no I/O, clock or CLI verdict dependency.
+Both adapter crates forward the existing crypto-backend features; HBOM needs
+no optional appraisal feature because it reuses the statement crypto stack.
 `crates/scitt-verifier/src/adapters/` owns dispatch and file/bundle handling;
 all network I/O belongs in `crates/scitt-network`. Do not add a network client
 to the core, policy, or pure adapter.
+Certificate-HBOM unit tests belong in its adapter crate; CLI contract tests and
+bounded PEM-loading tests remain in `crates/scitt-verifier`.
 
 Preserve fail-closed behavior both with and without the optional build feature.
 See [architecture](docs/architecture.md) and [adapters](docs/adapters.md).

@@ -10,3 +10,4 @@
 # They are JSON, so `text=auto` would otherwise normalise their line endings
 # and silently change every digest computed from them.
 corpus/fixtures/*.spdx.json  binary
+corpus/fixtures/synthetic-hbom/hbom.json  binary

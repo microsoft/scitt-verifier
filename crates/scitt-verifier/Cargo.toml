@@ -26,6 +26,8 @@ scitt-network = { path = "../scitt-network", default-features = false }
 # `acl` already means access-control list; the short key is a local convenience
 # for the module that has no such ambiguity in scope.
 acl = { package = "scitt-adapter-azure-confidential-ledger", path = "../../adapters/azure-confidential-ledger", default-features = false, optional = true }
+# Built in: certificate appraisal reuses the statement crypto stack.
+hbom = { package = "scitt-adapter-certificate-hbom", path = "../../adapters/certificate-hbom", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
@@ -35,11 +37,13 @@ crypto_pure_rust = [
     "scitt-receipt/crypto_pure_rust",
     "scitt-policy/crypto_pure_rust",
     "acl?/crypto_pure_rust",
+    "hbom/crypto_pure_rust",
 ]
 crypto_openssl = [
     "scitt-receipt/crypto_openssl",
     "scitt-policy/crypto_openssl",
     "acl?/crypto_openssl",
+    "hbom/crypto_openssl",
 ]
 # The Azure Confidential Ledger adapter: appraise saved or explicitly acquired
 # ledger evidence against the execution policy an accepted statement embeds.

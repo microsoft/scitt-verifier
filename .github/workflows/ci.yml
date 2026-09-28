@@ -64,10 +64,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Both crates make the same promise — callers supply bytes, we decide
-          # nothing about time, exit status, or the network — so both are held
+          # These crates make the same promise — callers supply bytes, we decide
+          # nothing about time, exit status, or the network — so all are held
           # to it here. A crate that claims purity and is never scanned drifts.
-          roots="crates/scitt-receipt/src adapters/azure-confidential-ledger/src"
+          roots="crates/scitt-receipt/src adapters/azure-confidential-ledger/src adapters/certificate-hbom/src"
           io_pattern='std::fs|File::open|read_to_string'
 
           # `if grep` cannot tell "found nothing" from "looked at nothing": both
@@ -133,6 +133,8 @@ jobs:
           # rather than merely discouraged.
           check adapters/azure-confidential-ledger/src 'scitt_verifier' \
                 'scitt-adapter-azure-confidential-ledger must not depend on the CLI; it reports checks, not verdicts.'
+          check adapters/certificate-hbom/src 'scitt_verifier' \
+                'scitt-adapter-certificate-hbom must not depend on the CLI; it reports checks, not verdicts.'
           exit $violations
 
       - name: Reject dependency drift in the core manifests
@@ -161,6 +163,9 @@ jobs:
           check_manifest adapters/azure-confidential-ledger/Cargo.toml \
             '^(scitt-verifier|scitt-network)' \
             'scitt-adapter-azure-confidential-ledger must not depend on scitt-verifier or scitt-network.'
+          check_manifest adapters/certificate-hbom/Cargo.toml \
+            '^(scitt-verifier|scitt-network)' \
+            'scitt-adapter-certificate-hbom must not depend on scitt-verifier or scitt-network.'
 
   size:
     name: Binary size budget

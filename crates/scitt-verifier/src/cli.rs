@@ -72,9 +72,13 @@ VERIFY OPTIONS:
                              lead to. Without it the chain is still validated,
                              but only against the root the statement carries —
                              internally consistent, not externally trusted.
+    --certificate-roots <FILE>
+                             Independently approved PEM roots for certificate-hbom.
+                             The policy must also pin the selected root's SHA-256.
     --artifact <FILE>        The artifact the statement should describe.
-    --binding-mode <MODE>    none | payload-bytes | payload-digest. Builds with
-                             a ledger adapter offer more — see below. [default: none]
+    --binding-mode <MODE>    none | payload-bytes | payload-digest |
+                             certificate-hbom. Builds with a ledger adapter
+                             offer more — see below.                    [default: none]
     --format <FORMAT>        text | json                                   [default: text]
     --verbose, -v            Show detailed progress, full evidence values, and
                              the completed evidence report. Default text is
@@ -178,6 +182,22 @@ when it observed the nodes; a saved one reports when someone else did.
 #[cfg(not(feature = "adapter-azure-confidential-ledger"))]
 pub const ADAPTER_USAGE: &str = "";
 
+pub const HBOM_USAGE: &str = r#"
+OFFLINE CERTIFICATE-HBOM BINDING (synthetic profile only):
+    --adapter certificate-hbom --binding-mode certificate-hbom
+    --evidence <FILE>         PEM certificate chain, leaf first.
+    --certificate-roots <FILE>
+                              Independently approved PEM trust roots; policy
+                              must pin the selected root SHA-256 as well.
+
+Compares SHA-384 of the exact accepted statement payload (or an explicitly
+encoded JSON claim) to one leaf extension under synthetic OID
+1.3.6.1.4.1.55555.1.1. The policy selects raw or DER OCTET STRING encoding and
+requires a leaf EKU. It does not authenticate live device possession, hardware
+inventory, revocation or running workloads. The AMD OID 1.3.6.1.4.1.3704.5.2
+is NOT supported or treated as a finalized hardware profile.
+"#;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BindingMode {
     /// No claim is made about which artifact the statement describes.
@@ -204,12 +224,17 @@ pub enum BindingMode {
     /// identity service, so the ledger cannot supply the thing it is being
     /// checked against.
     LiveEvidence,
+    /// Offline certificate association to a signed HBOM claim.
+    CertificateHbom,
 }
 
 impl BindingMode {
     /// Whether this mode runs a resource adapter rather than an artifact check.
     pub fn is_evidence(self) -> bool {
-        matches!(self, BindingMode::SavedEvidence | BindingMode::LiveEvidence)
+        matches!(
+            self,
+            BindingMode::SavedEvidence | BindingMode::LiveEvidence | BindingMode::CertificateHbom
+        )
     }
 }
 
@@ -222,12 +247,14 @@ impl BindingMode {
 pub enum Adapter {
     /// Azure Confidential Ledger nodes attested with SEV-SNP.
     AzureConfidentialLedger,
+    CertificateHbom,
 }
 
 impl Adapter {
     pub fn as_str(self) -> &'static str {
         match self {
             Adapter::AzureConfidentialLedger => "azure-confidential-ledger",
+            Adapter::CertificateHbom => "certificate-hbom",
         }
     }
 }
@@ -333,6 +360,7 @@ pub struct VerifyArgs {
     /// internal consistency and is reported as a gap rather than as trust —
     /// a self-signed forgery is internally consistent too.
     pub trusted_roots: Option<PathBuf>,
+    pub certificate_roots: Option<PathBuf>,
     pub now: Option<i64>,
 }
 
@@ -370,6 +398,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     let mut result = None;
     let mut facts = None;
     let mut trusted_roots = None;
+    let mut certificate_roots = None;
     let mut now = None;
 
     while let Some(flag) = it.next() {
@@ -384,6 +413,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             "--result" => result = Some(PathBuf::from(value(&mut it, flag)?)),
             "--facts" => facts = Some(PathBuf::from(value(&mut it, flag)?)),
             "--trusted-roots" => trusted_roots = Some(PathBuf::from(value(&mut it, flag)?)),
+            "--certificate-roots" => certificate_roots = Some(PathBuf::from(value(&mut it, flag)?)),
             "--binding-mode" => {
                 let raw = value(&mut it, flag)?;
                 binding_mode = Some(match raw.as_str() {
@@ -392,10 +422,11 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                     "payload-digest" => BindingMode::PayloadDigest,
                     "saved-evidence" => BindingMode::SavedEvidence,
                     "live-evidence" => BindingMode::LiveEvidence,
+                    "certificate-hbom" => BindingMode::CertificateHbom,
                     other => {
                         return Err(format!(
                             "unknown binding mode '{other}'; expected 'none', 'payload-bytes', \
-                             'payload-digest', 'saved-evidence' or 'live-evidence'"
+                             'payload-digest', 'saved-evidence', 'live-evidence' or 'certificate-hbom'"
                         ))
                     }
                 });
@@ -404,9 +435,10 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 let raw = value(&mut it, flag)?;
                 adapter = Some(match raw.as_str() {
                     "azure-confidential-ledger" => Adapter::AzureConfidentialLedger,
+                    "certificate-hbom" => Adapter::CertificateHbom,
                     other => {
                         return Err(format!(
-                            "unknown adapter '{other}'; expected 'azure-confidential-ledger'"
+                            "unknown adapter '{other}'; expected 'azure-confidential-ledger' or 'certificate-hbom'"
                         ))
                     }
                 });
@@ -493,6 +525,16 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     )?;
 
     let binding_mode = binding_mode.unwrap_or(BindingMode::None);
+    if (adapter == Some(Adapter::CertificateHbom)) != (binding_mode == BindingMode::CertificateHbom)
+    {
+        return Err(
+            "--adapter certificate-hbom requires --binding-mode certificate-hbom, and vice versa"
+                .into(),
+        );
+    }
+    if (binding_mode == BindingMode::CertificateHbom) != certificate_roots.is_some() {
+        return Err("--binding-mode certificate-hbom requires --certificate-roots <FILE>; other modes must not supply it".into());
+    }
     let artifact_mode = matches!(
         binding_mode,
         BindingMode::PayloadBytes | BindingMode::PayloadDigest
@@ -513,12 +555,10 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     // would report on the ledger while an operator believed it had also
     // checked what they were deploying.
     if artifact.is_some() && binding_mode.is_evidence() {
-        return Err(
-            "--binding-mode saved-evidence and live-evidence appraise adapter evidence and make \
+        return Err("adapter evidence binding modes appraise evidence and make \
              no claim about an artifact, so --artifact would be ignored. Run the artifact \
              binding as a separate invocation."
-                .into(),
-        );
+            .into());
     }
 
     // Each evidence flag is useless without the others, and a partial set must
@@ -539,10 +579,20 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         );
     }
 
-    if binding_mode == BindingMode::SavedEvidence && evidence.is_none() {
-        return Err("--binding-mode saved-evidence requires --evidence <DIR>".into());
+    if matches!(
+        binding_mode,
+        BindingMode::SavedEvidence | BindingMode::CertificateHbom
+    ) && evidence.is_none()
+    {
+        return Err(
+            "--binding-mode saved-evidence or certificate-hbom requires --evidence <PATH>".into(),
+        );
     }
-    if binding_mode != BindingMode::SavedEvidence && evidence.is_some() {
+    if !matches!(
+        binding_mode,
+        BindingMode::SavedEvidence | BindingMode::CertificateHbom
+    ) && evidence.is_some()
+    {
         return Err(
             "--evidence supplies a recorded bundle, which only means something with \
              --binding-mode saved-evidence. A live run collects its own evidence, and \
@@ -612,6 +662,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         facts,
         save_trust,
         trusted_roots,
+        certificate_roots,
         now,
     })))
 }

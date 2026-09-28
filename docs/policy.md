@@ -124,16 +124,19 @@ for whoever opens the policy file, so put anything an auditor needs into
 ### Optional adapter requirements
 
 `assertions` contains statement rules only. Resource-specific requirements are
-namespaced under `adapters`, currently with one supported key:
+namespaced under `adapters`:
 
 ```text
 adapters.azure-confidential-ledger.target   The ledger being appraised (host).
 adapters.azure-confidential-ledger.trust    UVM endorsement trust inputs.
 adapters.azure-confidential-ledger.binding  Execution-policy claim and node requirements.
+adapters.certificate-hbom                    Offline synthetic certificate/HBOM commitment.
 ```
 
 See [adapters](adapters.md#policy-shape) for the complete JSON shape and field
-reference. The unpublished top-level `ledger`/`trust` and
+reference; see [certificate-to-HBOM association](adapters.md#offline-certificate-to-hbom-association)
+for its independent root pin, verification time, leaf role, and exact-byte
+commitment. The unpublished top-level `ledger`/`trust` and
 `assertions.bindLedgerPolicy` form is removed, not accepted as an alias.
 Unknown adapters and unknown fields are errors.
 

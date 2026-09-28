@@ -58,12 +58,14 @@ const CORE: &[&str] = &[
     "scitt-receipt",
     "scitt-policy",
     "scitt-adapter-azure-confidential-ledger",
+    "scitt-adapter-certificate-hbom",
 ];
 const OFFLINE_SOURCE_ROOTS: &[&str] = &[
     "crates/scitt-verifier/src",
     "crates/scitt-receipt/src",
     "crates/scitt-policy/src",
     "adapters/azure-confidential-ledger/src",
+    "adapters/certificate-hbom/src",
 ];
 
 const SOCKET_APIS: &[&str] = &["std::net", "TcpStream", "TcpListener", "UdpSocket"];
@@ -212,6 +214,23 @@ fn the_acquisition_crate_cannot_form_a_verdict() {
         "{ACQUIRE} must not depend on the policy engine: fetching trust material and \
          judging it are separate jobs, and only the second may produce a verdict."
     );
+}
+
+#[test]
+fn pure_adapters_cannot_reach_cli_or_acquisition() {
+    let graph = graph();
+    for adapter in [
+        "scitt-adapter-azure-confidential-ledger",
+        "scitt-adapter-certificate-hbom",
+    ] {
+        let reach = reachable(&graph, &[adapter], &[]);
+        for forbidden in ["scitt-verifier", ACQUIRE] {
+            assert!(
+                !reach.contains(forbidden),
+                "{adapter} must not reach {forbidden}; callers supply evidence and decide verdicts"
+            );
+        }
+    }
 }
 
 #[test]

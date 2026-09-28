@@ -1,6 +1,7 @@
 //! Optional domain workflows. Statement verification remains in the CLI/core.
 
 mod acl;
+mod hbom;
 #[cfg(feature = "adapter-azure-confidential-ledger")]
 mod live;
 #[cfg(feature = "adapter-azure-confidential-ledger")]
@@ -16,7 +17,14 @@ use crate::outcome::{AdapterCheck, AdapterFinding, CheckState};
 #[cfg_attr(not(feature = "adapter-azure-confidential-ledger"), allow(dead_code))]
 pub enum EvidenceSource<'a> {
     Saved(&'a Path),
-    Live { save_to: Option<&'a Path> },
+    Live {
+        save_to: Option<&'a Path>,
+    },
+    Certificate {
+        chain: &'a Path,
+        roots: &'a Path,
+        now: i64,
+    },
 }
 
 /// Findings and their explicit acceptance contract, independent of domain.
@@ -53,22 +61,26 @@ impl AdapterAssessment {
 
 /// A policy requirement cannot disappear just because its CLI selector was omitted.
 pub fn validate_request(adapter: Option<Adapter>, policy: &Policy) -> Result<(), String> {
-    match (adapter, policy.adapters.acl.as_ref()) {
-        (None, None) | (Some(Adapter::AzureConfidentialLedger), Some(_)) => Ok(()),
-        (None, Some(_)) => Err(
-            "policy requires adapters.azure-confidential-ledger; select --adapter azure-confidential-ledger and an \
-             evidence binding mode so its requirements are evaluated"
+    match (
+        adapter,
+        policy.adapters.acl.is_some(),
+        policy.adapters.hbom.is_some(),
+    ) {
+        (None, false, false)
+        | (Some(Adapter::AzureConfidentialLedger), true, false)
+        | (Some(Adapter::CertificateHbom), false, true) => Ok(()),
+        (None, _, _) => Err(
+            "policy requires an adapter; select the required --adapter and evidence binding mode"
                 .into(),
         ),
-        (Some(Adapter::AzureConfidentialLedger), None) => {
-            Err("--adapter azure-confidential-ledger requires policy.adapters.azure-confidential-ledger".into())
-        }
+        _ => Err("selected adapter must be the sole adapter required by the policy".into()),
     }
 }
 
 pub fn not_attempted(adapter: Adapter, reason: impl Into<String>) -> AdapterAssessment {
     match adapter {
         Adapter::AzureConfidentialLedger => acl::not_attempted(reason),
+        Adapter::CertificateHbom => hbom::not_attempted(reason),
     }
 }
 
@@ -80,6 +92,13 @@ pub fn check_event(
 ) -> crate::progress::Event {
     match adapter {
         Adapter::AzureConfidentialLedger => acl::check_event(check, detail, findings),
+        Adapter::CertificateHbom => crate::progress::Event::finding(
+            crate::progress::Stage::Adapter,
+            &check.name,
+            None,
+            crate::progress_state(check.state),
+            detail,
+        ),
     }
 }
 
@@ -92,10 +111,25 @@ pub fn appraise(
 ) -> AdapterAssessment {
     match adapter {
         Adapter::AzureConfidentialLedger => match &policy.adapters.acl {
-            Some(config) => acl::appraise_evidence(source, statement, config, progress),
+            Some(config) => match source {
+                EvidenceSource::Certificate { .. } => not_attempted(
+                    adapter,
+                    "certificate evidence cannot be appraised as ledger evidence",
+                ),
+                source => acl::appraise_evidence(source, statement, config, progress),
+            },
             None => not_attempted(
                 adapter,
                 "policy.adapters.azure-confidential-ledger is missing",
+            ),
+        },
+        Adapter::CertificateHbom => match (&policy.adapters.hbom, source) {
+            (Some(config), EvidenceSource::Certificate { chain, roots, now }) => {
+                hbom::appraise(statement, config, chain, roots, now)
+            }
+            _ => not_attempted(
+                adapter,
+                "certificate-hbom requires a certificate chain and independently supplied roots",
             ),
         },
     }

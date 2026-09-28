@@ -5,6 +5,18 @@ implementing SCITT receipt verification independently.
 
 ## Fixtures
 
+`fixtures/synthetic-hbom/` contains only generated, test-only PEM certificates
+for the offline certificate-HBOM association: a separate RSA root, leaf
+certificates with synthetic OID `1.3.6.1.4.1.55555.1.1` and role EKU
+`1.3.6.1.4.1.55555.1.2`, and negative cases for mismatch, broken signature,
+expiry, missing/malformed commitment, ambiguous leaf selection and unrelated
+root. `corpus/tools/generate_hbom_certificates.py` mints them using throwaway
+keys. The accepted `transparent-statement.cose` payload is arbitrary synthetic
+stand-in bytes for the HBOM binding test, **not an HBOM document**. These
+fixtures do not claim vendor certificate, AMD OID or physical device
+compatibility. Regeneration changes the root pin; tests calculate the pin
+from the generated fixture rather than hard-coding it.
+
 | File | What it is |
 |---|---|
 | `transparent-statement.cose` | A genuine transparent statement: PS256, a four-certificate chain, and one CCF receipt |

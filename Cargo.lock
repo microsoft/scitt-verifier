@@ -789,6 +789,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "scitt-adapter-certificate-hbom"
+version = "0.4.0"
+dependencies = [
+ "scitt-policy",
+ "scitt-receipt",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "scitt-network"
 version = "0.4.0"
 dependencies = [
@@ -824,6 +834,7 @@ name = "scitt-verifier"
 version = "0.4.0"
 dependencies = [
  "scitt-adapter-azure-confidential-ledger",
+ "scitt-adapter-certificate-hbom",
  "scitt-network",
  "scitt-policy",
  "scitt-receipt",

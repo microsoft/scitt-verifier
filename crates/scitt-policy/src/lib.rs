@@ -2345,6 +2345,34 @@ mod tests {
         assert!(Policy::from_json(json).is_err());
     }
 
+    #[test]
+    fn pure_policy_evaluation_cannot_pass_required_certificate_hbom_adapter() {
+        let policy_json = serde_json::json!({
+            "policyId": "test/hbom", "policyVersion": "1",
+            "assertions": { "receiptCount": 1 },
+            "adapters": { "certificate-hbom": {
+                "source": { "kind": "statement-payload" },
+                "rootSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                "leafEku": "1.3.6.1.4.1.55555.1.2",
+                "profile": { "oid": "1.3.6.1.4.1.55555.1.1", "digest": "sha384", "encoding": "raw" }
+            }}
+        });
+        let policy = Policy::from_json(&serde_json::to_vec(&policy_json).unwrap()).unwrap();
+        let facts = StatementFacts {
+            receipts_present: 1,
+            ..Default::default()
+        };
+        assert!(policy.evaluate_statement(&facts, 0).satisfied());
+
+        let decision = policy.evaluate(&facts, 0);
+        assert!(!decision.satisfied());
+        assert!(!decision.failed());
+        assert!(decision.unevaluable());
+        assert_eq!(decision.results.len(), 2);
+        assert_eq!(decision.results[1].name, "adapters.certificate-hbom");
+        assert_eq!(decision.results[1].outcome, Outcome::CannotEvaluate);
+    }
+
     fn subject_policy(criteria: &str) -> Result<Policy, String> {
         let json = format!(
             r#"{{"policyId":"p","policyVersion":"1","assertions":{{"statementSubject":{criteria}}}}}"#

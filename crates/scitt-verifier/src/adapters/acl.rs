@@ -252,6 +252,9 @@ pub fn appraise_evidence(
     }
 
     let loaded = match source {
+        EvidenceSource::Certificate { .. } => {
+            return not_attempted("certificate evidence cannot be loaded as ledger evidence")
+        }
         EvidenceSource::Saved(dir) => {
             progress.emit(Event::stage(
                 Stage::Evidence,

@@ -121,7 +121,7 @@ or safety of those bytes.
 ## Optional resource adapters
 
 An adapter can relate an accepted statement to evidence about its subject.
-The only implemented adapter is `azure-confidential-ledger`: it compares an execution policy
+The optional `azure-confidential-ledger` adapter compares an execution policy
 embedded in the statement with policy enforcement evidenced by attested ledger
 nodes. It is not required for ordinary statement or artifact verification.
 
@@ -142,14 +142,22 @@ Saved evidence can be appraised entirely offline with local receipt keys.
 Neither mode establishes attestation freshness or binding to the node serving
 your current connection.
 
+The default build also includes `certificate-hbom`, a strictly offline
+**synthetic** certificate-to-HBOM-byte commitment profile. It requires a PEM
+chain, independent PEM roots, a policy-pinned root fingerprint and leaf EKU.
+Certificate validity is checked at `--now` or the run's captured wall-clock
+time. It establishes no live hardware/device or
+workload claim. See [offline certificate binding](docs/adapters.md#offline-certificate-to-hbom-association).
+
 See [adapters](docs/adapters.md) for policy shape, commands, trust inputs, and
-the narrower meaning of `resource-transparent`. Image, hardware, and MAA
-adapters are not supported features.
+the narrower meaning of `resource-transparent`. Real vendor hardware profiles,
+image reproducibility, and MAA adapters are not supported features.
 
 ## Guarantees and limits
 
 - **No network by default.** Local-key verification opens no socket. Networking
-  is isolated in `scitt-network`; the core and pure adapter perform no I/O.
+  is isolated in `scitt-network`; the core and pure ledger adapter perform no I/O.
+  The offline certificate adapter reads only its explicitly supplied local PEM files.
 - **Facts and acceptance are separate.** A valid signature proves possession
   of a key, not a person's identity. Supported certificate chains are validated,
   but an embedded root establishes only internal consistency. Supply independent
@@ -225,7 +233,7 @@ code fails the task; do not replace it with a PowerShell task that ignores
 |---|---|
 | [Policy](docs/policy.md) | Statement assertions and namespaced adapter requirements |
 | [Trust material](docs/trust-material.md) | Keys, acquisition, provenance, and rotation |
-| [Adapters](docs/adapters.md) | Optional MST ledger evidence appraisal |
+| [Adapters](docs/adapters.md) | Ledger appraisal and synthetic offline certificate/HBOM binding |
 | [Output](docs/output.md) | Verdicts, check states, and JSON record |
 | [Limitations](docs/limitations.md) | What this build cannot establish |
 | [Architecture](docs/architecture.md) | Core, policy, network, adapter, and CLI boundaries |
