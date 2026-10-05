@@ -134,7 +134,7 @@ fn fixtures_are_byte_exact() {
     // The record is authenticated by the SHA-256 of these exact bytes; a
     // checkout that rewrote line endings would break the binding silently.
     for (name, expected) in [
-        ("statement.cose", 2054usize),
+        ("statement.cose", 2760usize),
         ("published-reproduce.json", 1033),
         ("rebuilt-reproduce.json", 1033),
     ] {
@@ -269,6 +269,17 @@ fn a_source_repository_the_policy_does_not_allow_fails() {
 }
 
 #[test]
+fn a_statement_for_another_component_fails() {
+    for (key, value) in [("app", "other"), ("variant", "debug")] {
+        let mut policy = policy();
+        policy["adapters"]["image-reproduction"]["component"][key] = json!(value);
+        let (code, record) = run_json(key, &policy, &corpus(DIR));
+        assert_eq!(code, 2, "{key}: {record}");
+        assert_eq!(state_of(&record, "reproduction-claim"), "fail", "{key}");
+    }
+}
+
+#[test]
 fn an_unsupported_profile_cannot_be_evaluated() {
     let mut policy = policy();
     policy["adapters"]["image-reproduction"]["profile"] = json!("example/unknown-v9");
@@ -283,7 +294,7 @@ fn an_unsupported_profile_cannot_be_evaluated() {
 fn a_statement_that_fails_verification_never_reaches_the_adapter() {
     // Flip one byte inside the signed payload: the signature no longer holds.
     let mut statement = std::fs::read(corpus(&format!("{DIR}/statement.cose"))).unwrap();
-    let needle = b"reproductionRecordSha256";
+    let needle = b"reproduction-record-sha256";
     let at = statement
         .windows(needle.len())
         .position(|w| w == needle)

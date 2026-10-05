@@ -14,23 +14,45 @@ fn record_value(bytes: &[u8]) -> Value {
     serde_json::from_slice(bytes).unwrap()
 }
 
+/// A schema-version 2 payload, shaped as the MST release pipeline emits it,
+/// that commits to `record`.
 fn claim_for(record: &[u8]) -> Value {
     let r = record_value(record);
     json!({
-        "scittReproduction": 1,
-        "profile": PROFILE_SCITT_CCF_LEDGER,
-        "sourceRepository": REPOSITORY,
-        "sourceCommit": r["source_commit"],
-        "version": r["scitt_version"],
-        "contextSha256": r["context_sha256"],
-        "reproductionRecordSha256": scitt_receipt::sha256_hex(record),
+        "schema-version": 2,
+        "source": {"commit": "f".repeat(40), "branch": "refs/heads/main"},
+        "build": {"id": "1", "number": "20260930.1"},
+        "component": {
+            "app": "mst",
+            "variant": "public",
+            "image": format!("example.invalid/mst@sha256:{}", "a".repeat(64)),
+            "provenance": {
+                "source-repository": REPOSITORY,
+                "source-commit": r["source_commit"],
+                "source-date-epoch": r["source_date_epoch"],
+                "version": r["scitt_version"],
+                "context-sha256": r["context_sha256"],
+                "ccf-version": r["ccf_version"],
+                "reproduction-record-sha256": scitt_receipt::sha256_hex(record),
+                "reproduction-record-uri":
+                    "https://github.com/microsoft/scitt-ccf-ledger/releases/download/0.20.1/reproduce.json",
+                "image-digest": format!("sha256:{}", "a".repeat(64)),
+            }
+        },
+        "security-policy-sha256": "b".repeat(64),
     })
+}
+
+fn provenance(claim: &mut Value) -> &mut Value {
+    &mut claim["component"]["provenance"]
 }
 
 fn requirements() -> Requirements<'static> {
     Requirements {
-        profile: PROFILE_SCITT_CCF_LEDGER,
+        profile: PROFILE_MST_TBS,
         source_repository: REPOSITORY,
+        app: "mst",
+        variant: "public",
     }
 }
 
@@ -70,21 +92,26 @@ fn the_real_rebuild_matches_the_real_record() {
 #[test]
 fn a_record_other_than_the_committed_one_is_refused_before_it_is_read() {
     let mut claim = claim_for(PUBLISHED);
-    claim["reproductionRecordSha256"] = json!("00".repeat(32));
+    provenance(&mut claim)["reproduction-record-sha256"] = json!("00".repeat(32));
     let a = run(&claim, Some(PUBLISHED), Some(REBUILT));
     assert_eq!(states(&a), [Pass, Pass, Fail, Ce, Ce]);
-    assert_eq!(a.findings[0].subject, "reproductionRecordSha256");
+    assert_eq!(
+        a.findings[0].subject,
+        "component.provenance.reproduction-record-sha256"
+    );
 }
 
 #[test]
 fn a_committed_record_that_disagrees_with_the_statement_fails() {
     for (claim_field, value) in [
-        ("sourceCommit", json!("1".repeat(40))),
+        ("source-commit", json!("1".repeat(40))),
         ("version", json!("9.9.9")),
-        ("contextSha256", json!("2".repeat(64))),
+        ("context-sha256", json!("2".repeat(64))),
+        ("ccf-version", json!("0.0.1")),
+        ("source-date-epoch", json!(1)),
     ] {
         let mut claim = claim_for(PUBLISHED);
-        claim[claim_field] = value;
+        provenance(&mut claim)[claim_field] = value;
         let a = run(&claim, Some(PUBLISHED), Some(REBUILT));
         assert_eq!(states(&a), [Pass, Pass, Fail, Ce, Ce], "{claim_field}");
     }
@@ -251,60 +278,146 @@ fn a_duplicate_key_in_a_record_is_refused_rather_than_resolved() {
 
 fn claim_for_bytes(record: &[u8]) -> Value {
     let mut claim = claim_for(PUBLISHED);
-    claim["reproductionRecordSha256"] = json!(scitt_receipt::sha256_hex(record));
+    provenance(&mut claim)["reproduction-record-sha256"] = json!(scitt_receipt::sha256_hex(record));
     claim
 }
 
 #[test]
 fn a_source_repository_the_policy_does_not_allow_fails() {
     let mut claim = claim_for(PUBLISHED);
-    claim["sourceRepository"] = json!("https://github.com/example/fork");
+    provenance(&mut claim)["source-repository"] = json!("https://github.com/example/fork");
     let a = run(&claim, Some(PUBLISHED), Some(REBUILT));
     assert_eq!(states(&a), [Pass, Fail, Pass, Pass, Pass]);
 }
 
+fn with(edit: impl FnOnce(&mut Value)) -> Value {
+    let mut c = claim_for(PUBLISHED);
+    edit(&mut c);
+    c
+}
+
 #[test]
 fn a_statement_without_a_readable_claim_does_not_reach_the_record() {
-    let cases: Vec<(Value, CheckState)> = vec![
-        (json!({"other": 1}), Fail),
-        (json!([1, 2]), Fail),
+    let cases: Vec<(&str, Value, CheckState)> = vec![
+        ("not an object", json!([1, 2]), Fail),
+        ("no schema-version", json!({"other": 1}), Fail),
+        ("later schema", with(|c| c["schema-version"] = json!(3)), Ce),
         (
-            {
-                let mut c = claim_for(PUBLISHED);
-                c["scittReproduction"] = json!(2);
-                c
-            },
+            "legacy schema",
+            with(|c| c["schema-version"] = json!(1)),
             Ce,
         ),
         (
-            {
-                let mut c = claim_for(PUBLISHED);
-                c["scittReproduction"] = json!("1");
-                c
-            },
+            "string schema",
+            with(|c| c["schema-version"] = json!("2")),
             Fail,
         ),
         (
-            {
-                let mut c = claim_for(PUBLISHED);
-                c["profile"] = json!("another/profile");
-                c
-            },
+            "negative schema",
+            with(|c| c["schema-version"] = json!(-2)),
             Fail,
         ),
         (
-            {
-                let mut c = claim_for(PUBLISHED);
-                c["sourceCommit"] = json!("ABC");
-                c
-            },
+            "no component",
+            with(|c| {
+                c.as_object_mut().unwrap().remove("component");
+            }),
+            Fail,
+        ),
+        (
+            "no provenance",
+            with(|c| {
+                c["component"].as_object_mut().unwrap().remove("provenance");
+            }),
+            Fail,
+        ),
+        (
+            "short commit",
+            with(|c| provenance(c)["source-commit"] = json!("abc")),
+            Fail,
+        ),
+        (
+            "upper-case context",
+            with(|c| provenance(c)["context-sha256"] = json!("A".repeat(64))),
+            Fail,
+        ),
+        (
+            "string epoch",
+            with(|c| provenance(c)["source-date-epoch"] = json!("1790269424")),
+            Fail,
+        ),
+        (
+            "negative epoch",
+            with(|c| provenance(c)["source-date-epoch"] = json!(-1)),
+            Fail,
+        ),
+        (
+            "fractional epoch",
+            with(|c| provenance(c)["source-date-epoch"] = json!(1.5)),
+            Fail,
+        ),
+        (
+            "empty version",
+            with(|c| provenance(c)["version"] = json!("")),
+            Fail,
+        ),
+        (
+            "no record uri",
+            with(|c| {
+                provenance(c)
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("reproduction-record-uri");
+            }),
+            Fail,
+        ),
+        (
+            "no source repository",
+            with(|c| {
+                provenance(c)
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("source-repository");
+            }),
+            Fail,
+        ),
+        (
+            "debug variant",
+            with(|c| c["component"]["variant"] = json!("debug")),
+            Fail,
+        ),
+        (
+            "another app",
+            with(|c| c["component"]["app"] = json!("other")),
             Fail,
         ),
     ];
-    for (claim, expected) in cases {
+    for (name, claim, expected) in cases {
         let a = run(&claim, Some(PUBLISHED), Some(REBUILT));
-        assert_eq!(states(&a), [expected, Ce, Ce, Ce, Ce], "{claim}");
+        assert_eq!(states(&a), [expected, Ce, Ce, Ce, Ce], "{name}");
     }
+}
+
+#[test]
+fn a_component_mismatch_is_reported_with_both_sides() {
+    let claim = with(|c| c["component"]["variant"] = json!("debug"));
+    let a = run(&claim, Some(PUBLISHED), Some(REBUILT));
+    assert_eq!(a.findings.len(), 1);
+    assert_eq!(a.findings[0].subject, "component.variant");
+    assert_eq!(a.findings[0].expected.as_deref(), Some("public"));
+    assert_eq!(a.findings[0].observed.as_deref(), Some("debug"));
+}
+
+#[test]
+fn informational_payload_fields_do_not_affect_the_verdict() {
+    let claim = with(|c| {
+        c["component"]["image"] = json!("anything");
+        provenance(c)["image-digest"] = json!("not a digest");
+        c.as_object_mut().unwrap().remove("security-policy-sha256");
+        c.as_object_mut().unwrap().remove("source");
+    });
+    let a = run(&claim, Some(PUBLISHED), Some(REBUILT));
+    assert_eq!(states(&a), [Pass, Pass, Pass, Pass, Pass]);
 }
 
 #[test]
@@ -338,7 +451,7 @@ fn an_unsupported_profile_evaluates_nothing() {
         },
         &Requirements {
             profile: "another/profile",
-            source_repository: REPOSITORY,
+            ..requirements()
         },
     );
     assert_eq!(states(&a), [Ce, Ce, Ce, Ce, Ce]);

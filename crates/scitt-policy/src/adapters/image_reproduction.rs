@@ -22,6 +22,21 @@ pub struct ImageReproductionPolicy {
     /// not what they built it from. Without it a publisher's reproducible
     /// build of a fork would satisfy a policy written for the upstream.
     pub source_repository: String,
+    /// The one component the statement may be about.
+    ///
+    /// Required because one signing identity issues statements for every
+    /// component and variant it builds. Without it a debug image's statement
+    /// would satisfy a policy written for the production image.
+    pub component: Component,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct Component {
+    /// The statement's `component.app`, compared exactly.
+    pub app: String,
+    /// The statement's `component.variant`, compared exactly.
+    pub variant: String,
 }
 
 impl ImageReproductionPolicy {
@@ -42,6 +57,23 @@ impl ImageReproductionPolicy {
                  would never match"
                     .into(),
             );
+        }
+        for (name, value) in [
+            ("component.app", &self.component.app),
+            ("component.variant", &self.component.variant),
+        ] {
+            if value.trim().is_empty() {
+                return Err(format!(
+                    "{name} is empty; without it a statement for any component would satisfy \
+                     this policy"
+                ));
+            }
+            if value.trim() != value {
+                return Err(format!(
+                    "{name} has surrounding whitespace; it is compared exactly, so it would \
+                     never match"
+                ));
+            }
         }
         Ok(())
     }
@@ -64,30 +96,45 @@ mod tests {
 
     #[test]
     fn a_complete_section_parses() {
-        let p =
-            policy(r#"{"profile":"p/v1","sourceRepository":"https://example.invalid/r"}"#).unwrap();
+        let p = policy(
+            r#"{"profile":"p/v1","sourceRepository":"https://example.invalid/r",
+                "component":{"app":"a","variant":"v"}}"#,
+        )
+        .unwrap();
         let section = p.adapters.image_reproduction.unwrap();
         assert_eq!(section.profile, "p/v1");
         assert_eq!(section.source_repository, "https://example.invalid/r");
+        assert_eq!(section.component.app, "a");
+        assert_eq!(section.component.variant, "v");
     }
 
     #[test]
     fn every_field_is_required_and_none_may_be_empty() {
+        const C: &str = r#""component":{"app":"a","variant":"v"}"#;
         for section in [
-            r#"{"profile":"p/v1"}"#,
-            r#"{"sourceRepository":"https://example.invalid/r"}"#,
-            r#"{"profile":"","sourceRepository":"https://example.invalid/r"}"#,
-            r#"{"profile":"p/v1","sourceRepository":" "}"#,
-            r#"{"profile":"p/v1","sourceRepository":"https://example.invalid/r "}"#,
+            format!(r#"{{"profile":"p/v1",{C}}}"#),
+            format!(r#"{{"sourceRepository":"https://example.invalid/r",{C}}}"#),
+            r#"{"profile":"p/v1","sourceRepository":"https://example.invalid/r"}"#.to_string(),
+            format!(r#"{{"profile":"","sourceRepository":"https://example.invalid/r",{C}}}"#),
+            format!(r#"{{"profile":"p/v1","sourceRepository":" ",{C}}}"#),
+            format!(r#"{{"profile":"p/v1","sourceRepository":"https://example.invalid/r ",{C}}}"#),
+            r#"{"profile":"p/v1","sourceRepository":"r","component":{"app":"a"}}"#.to_string(),
+            r#"{"profile":"p/v1","sourceRepository":"r","component":{"app":"","variant":"v"}}"#
+                .to_string(),
+            r#"{"profile":"p/v1","sourceRepository":"r","component":{"app":"a","variant":"v "}}"#
+                .to_string(),
+            r#"{"profile":"p/v1","sourceRepository":"r","component":{"app":"a","variant":"v","x":1}}"#
+                .to_string(),
         ] {
-            assert!(policy(section).is_err(), "{section} was accepted");
+            assert!(policy(&section).is_err(), "{section} was accepted");
         }
     }
 
     #[test]
     fn an_unknown_field_is_refused_rather_than_ignored() {
         let err = policy(
-            r#"{"profile":"p/v1","sourceRepository":"https://example.invalid/r","requireIndependentRebuild":true}"#,
+            r#"{"profile":"p/v1","sourceRepository":"https://example.invalid/r",
+                "component":{"app":"a","variant":"v"},"requireIndependentRebuild":true}"#,
         )
         .unwrap_err();
         assert!(err.contains("requireIndependentRebuild"), "{err}");
@@ -100,6 +147,10 @@ mod tests {
             image_reproduction: Some(super::ImageReproductionPolicy {
                 profile: "p/v1".into(),
                 source_repository: "r".into(),
+                component: super::Component {
+                    app: "a".into(),
+                    variant: "v".into(),
+                },
             }),
         };
         assert!(!adapters.is_empty());

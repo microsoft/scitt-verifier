@@ -8,8 +8,10 @@
 checks that the rebuild record you supply matches the reproduction record an
 accepted statement commits to: the record's SHA-256, the recorded inputs and
 the ordered filesystem layers. Every build has it; no feature flag is needed.
-The first profile, `scitt-ccf-ledger/reproduce-v1`, reads the `reproduce.json`
-records scitt-ccf-ledger publishes with each release. The rebuild is
+The first profile, `mst-tbs`, reads the schema-version 2 payload the MST
+release pipeline registers for each image, and the `reproduce.json` records
+scitt-ccf-ledger publishes with each release. The policy pins the source
+repository and the component (`app` and `variant`). The rebuild is
 operator-supplied, so a pass does not establish an independent rebuild, a
 published image, or a deployment; the scope statement says so. See
 [adapters](docs/adapters.md#image-reproduction).

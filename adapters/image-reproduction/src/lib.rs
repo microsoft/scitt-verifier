@@ -23,15 +23,17 @@
 
 use serde_json::{Map, Value};
 
-/// The only profile this build understands.
+/// The only profile this build understands: the transparent-signing payload
+/// the MST release pipeline registers for each CTS image.
 ///
 /// A profile is code, not configuration: it decides which statement fields
 /// and which record fields mean what. A policy naming any other profile is
 /// refused as unsupported rather than read under this one's rules.
-pub const PROFILE_SCITT_CCF_LEDGER: &str = "scitt-ccf-ledger/reproduce-v1";
+pub const PROFILE_MST_TBS: &str = "mst-tbs";
 
-/// The statement claim format this build reads, from `scittReproduction`.
-pub const CLAIM_VERSION: u64 = 1;
+/// The payload `schema-version` this profile reads. Version 1 payloads carry
+/// no provenance at all.
+pub const PAYLOAD_SCHEMA_VERSION: u64 = 2;
 
 /// `schema_version` of the `reproduce.json` records this profile reads.
 const RECORD_SCHEMA_VERSION: u64 = 1;
@@ -161,6 +163,12 @@ impl Appraisal {
 /// What the relying party requires, translated from its policy by the caller.
 pub struct Requirements<'a> {
     pub profile: &'a str,
+    /// `component.app` the statement must name. A signing pipeline issues
+    /// statements for several components, all under one identity.
+    pub app: &'a str,
+    /// `component.variant` the statement must name, so a debug image's
+    /// statement cannot satisfy a policy written for the production one.
+    pub variant: &'a str,
     /// Compared exactly. Normalising URLs would make two spellings of a
     /// repository one, and deciding when that is safe is not this crate's call.
     pub source_repository: &'a str,
@@ -186,17 +194,22 @@ pub struct Evidence<'a> {
 }
 
 struct Claim {
+    app: String,
+    variant: String,
     source_repository: String,
     source_commit: String,
+    source_date_epoch: u64,
     version: String,
     context_sha256: String,
+    ccf_version: String,
     record_sha256: String,
+    record_uri: String,
 }
 
 pub fn appraise(payload: Payload<'_>, evidence: Evidence<'_>, req: &Requirements<'_>) -> Appraisal {
-    if req.profile != PROFILE_SCITT_CCF_LEDGER {
+    if req.profile != PROFILE_MST_TBS {
         return Appraisal::unevaluated(&format!(
-            "profile {:?} is not supported by this build; supported: {PROFILE_SCITT_CCF_LEDGER}",
+            "profile {:?} is not supported by this build; supported: {PROFILE_MST_TBS}",
             req.profile
         ));
     }
@@ -204,18 +217,20 @@ pub fn appraise(payload: Payload<'_>, evidence: Evidence<'_>, req: &Requirements
     let mut findings = Vec::new();
     let mut informational = Vec::new();
 
-    let claim = match read_claim(payload, req.profile) {
+    let claim = match read_claim(payload).and_then(|claim| check_component(claim, req)) {
         Ok(claim) => claim,
-        Err(check) => {
+        Err(error) => {
+            let (check, finding) = *error;
             let why = "the statement's reproduction claim was not established";
             let mut out = Appraisal::unevaluated(why);
             out.reproduction_claim = check;
+            out.findings.extend(finding);
             return out;
         }
     };
     let reproduction_claim = Check::pass(format!(
-        "{} commit {} version {}",
-        req.profile, claim.source_commit, claim.version
+        "{} {}/{} commit {} version {}; record {}",
+        req.profile, claim.app, claim.variant, claim.source_commit, claim.version, claim.record_uri
     ));
 
     let source_repository = if claim.source_repository == req.source_repository {
@@ -223,7 +238,7 @@ pub fn appraise(payload: Payload<'_>, evidence: Evidence<'_>, req: &Requirements
     } else {
         findings.push(Finding {
             check: "source-repository",
-            subject: "sourceRepository".into(),
+            subject: "component.provenance.source-repository".into(),
             state: CheckState::Fail,
             detail: "the statement names a source repository the policy does not allow".into(),
             expected: Some(req.source_repository.to_string()),
@@ -278,77 +293,139 @@ pub fn appraise(payload: Payload<'_>, evidence: Evidence<'_>, req: &Requirements
     }
 }
 
-fn read_claim(payload: Payload<'_>, profile: &str) -> Result<Claim, Check> {
+type ClaimError = Box<(Check, Option<Finding>)>;
+
+fn read_claim(payload: Payload<'_>) -> Result<Claim, ClaimError> {
+    let fail = |detail: String| -> ClaimError { Box::new((Check::fail(detail), None)) };
     let bytes = match payload {
         Payload::Json(bytes) => bytes,
         Payload::NotJson(declared) => {
-            return Err(Check::fail(format!(
+            return Err(fail(format!(
                 "the statement's payload is declared as {declared}, not JSON, so it makes no \
                  reproduction claim"
             )))
         }
-        Payload::Unavailable(why) => return Err(Check::cannot(why)),
+        Payload::Unavailable(why) => return Err(Box::new((Check::cannot(why), None))),
     };
     let document = scitt_policy::parse_payload_json(bytes)
-        .map_err(|e| Check::fail(format!("the statement's payload is not valid JSON: {e}")))?;
-    let Value::Object(map) = document else {
-        return Err(Check::fail("the statement's payload is not a JSON object"));
+        .map_err(|e| fail(format!("the statement's payload is not valid JSON: {e}")))?;
+    let Value::Object(top) = document else {
+        return Err(fail("the statement's payload is not a JSON object".into()));
     };
 
-    match map.get("scittReproduction") {
-        None => {
-            return Err(Check::fail(
-                "the statement carries no scittReproduction claim",
-            ))
-        }
-        Some(Value::Number(n)) if n.as_u64() == Some(CLAIM_VERSION) => {}
+    match top.get("schema-version") {
+        None => return Err(fail("the statement's payload has no schema-version".into())),
+        Some(Value::Number(n)) if n.as_u64() == Some(PAYLOAD_SCHEMA_VERSION) => {}
         Some(Value::Number(n)) if n.as_u64().is_some() => {
-            return Err(Check::cannot(format!(
-                "scittReproduction version {n} is not supported by this build; supported: {CLAIM_VERSION}"
+            return Err(Box::new((
+                Check::cannot(format!(
+                    "payload schema-version {n} is not supported by this build; \
+                     supported: {PAYLOAD_SCHEMA_VERSION}"
+                )),
+                None,
             )))
         }
         Some(other) => {
-            return Err(Check::fail(format!(
-                "scittReproduction must be an integer version, got {}",
+            return Err(fail(format!(
+                "schema-version must be an integer, got {}",
                 render(Some(other))
             )))
         }
     }
 
-    let text = |name: &str| -> Result<String, Check> {
-        match map.get(name) {
+    let object = |map: &Map<String, Value>,
+                  path: &str,
+                  key: &str|
+     -> Result<Map<String, Value>, ClaimError> {
+        match map.get(key) {
+            Some(Value::Object(inner)) => Ok(inner.clone()),
+            None => Err(fail(format!("the statement's payload has no {path}"))),
+            Some(other) => Err(fail(format!(
+                "{path} must be an object, got {}",
+                render(Some(other))
+            ))),
+        }
+    };
+    let component = object(&top, "component", "component")?;
+    let provenance =
+        object(&component, "component.provenance", "provenance").map_err(|mut e| {
+            e.0.detail
+                .push_str("; the statement makes no reproduction claim");
+            e
+        })?;
+
+    let text = |map: &Map<String, Value>, path: &str, key: &str| -> Result<String, ClaimError> {
+        match map.get(key) {
             Some(Value::String(s)) if !s.is_empty() => Ok(s.clone()),
-            other => Err(Check::fail(format!(
-                "the reproduction claim's {name} must be a non-empty string, got {}",
+            other => Err(fail(format!(
+                "{path}.{key} must be a non-empty string, got {}",
                 render(other)
             ))),
         }
     };
-    let hex = |name: &str, len: usize| -> Result<String, Check> {
-        let value = text(name)?;
+    let hex = |key: &str, len: usize| -> Result<String, ClaimError> {
+        let value = text(&provenance, "component.provenance", key)?;
         if is_lower_hex(&value, len) {
             Ok(value)
         } else {
-            Err(Check::fail(format!(
-                "the reproduction claim's {name} must be {len} lowercase hex digits, got {value:?}"
+            Err(fail(format!(
+                "component.provenance.{key} must be {len} lowercase hex digits, got {value:?}"
+            )))
+        }
+    };
+    let source_date_epoch = match provenance.get("source-date-epoch") {
+        Some(Value::Number(n)) if n.as_u64().is_some() => n.as_u64().unwrap_or_default(),
+        other => {
+            return Err(fail(format!(
+                "component.provenance.source-date-epoch must be a non-negative integer, got {}",
+                render(other)
             )))
         }
     };
 
-    let claimed_profile = text("profile")?;
-    if claimed_profile != profile {
-        return Err(Check::fail(format!(
-            "the statement claims profile {claimed_profile:?}, but the policy requires {profile:?}"
-        )));
-    }
-
     Ok(Claim {
-        source_repository: text("sourceRepository")?,
-        source_commit: hex("sourceCommit", 40)?,
-        version: text("version")?,
-        context_sha256: hex("contextSha256", 64)?,
-        record_sha256: hex("reproductionRecordSha256", 64)?,
+        app: text(&component, "component", "app")?,
+        variant: text(&component, "component", "variant")?,
+        source_repository: text(&provenance, "component.provenance", "source-repository")?,
+        source_commit: hex("source-commit", 40)?,
+        source_date_epoch,
+        version: text(&provenance, "component.provenance", "version")?,
+        context_sha256: hex("context-sha256", 64)?,
+        ccf_version: text(&provenance, "component.provenance", "ccf-version")?,
+        record_sha256: hex("reproduction-record-sha256", 64)?,
+        record_uri: text(
+            &provenance,
+            "component.provenance",
+            "reproduction-record-uri",
+        )?,
     })
+}
+
+/// The statement must be about the component the policy names. One signing
+/// identity issues statements for every component and variant, so the
+/// signature alone does not say which this is.
+fn check_component(claim: Claim, req: &Requirements<'_>) -> Result<Claim, ClaimError> {
+    for (key, claimed, required) in [
+        ("app", &claim.app, req.app),
+        ("variant", &claim.variant, req.variant),
+    ] {
+        if claimed != required {
+            return Err(Box::new((
+                Check::fail(format!(
+                    "the statement is for component {key} {claimed:?}, but the policy requires {required:?}"
+                )),
+                Some(Finding {
+                    check: "reproduction-claim",
+                    subject: format!("component.{key}"),
+                    state: CheckState::Fail,
+                    detail: format!("the statement names a different component {key}"),
+                    expected: Some(required.to_string()),
+                    observed: Some(claimed.clone()),
+                }),
+            )));
+        }
+    }
+    Ok(claim)
 }
 
 struct Record {
@@ -374,7 +451,7 @@ fn bind_record(
     if actual != claim.record_sha256 {
         findings.push(Finding {
             check: "record-binding",
-            subject: "reproductionRecordSha256".into(),
+            subject: "component.provenance.reproduction-record-sha256".into(),
             state: CheckState::Fail,
             detail: "the supplied record is not the one the statement commits to".into(),
             expected: Some(claim.record_sha256.clone()),
@@ -410,12 +487,34 @@ fn bind_record(
 
     let mut mismatched = Vec::new();
     for (claim_name, record_name, claimed) in [
-        ("sourceCommit", "source_commit", &claim.source_commit),
-        ("version", "scitt_version", &claim.version),
-        ("contextSha256", "context_sha256", &claim.context_sha256),
+        (
+            "source-commit",
+            "source_commit",
+            Value::String(claim.source_commit.clone()),
+        ),
+        (
+            "version",
+            "scitt_version",
+            Value::String(claim.version.clone()),
+        ),
+        (
+            "context-sha256",
+            "context_sha256",
+            Value::String(claim.context_sha256.clone()),
+        ),
+        (
+            "ccf-version",
+            "ccf_version",
+            Value::String(claim.ccf_version.clone()),
+        ),
+        (
+            "source-date-epoch",
+            "source_date_epoch",
+            Value::from(claim.source_date_epoch),
+        ),
     ] {
         let recorded = record.fields.get(record_name);
-        if recorded != Some(&Value::String(claimed.clone())) {
+        if recorded != Some(&claimed) {
             mismatched.push(format!("{claim_name}/{record_name}"));
             findings.push(Finding {
                 check: "record-binding",
@@ -424,7 +523,7 @@ fn bind_record(
                 detail: format!(
                     "the statement's {claim_name} and the record's {record_name} disagree"
                 ),
-                expected: Some(claimed.clone()),
+                expected: Some(render(Some(&claimed))),
                 observed: Some(render(recorded)),
             });
         }
@@ -441,8 +540,8 @@ fn bind_record(
 
     (
         Check::pass(format!(
-            "record SHA-256 {actual} matches the statement; source commit, version and \
-             context agree"
+            "record SHA-256 {actual} matches the statement; source commit, version, context, \
+             CCF version and source date epoch agree"
         )),
         Some(record),
     )

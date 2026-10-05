@@ -262,8 +262,9 @@ quoted without this page.
   },
   "adapters": {
     "image-reproduction": {
-      "profile": "scitt-ccf-ledger/reproduce-v1",
-      "sourceRepository": "https://github.com/microsoft/scitt-ccf-ledger"
+      "profile": "mst-tbs",
+      "sourceRepository": "https://github.com/microsoft/scitt-ccf-ledger",
+      "component": { "app": "mst", "variant": "public" }
     }
   }
 }
@@ -271,36 +272,62 @@ quoted without this page.
 
 | Field | Meaning |
 |---|---|
-| `profile` | Which statement claims and record fields mean what. This build understands only `scitt-ccf-ledger/reproduce-v1`; any other value makes every check `cannot-evaluate`, never a reading under the wrong rules. |
+| `profile` | Which statement claims and record fields mean what. This build understands only `mst-tbs`; any other value makes every check `cannot-evaluate`, never a reading under the wrong rules. |
 | `sourceRepository` | The only repository the statement may name. Compared exactly, with no normalisation. |
+| `component.app`, `component.variant` | The only component the statement may be about. Compared exactly. One signing identity issues statements for every component and variant it builds, so without this a debug image's statement would satisfy a policy written for the production one. |
 
-Both are required and neither may be empty. Neither can be set on the command
+All are required and none may be empty. Neither can be set on the command
 line. Pin `statementIssuer` as well: the adapter trusts the published record
 only because an accepted statement commits to it, so the policy decides whose
 statements count.
 
 ### Statement payload
 
-The statement must carry its claim inline with content type
+The `mst-tbs` profile reads the payload the MST release pipeline registers
+for each image (`generate_tbs_payload` in CCFCommon's
+`add-snp-policies.sh`). The statement must carry it inline with content type
 `application/json`. A detached payload gives `cannot-evaluate`; a payload
 whose content type is missing or not JSON fails, since the publisher signed a
 statement that is not a reproduction claim.
 
 ```json
 {
-  "scittReproduction": 1,
-  "profile": "scitt-ccf-ledger/reproduce-v1",
-  "sourceRepository": "https://github.com/microsoft/scitt-ccf-ledger",
-  "sourceCommit": "<40 lowercase hex>",
-  "version": "0.20.1",
-  "contextSha256": "<64 lowercase hex>",
-  "reproductionRecordSha256": "<64 lowercase hex>"
+  "schema-version": 2,
+  "source": { "commit": "...", "branch": "..." },
+  "build": { "id": "...", "number": "..." },
+  "component": {
+    "app": "mst",
+    "variant": "public",
+    "image": "<registry>/<repository>@sha256:...",
+    "provenance": {
+      "source-repository": "https://github.com/microsoft/scitt-ccf-ledger",
+      "source-commit": "<40 lowercase hex>",
+      "source-date-epoch": 1790269424,
+      "version": "0.20.1-0-g00101f7",
+      "context-sha256": "<64 lowercase hex>",
+      "ccf-version": "7.0.17",
+      "reproduction-record-sha256": "<64 lowercase hex>",
+      "reproduction-record-uri": "https://github.com/microsoft/scitt-ccf-ledger/releases/download/0.20.1/reproduce.json",
+      "image-digest": "sha256:..."
+    }
+  },
+  "security-policy-base64": "...",
+  "security-policy-sha256": "..."
 }
 ```
 
-A `scittReproduction` version this build does not read is `cannot-evaluate`.
-A missing claim, a malformed value, or a `profile` that differs from the
-policy's is a failure. Duplicate keys are refused.
+The adapter reads `schema-version`, `component.app`, `component.variant` and
+every `component.provenance` field except `image-digest`. The others —
+`source`, `build`, `component.image`, `image-digest` and the security policy
+— describe the pipeline run and the deployed image, and are not checked.
+`reproduction-record-uri` is reported so a reader knows where to fetch the
+published record; it is never fetched.
+
+A `schema-version` other than 2 is `cannot-evaluate`: version 1 payloads, and
+statements for images built before scitt-ccf-ledger 0.20, carry no
+provenance. A missing `component.provenance` on a version 2 payload, a missing
+or malformed field, or a component other than the policy's is a failure.
+Duplicate keys are refused.
 
 ### Evidence
 
@@ -317,7 +344,7 @@ scitt-verifier verify --statement statement.cose --scitt-keys keys.cbor \
 | `published-reproduce.json` | The publisher's reproduction record, byte for byte. |
 | `rebuilt-reproduce.json` | The record your rebuild wrote. |
 
-For `scitt-ccf-ledger/reproduce-v1` both are the `reproduce.json` written by
+For `mst-tbs` both are the `reproduce.json` written by
 scitt-ccf-ledger's reproduction script, `schema_version` 1. Each file is read
 within a 64 KiB bound, and a path that resolves outside `DIR` is refused.
 `--binding-mode live-evidence` is refused for this adapter: there is nothing
@@ -329,9 +356,9 @@ All five are required, in this order:
 
 | Name | Passes when |
 |---|---|
-| `reproduction-claim` | The statement's claim is readable, its version is supported, and its profile is the policy's. |
-| `source-repository` | The statement names the policy's `sourceRepository`. |
-| `record-binding` | The SHA-256 of `published-reproduce.json` equals `reproductionRecordSha256`, and its `source_commit`, `scitt_version` and `context_sha256` agree with the statement. |
+| `reproduction-claim` | The payload is readable, its `schema-version` is supported, and its `component.app` and `component.variant` are the policy's. |
+| `source-repository` | The statement's `source-repository` is the policy's `sourceRepository`. |
+| `record-binding` | The SHA-256 of `published-reproduce.json` equals `reproduction-record-sha256`, and its `source_commit`, `scitt_version`, `context_sha256`, `ccf_version` and `source_date_epoch` agree with the statement's `source-commit`, `version`, `context-sha256`, `ccf-version` and `source-date-epoch`. |
 | `rebuild-inputs` | The rebuild recorded the same `source_commit`, `scitt_version`, `context_sha256`, `source_date_epoch`, `base_image`, `ccf_version`, `ccf_rpm_sha256`, `ccf_reproduce_sha256` and `tdnf_snapshottime`. |
 | `rebuild-layers` | The rebuild's ordered layer digests equal the published record's. |
 

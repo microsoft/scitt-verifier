@@ -410,29 +410,48 @@ def nested_sign1_statement() -> bytes:
 # --------------------------------------------------------------------------
 
 
-# The statement claim format the image-reproduction adapter reads, and the
-# profile it is appraised under. See docs/adapters.md.
-REPRODUCTION_PROFILE = "scitt-ccf-ledger/reproduce-v1"
+# The statement payload the image-reproduction adapter reads (profile
+# "mst-tbs"): the schema-version 2 transparent-signing payload the MST release
+# pipeline registers for each image. See docs/adapters.md.
 REPRODUCTION_REPOSITORY = "https://github.com/microsoft/scitt-ccf-ledger"
+REPRODUCTION_RECORD_URI = (
+    "https://github.com/microsoft/scitt-ccf-ledger/releases/download/0.20.1/reproduce.json"
+)
 REPRODUCTION_DIR = "image-reproduction"
 
 
 def reproduction_statement(record: bytes) -> bytes:
-    """A statement committing to a public reproduction record by digest.
+    """A schema-version 2 statement committing to a public reproduction record.
 
     The record is scitt-ccf-ledger's own published release record, which is
     public and redistributable; only the statement around it is minted. The
-    fields repeated from the record are the ones the adapter cross-checks.
+    provenance fields repeated from the record are the ones the adapter
+    cross-checks. Build, image and registry values are placeholders under
+    example.invalid: they are informational to the adapter, and the real ones
+    name internal infrastructure.
     """
     fields = json.loads(record)
+    digest = "sha256:" + hashlib.sha256(b"scitt-verifier corpus image").hexdigest()
     claim = {
-        "scittReproduction": 1,
-        "profile": REPRODUCTION_PROFILE,
-        "sourceRepository": REPRODUCTION_REPOSITORY,
-        "sourceCommit": fields["source_commit"],
-        "version": fields["scitt_version"],
-        "contextSha256": fields["context_sha256"],
-        "reproductionRecordSha256": hashlib.sha256(record).hexdigest(),
+        "schema-version": 2,
+        "source": {"commit": "0" * 40, "branch": "refs/heads/main"},
+        "build": {"id": "0", "number": "corpus"},
+        "component": {
+            "app": "mst",
+            "variant": "public",
+            "image": f"example.invalid/mst-public@{digest}",
+            "provenance": {
+                "source-repository": REPRODUCTION_REPOSITORY,
+                "source-commit": fields["source_commit"],
+                "source-date-epoch": fields["source_date_epoch"],
+                "version": fields["scitt_version"],
+                "context-sha256": fields["context_sha256"],
+                "ccf-version": fields["ccf_version"],
+                "reproduction-record-sha256": hashlib.sha256(record).hexdigest(),
+                "reproduction-record-uri": REPRODUCTION_RECORD_URI,
+                "image-digest": digest,
+            },
+        },
     }
     leaf_key, chain = envelope_identity()
     signer = crypto.Signer(

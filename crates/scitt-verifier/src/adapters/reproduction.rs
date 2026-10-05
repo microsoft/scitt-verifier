@@ -136,6 +136,8 @@ pub fn appraise_evidence(
         &Requirements {
             profile: &policy.profile,
             source_repository: &policy.source_repository,
+            app: &policy.component.app,
+            variant: &policy.component.variant,
         },
     );
 

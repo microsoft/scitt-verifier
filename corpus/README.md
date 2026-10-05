@@ -18,7 +18,7 @@ implementing SCITT receipt verification independently.
 | `other-service-scitt-keys.cbor` | A key set from a *different* transparency service — parses fine, contains the wrong kid |
 | `cbor-header.cose` | A component manifest carrying a detached supplier signature under a **CBOR-valued text label**, `external-signature`. ES256, a two-certificate chain, one CCF receipt |
 | `nested-sign1.cose` | The same claim in COSE's own shape: a tag-18 COSE_Sign1 with a **detached payload** under the text label `external-statement`. RS256 supplier signature, ES256 envelope, one CCF receipt |
-| `image-reproduction/statement.cose` | A reproduction claim (`application/json`, 426-byte payload) committing to the scitt-ccf-ledger 0.20.1 reproduction record. ES256, one CCF receipt, registered at entry 2.355 |
+| `image-reproduction/statement.cose` | An `mst-tbs` schema-version 2 payload (`application/json`, 1061 bytes) committing to the scitt-ccf-ledger 0.20.1 reproduction record; build and image values are `example.invalid` placeholders. ES256, one CCF receipt, registered at entry 3.871 |
 | `image-reproduction/published-reproduce.json` | scitt-ccf-ledger's published 0.20.1 `reproduce.json`, exact bytes |
 | `image-reproduction/rebuilt-reproduce.json` | The `reproduce.json` scitt-ccf-ledger's own scheduled rebuild of 0.20.1 wrote, exact bytes |
 

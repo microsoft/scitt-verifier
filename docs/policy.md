@@ -134,6 +134,7 @@ adapters.azure-confidential-ledger.binding  Execution-policy claim and node requ
 
 adapters.image-reproduction.profile           How the statement and records are read.
 adapters.image-reproduction.sourceRepository  The only repository the statement may name.
+adapters.image-reproduction.component         The only component (app, variant) it may be about.
 ```
 
 See [adapters](adapters.md#policy-shape) for the complete JSON shape and field
