@@ -29,8 +29,9 @@
 
 use scitt_policy::Policy;
 use scitt_receipt::{
-    binding::BindingMode, describe_certificate, describe_receipt, keys::KeyLookup, labels,
-    CertificateSummary, CwtClaims, LedgerKeySet, ReceiptFacts, Sign1, StatementFacts,
+    base64::Alphabet, binding::BindingMode, chain, describe_certificate, describe_receipt,
+    keys::KeyLookup, labels, CertificateSummary, CwtClaims, LedgerKeySet, ReceiptFacts, Sign1,
+    StatementFacts, VerifyOptions,
 };
 use serde_json::{json, Map, Value};
 use wasm_bindgen::prelude::*;
@@ -52,11 +53,23 @@ pub fn version() -> String {
 /// Returns a JSON document. Errors are returned as JS exceptions only when
 /// nothing could be established at all; a statement that parses but fails
 /// verification is a *result*, not an error, and callers must render it.
+///
+/// `trustedRoots` is optional PEM holding one or more CA certificates. Without
+/// it the signing chain is still validated, but only to the root the statement
+/// itself carries, and `chainValidation.anchoredExternally` says so. With it,
+/// the chain must lead to one of those roots. Roots that cannot be read are an
+/// exception, not a result: running the weaker check under the stronger
+/// request would report something nobody asked for.
 #[wasm_bindgen(js_name = verifyStatement)]
-pub fn verify_statement(statement: &[u8], key_set: &[u8]) -> Result<String, JsValue> {
+pub fn verify_statement(
+    statement: &[u8],
+    key_set: &[u8],
+    trusted_roots: Option<String>,
+) -> Result<String, JsValue> {
+    let options = verify_options(trusted_roots.as_deref())?;
     let keys = LedgerKeySet::from_cose_key_set(key_set).map_err(to_js)?;
 
-    let facts = scitt_receipt::verify_statement(statement, &keys).map_err(to_js)?;
+    let facts = scitt_receipt::verify_statement_with(statement, &keys, &options).map_err(to_js)?;
 
     // Re-parsing to describe the chain costs a few hundred microseconds and
     // saves the caller a second entry point. The chain is what a human looks
@@ -103,22 +116,17 @@ pub fn verify_statement(statement: &[u8], key_set: &[u8]) -> Result<String, JsVa
 ///
 /// `serviceCert` is PEM holding exactly one certificate: the
 /// `ledgerTlsCertificate` field of the identity service's response.
+/// `trustedRoots` is as for `verifyStatement`, and anchors the *signer's*
+/// chain; it has nothing to do with the service certificate.
 #[wasm_bindgen(js_name = verifyStatementWithServiceCert)]
 pub fn verify_statement_with_service_cert(
     statement: &[u8],
     key_set: &[u8],
     service_cert: &str,
+    trusted_roots: Option<String>,
 ) -> Result<String, JsValue> {
-    let certs = scitt_receipt::chain::parse_pem_certificates(service_cert).map_err(to_js)?;
-    let [cert] = certs.as_slice() else {
-        return Err(to_js(format!(
-            "serviceCert must hold exactly one certificate, found {}",
-            certs.len()
-        )));
-    };
-    let spki = scitt_receipt::spki_from_certificate_der(cert).map_err(to_js)?;
-    let service_key_kid = scitt_receipt::sha256_hex(&spki);
-    let service_cert_sha256 = scitt_receipt::sha256_hex(cert);
+    let options = verify_options(trusted_roots.as_deref())?;
+    let (service_key_kid, service_cert_sha256) = service_cert_identity(service_cert)?;
 
     let keys = LedgerKeySet::from_cose_key_set(key_set).map_err(to_js)?;
 
@@ -145,7 +153,7 @@ pub fn verify_statement_with_service_cert(
     };
 
     let only = keys.restricted_to(key);
-    let facts = scitt_receipt::verify_statement(statement, &only).map_err(to_js)?;
+    let facts = scitt_receipt::verify_statement_with(statement, &only, &options).map_err(to_js)?;
 
     let chain = Sign1::parse(statement)
         .map(|s| s.describe_chain())
@@ -165,6 +173,22 @@ pub fn verify_statement_with_service_cert(
     out["keySet"]["unvouchedKeyCount"] = json!(keys.keys.len() - 1);
 
     serde_json::to_string(&out).map_err(to_js)
+}
+
+/// The `kid` a service certificate vouches for, and the certificate's digest.
+fn service_cert_identity(service_cert: &str) -> Result<(String, String), JsValue> {
+    let certs = chain::parse_pem_certificates(service_cert).map_err(to_js)?;
+    let [cert] = certs.as_slice() else {
+        return Err(to_js(format!(
+            "serviceCert must hold exactly one certificate, found {}",
+            certs.len()
+        )));
+    };
+    let spki = scitt_receipt::spki_from_certificate_der(cert).map_err(to_js)?;
+    Ok((
+        scitt_receipt::sha256_hex(&spki),
+        scitt_receipt::sha256_hex(cert),
+    ))
 }
 
 /// Describe a statement without trust material.
@@ -247,6 +271,13 @@ fn statement_facts_json(facts: &StatementFacts) -> Value {
         "payloadLength": facts.payload_len,
         "signatureValid": facts.signature_valid,
         "certificateChainLength": facts.certificate_chain_len,
+        // The same shape the CLI's `--facts` reports under `certificateChain`.
+        // Named differently here only because that key already holds the
+        // described certificates in this API.
+        "chainValidation": chain_validation_json(facts.chain_outcome.as_ref()),
+        // From the ledger's countersigned registration times, never the
+        // statement's own `iat`, which the signer chooses.
+        "certificatesValidAtRegistration": facts.certificates_valid_at_signing_time,
         "leafSubject": facts.leaf_subject,
         "leafIssuer": facts.leaf_issuer,
         // `receiptsPresent` counts blobs that arrived; `receipts` holds those
@@ -259,6 +290,48 @@ fn statement_facts_json(facts: &StatementFacts) -> Value {
         "anyReceiptVerified": facts.any_receipt_verified(),
         "problems": facts.problems,
     })
+}
+
+/// Chain validation always runs, as it does in the CLI. Skipping it when no
+/// roots were supplied would leave a page with nothing to say about the chain,
+/// when "consistent with its own embedded root" is both true and worth saying
+/// next to "not anchored to anything you trust".
+fn verify_options(trusted_roots: Option<&str>) -> Result<VerifyOptions, JsValue> {
+    let mut chain = chain::Options::default();
+    if let Some(pem) = trusted_roots {
+        chain.trusted_roots =
+            chain::parse_pem_certificates(pem).map_err(|e| to_js(format!("trustedRoots: {e}")))?;
+    }
+    Ok(VerifyOptions { chain: Some(chain) })
+}
+
+/// Projected the way the CLI's record projects it, so a page and `--facts`
+/// can be compared field by field.
+fn chain_validation_json(outcome: Option<&chain::Outcome>) -> Value {
+    let Some(outcome) = outcome else {
+        return json!({ "status": "notEvaluated" });
+    };
+    match outcome {
+        chain::Outcome::Valid(details) => json!({
+            "status": "evaluated",
+            "outcome": "valid",
+            "rootSha256": scitt_receipt::cbor::hex(&details.root_sha256),
+            "anchoredExternally": details.anchored_externally,
+            "validatedAt": details.validated_at,
+            "pathLength": details.path_len,
+            "pathNotBefore": details.path_not_before,
+            "pathNotAfter": details.path_not_after,
+        }),
+        chain::Outcome::Invalid(reason) => {
+            json!({ "status": "evaluated", "outcome": "invalid", "reason": reason })
+        }
+        chain::Outcome::Insufficient(reason) => {
+            json!({ "status": "evaluated", "outcome": "insufficient", "reason": reason })
+        }
+        chain::Outcome::Unsupported(reason) => {
+            json!({ "status": "evaluated", "outcome": "unsupported", "reason": reason })
+        }
+    }
 }
 
 fn receipt_facts_json(facts: &ReceiptFacts) -> Value {
@@ -454,6 +527,54 @@ pub fn statement_payload(statement: &[u8]) -> Result<String, JsValue> {
     serde_json::to_string(&Value::Object(out)).map_err(to_js)
 }
 
+/// Decode one encoded claim inside a JSON payload, and report its digest.
+///
+/// The browser counterpart of `inspect --decode`, reading the claim through
+/// the same extraction (`scitt_policy::claim::encoded_claim_bytes`), so a
+/// digest shown on a page and one printed in CI are over the same bytes by
+/// construction.
+///
+/// `path` is written the way `inspect` prints it, `['security-policy-base64']`.
+/// `encoding` is `base64` or `base64url` and is required: nothing is decoded
+/// that the caller did not name, and no encoding is guessed from the value.
+///
+/// Decoding is not verification. The bytes inherit whatever status the
+/// statement has, and a page that shows this beside a failed signature must
+/// not let the digest read as an endorsement.
+///
+/// A claim that cannot be read — a detached or non-JSON payload, a path that
+/// reaches nothing, a value that is not the named encoding — is an exception
+/// whose message is a sentence about this statement.
+#[wasm_bindgen(js_name = decodeClaim)]
+pub fn decode_claim(statement: &[u8], path: &str, encoding: &str) -> Result<String, JsValue> {
+    let segments = scitt_policy::parse_path(path).map_err(to_js)?;
+    let alphabet = Alphabet::parse(encoding).map_err(to_js)?;
+    let parsed = Sign1::parse(statement).map_err(to_js)?;
+
+    let at = scitt_policy::describe_path(&segments);
+    let bytes = scitt_policy::claim::encoded_claim_bytes(&parsed, &segments, alphabet)
+        .map_err(|why| to_js(format!("{at}: {}", why.describe())))?;
+
+    // Text when it is text, hex when it is not, and never a lossy conversion:
+    // replacement characters would render content that is not in the bytes,
+    // beside a digest of bytes that are.
+    let (text, hex) = match std::str::from_utf8(&bytes) {
+        Ok(t) => (Some(t.to_string()), None),
+        Err(_) => (None, Some(scitt_receipt::cbor::hex(&bytes))),
+    };
+
+    let out = json!({
+        "path": at,
+        "encoding": alphabet.name(),
+        "length": bytes.len(),
+        "sha256": scitt_receipt::sha256_hex(&bytes),
+        "utf8": text.is_some(),
+        "text": text,
+        "hex": hex,
+    });
+    serde_json::to_string(&out).map_err(to_js)
+}
+
 /// Compare an artifact against what a statement says about it.
 ///
 /// This is the check that turns "the statement is genuine" into "the statement
@@ -551,12 +672,25 @@ pub fn bind_artifact(
 /// `Number.MAX_SAFE_INTEGER`, so nothing is lost. A non-integral or non-finite
 /// value is rejected rather than truncated: `now` decides freshness, and a
 /// clock that is silently wrong is worse than one that refuses.
+///
+/// `trustedRoots` is as for `verifyStatement`. Pass the same value to both, or
+/// `certificateChainValidated` and `requireChainToRootSha256` will be answered
+/// about a different chain from the one the page displays.
+///
+/// `serviceCert` is as for `verifyStatementWithServiceCert`, and restricts the
+/// key set the same way. A page that verified through the service certificate
+/// must pass it here too; otherwise policy is evaluated over receipts checked
+/// against keys the page itself just declined to trust. A key set holding no
+/// key bound to the certificate is an exception here, because there are no
+/// facts to evaluate; `verifyStatementWithServiceCert` reports it as a result.
 #[wasm_bindgen(js_name = evaluatePolicy)]
 pub fn evaluate_policy(
     statement: &[u8],
     key_set: &[u8],
     policy: &[u8],
     now: f64,
+    trusted_roots: Option<String>,
+    service_cert: Option<String>,
 ) -> Result<String, JsValue> {
     if !now.is_finite() || now.fract() != 0.0 || now.abs() > 9_007_199_254_740_991.0 {
         return Err(JsValue::from_str(
@@ -568,9 +702,23 @@ pub fn evaluate_policy(
     // A malformed policy is a usage error, not a finding: nothing was
     // evaluated, so there is no result to render and an exception is honest.
     let policy = Policy::from_json(policy).map_err(to_js)?;
+    let options = verify_options(trusted_roots.as_deref())?;
 
     let keys = LedgerKeySet::from_cose_key_set(key_set).map_err(to_js)?;
-    let facts = scitt_receipt::verify_statement(statement, &keys).map_err(to_js)?;
+    let keys = match service_cert.as_deref() {
+        Some(pem) => {
+            let (kid, _) = service_cert_identity(pem)?;
+            let key = keys.service_key(&kid).map_err(|m| {
+                to_js(format!(
+                    "the key set holds no key bound to the service certificate ({})",
+                    m.code()
+                ))
+            })?;
+            keys.restricted_to(key)
+        }
+        None => keys,
+    };
+    let facts = scitt_receipt::verify_statement_with(statement, &keys, &options).map_err(to_js)?;
 
     let decision = policy.evaluate(&facts, now);
 

@@ -17,6 +17,7 @@
 //   wasm-pack build --target no-modules --out-dir pkg-nomodules --release
 
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { X509Certificate } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -48,6 +49,25 @@ const payloadPolicy = (sourceRepository) => {
     },
   });
 };
+
+// The corpus root, lifted out of the statement that carries it. A real
+// deployment takes its roots from its own trust store, never from the
+// statement; the scenario does this only because the corpus has no separate
+// root file, and it labels it accordingly.
+const corpusRootPem = (() => {
+  const bytes = readFileSync(join(fixtures, 'transparent-statement.cose'));
+  for (let i = 0; i + 4 < bytes.length; i++) {
+    if (bytes[i] !== 0x30 || bytes[i + 1] !== 0x82) continue;
+    const der = bytes.subarray(i, i + 4 + ((bytes[i + 2] << 8) | bytes[i + 3]));
+    let cert;
+    try { cert = new X509Certificate(der); } catch { continue; }
+    if (cert.subject === 'CN=Example Corpus Root CA' && cert.issuer === cert.subject) {
+      return cert.toString();
+    }
+  }
+  throw new Error('the corpus root was not found in transparent-statement.cose');
+})();
+const serviceCertPem = readFileSync(join(fixtures, 'mst-test-service-cert.pem'), 'utf8');
 
 // Real artifacts from the conformance corpus, not fabricated ones. A demo
 // built on synthetic bytes demonstrates the demo.
@@ -152,6 +172,50 @@ const SCENARIOS = [
     policy: payloadPolicy('https://github.com/example/another-repository'),
     note: 'The same genuine statement. The policy now requires a different source repository, '
         + 'so one payload assertion fails while signature, receipt and the other claims pass.',
+  },
+  {
+    label: 'Anchored to a trusted root',
+    statement: b64(join(fixtures, 'transparent-statement.cose')),
+    keys: b64(join(fixtures, 'mst-test-scitt-keys.cbor')),
+    policy: b64(join(policies, 'fixture-mst.json')),
+    roots: corpusRootPem,
+    rootsName: 'example-corpus-root.pem',
+    note: 'The signer\u2019s chain now has to lead to a root you trust, so "Signer certificate '
+        + 'chain" reads Anchored and the chain gap leaves the Not checked list. For the demo '
+        + 'the root is the corpus test root; in practice it comes from your own trust store, '
+        + 'never from the statement.',
+  },
+  {
+    label: 'Chain does not reach the trusted root',
+    statement: b64(join(fixtures, 'transparent-statement.cose')),
+    keys: b64(join(fixtures, 'mst-test-scitt-keys.cbor')),
+    policy: b64(join(policies, 'fixture-mst.json')),
+    roots: serviceCertPem,
+    rootsName: 'unrelated-root.pem',
+    note: 'The same genuine statement, with a trusted root its chain does not lead to. The '
+        + 'signature still verifies \u2014 it is the signer\u2019s identity that is not '
+        + 'established, and that is a failure, not a gap.',
+  },
+  {
+    label: 'Key set vouched for by the service',
+    statement: b64(join(fixtures, 'transparent-statement.cose')),
+    keys: b64(join(fixtures, 'mst-test-scitt-keys.cbor')),
+    policy: b64(join(policies, 'fixture-mst.json')),
+    serviceCert: serviceCertPem,
+    serviceCertName: 'mst-test-service-cert.pem',
+    note: 'The ledger\u2019s service certificate names the one key receipts may be checked '
+        + 'with. A key set served through a proxy or cache can no longer add keys of its own.',
+  },
+  {
+    label: 'Key set not vouched for',
+    statement: b64(join(fixtures, 'transparent-statement.cose')),
+    keys: b64(join(fixtures, 'other-service-scitt-keys.cbor')),
+    policy: b64(join(policies, 'fixture-mst.json')),
+    serviceCert: serviceCertPem,
+    serviceCertName: 'mst-test-service-cert.pem',
+    note: 'Another service\u2019s keys, checked against this service\u2019s certificate. '
+        + 'No key in the set is the one the certificate vouches for, so nothing is verified '
+        + 'with it.',
   },
 ];
 

@@ -74,18 +74,40 @@ the boundary have to agree for the pinned digests to come out right.
 
 | Export | Returns |
 |---|---|
-| `verifyStatement(statement, keySet)` | Facts about the statement and every receipt |
-| `verifyStatementWithServiceCert(statement, keySet, serviceCertPem)` | The same facts, using only the key set entry bound to the service certificate; for a key set fetched over a channel the page cannot authenticate |
-| `evaluatePolicy(statement, keySet, policy, now)` | One outcome per assertion in a caller-supplied policy |
+| `verifyStatement(statement, keySet, trustedRoots?)` | Facts about the statement and every receipt, including `chainValidation` for the signer's certificate chain |
+| `verifyStatementWithServiceCert(statement, keySet, serviceCertPem, trustedRoots?)` | The same facts, using only the key set entry bound to the service certificate; for a key set fetched over a channel the page cannot authenticate |
+| `evaluatePolicy(statement, keySet, policy, now, trustedRoots?, serviceCertPem?)` | One outcome per assertion in a caller-supplied policy |
 | `bindArtifact(statement, artifact, mode, artifactName)` | Whether the statement is about *this* file |
 | `inspectStatement(statement)` | Structure only, with no trust material and therefore no evidence |
 | `statementPayload(statement)` | The payload as content, or a digest declared as one |
+| `decodeClaim(statement, path, encoding)` | One encoded string claim in a JSON payload, decoded, with the SHA-256 of the decoded bytes |
 | `claimDigest(statement)` | The digest a receipt commits to |
 | `describeReceipt(receipt)` | A standalone receipt's contents |
 | `describeCertificate(der)` | A single certificate's contents |
 | `version()` | The crate version |
 
 All return JSON strings. Errors are thrown as JavaScript exceptions.
+
+`trustedRoots` is optional PEM text holding one or more `CERTIFICATE` blocks.
+The chain is always validated; without roots it is validated only up to the
+root the statement itself carries, and `chainValidation.anchoredExternally` is
+`false` — a consistent chain, not an identified signer, because anyone can mint
+a root. With roots, a chain that does not reach one is `invalid`. An empty
+string or a PEM with no certificate in it throws rather than being read as "no
+roots". `chainValidation.outcome` is `valid`, `invalid`, `insufficient` (too
+few certificates to evaluate) or `unsupported` (an algorithm this build does
+not validate, such as an ECDSA-signed chain), and has the same shape as the
+CLI's `certificateChain` record.
+
+Passing `serviceCertPem` to `evaluatePolicy` restricts the key set the same way
+`verifyStatementWithServiceCert` does; a key set with no key bound to the
+certificate throws rather than evaluating policy over unchecked receipts.
+
+`decodeClaim` takes a path in the same syntax as the CLI's `--decode`, such as
+`['security-policy-base64']`, and an encoding of `base64` or `base64url`. It
+never guesses the encoding and never decodes a claim it was not asked for.
+Decoding is not verification: the bytes are only as trustworthy as the
+statement that carries them.
 
 `now` is a whole number of seconds since the Unix epoch —
 `Math.floor(Date.now() / 1000)`, or a fixed value for a reproducible run. It is
