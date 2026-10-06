@@ -95,6 +95,7 @@ pub fn compact(
     let claim = match a.verdict {
         Verdict::StatementTransparent => "Statement signature and receipt inclusion verified; relying-party policy satisfied.",
         Verdict::ArtifactTransparent => "Supplied artifact matches the verified statement; relying-party policy satisfied.",
+        Verdict::ResourceTransparent if args.adapter == Some(crate::cli::Adapter::ImageReproduction) => "Verified statement's reproduction record matches the supplied rebuild; relying-party policy satisfied.",
         Verdict::ResourceTransparent => "Verified statement and assessed node evidence satisfy the scoped resource requirements.",
         Verdict::CannotEvaluate => "This is not a pass. The tool could not answer the requested question.",
         _ => "The requested acceptance requirements were not met.",
@@ -103,7 +104,12 @@ pub fn compact(
     if a.trust.mode == "no-key-set" {
         writeln!(out, "Trust material: {}", a.trust.describe())?;
     }
-    if args.adapter.is_some() {
+    if args.adapter == Some(crate::cli::Adapter::ImageReproduction) {
+        writeln!(
+            out,
+            "Scope: The rebuild is operator-supplied; not an independent rebuild, and not proof that a published image or deployment has these layers."
+        )?;
+    } else if args.adapter.is_some() {
         let scope = if a.adapter_findings.is_empty() {
             "No node evidence was appraised."
         } else if args.binding_mode == BindingMode::LiveEvidence {

@@ -30,7 +30,7 @@ impl Stage {
             Self::ArtifactBinding => "Check artifact binding",
             Self::Policy => "Evaluate relying-party policy",
             Self::Evidence => "Collect resource evidence",
-            Self::Adapter => "Appraise node evidence",
+            Self::Adapter => "Appraise resource evidence",
             Self::Summary => "Assessment summary",
         }
     }
@@ -153,7 +153,6 @@ impl Event {
         }
     }
 
-    #[cfg_attr(not(feature = "adapter-azure-confidential-ledger"), allow(dead_code))]
     pub fn finding_with_values(
         stage: Stage,
         check: impl Into<String>,

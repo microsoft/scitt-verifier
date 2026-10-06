@@ -1,0 +1,19 @@
+{
+  "base_image": "mcr.microsoft.com/azurelinux/base/core:3.0.20260909@sha256:34a22db497ff34a0f35ca5fc54bd38711d04238a2c1b2f65d35dc9d45dd82584",
+  "buildx_version": "github.com/docker/buildx v0.37.1 0b265a9f62db554fa9aba6dd19e1bd5704bc7d8a",
+  "ccf_reproduce_sha256": "6c568e8baa6f5426bbc5fd5ecabc76dd7399658b8b223e7e3581d881b2ab078f",
+  "ccf_rpm_sha256": "789d00bed342b08e468a7397f103881df5b6a75c09f3ccc507e2b78a4735fc2e",
+  "ccf_version": "7.0.17",
+  "context_sha256": "ba5b524e8d55528e0b38d8ee189398c99d177727be54f5dd3fa295c2f993c006",
+  "docker_version": "28.0.4",
+  "image_id": "sha256:bf316e72815129179fb3dc1d5d97a48ae3e7505c7e980d61cb985914394a30e2",
+  "layers": [
+    "sha256:cd953ce377137119676750e24f10cbb7c061f56a97138ac9d64dff0facac3e78",
+    "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef"
+  ],
+  "schema_version": 1,
+  "scitt_version": "0.20.1-0-g00101f7",
+  "source_commit": "00101f769d872711356e080fbb089ac48589c60a",
+  "source_date_epoch": 1790269424,
+  "tdnf_snapshottime": "1790165199"
+}

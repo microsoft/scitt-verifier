@@ -5,6 +5,7 @@ members = [
     "crates/scitt-policy",
     "crates/scitt-network",
     "adapters/azure-confidential-ledger",
+    "adapters/image-reproduction",
     "crates/scitt-verifier",
     "crates/scitt-wasm",
 ]

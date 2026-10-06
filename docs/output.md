@@ -227,6 +227,19 @@ acquisition (`live-evidence`), though the latter currently requires the former.
 See [adapters](adapters.md) for policy, invocation, and the checks that determine
 a scoped resource success.
 
+#### Image reproduction checks
+
+The `image-reproduction` adapter contributes five checks, always in this
+order: `reproduction-claim`, `source-repository`, `record-binding`,
+`rebuild-inputs` and `rebuild-layers`. All five are required. Its evidence is
+always saved (`saved-evidence`); the rebuilt record is operator-supplied, and
+the scope statement says so. Every compared value that differed — a component,
+a record digest, a drifted input, each differing layer position — is also recorded under
+`appraisal.adapterFindings` with its expected and observed values. Differences
+in builder details that are not compared (`docker_version`, `buildx_version`,
+`image_id`) are reported as `ResourceAppraisalNote` warning diagnostics, not
+checks. See [image reproduction](adapters.md#image-reproduction).
+
 ## Diagnostics
 
 Every problem is a structured diagnostic with a stable `code`, a `category`, a

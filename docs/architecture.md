@@ -11,13 +11,16 @@ not a prerequisite for verifying a transparent statement.
 | `crates/scitt-policy` | Evaluate statement assertions and parse typed adapter requirements; no I/O or clock (`now` is supplied) |
 | `crates/scitt-network` | Acquire receipt keys and live resource evidence; no policy decisions |
 | `adapters/azure-confidential-ledger` (`scitt-adapter-azure-confidential-ledger`) | Pure appraisal of supplied MST ledger evidence against typed requirements |
+| `adapters/image-reproduction` (`scitt-adapter-image-reproduction`) | Pure comparison of a supplied rebuild record with the reproduction record a statement commits to; runs no build |
 | `crates/scitt-verifier` | Load inputs, select acquisition and adapter paths, combine checks, report verdicts and exit codes |
 
-`scitt-policy/src/adapters/{mod.rs,acl.rs}` owns the policy namespace
-and MST-specific requirements. CLI
+`scitt-policy/src/adapters/{mod.rs,acl.rs,image_reproduction.rs}` owns the
+policy namespace and each adapter's requirements. CLI
 `scitt-verifier/src/adapters/mod.rs` provides dispatch and the shared appraisal
 result; `acl.rs` translates MST requirements and findings, and `load.rs`
-handles local evidence bundles. `live.rs` calls
+handles local evidence bundles. `reproduction.rs` reads the two records from
+the evidence directory within fixed bounds and hands their bytes, with the
+accepted statement's payload, to the pure image-reproduction crate. `live.rs` calls
 `scitt_network::acl::collect`, then decodes and joins the returned node
 views into a pure evidence bundle. TLS bootstrap, pinned connections, and
 bounded HTTP collection belong to `collect`, not the CLI or pure adapter.
@@ -40,8 +43,9 @@ scope limitations; they cannot stand in for a required check.
 
 There is no generic `scitt-attest` crate, plugin loader, or universal SNP
 evidence model. SNP and UVM concepts belong to the Azure Confidential Ledger
-adapter. A future image, hardware, or MAA adapter could use this separation,
-but none is implemented
+adapter. The image-reproduction adapter shares only the dispatch seam and the
+check vocabulary; it has no SNP concepts. A future hardware or MAA adapter
+could use the same separation, but none is implemented
 by the existence of the dispatch seam.
 
 ## Where the network is, and is not
@@ -59,7 +63,7 @@ opening sockets or loading files.
 
 The dependency boundaries are deliberate:
 
-- The core, policy, and pure adapter cannot reach network clients.
+- The core, policy, and pure adapters cannot reach network clients.
 - CLI network access goes through `scitt-network`.
 - Network acquisition does not depend on relying-party policy evaluation.
 

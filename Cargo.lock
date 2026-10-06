@@ -789,6 +789,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "scitt-adapter-image-reproduction"
+version = "0.4.0"
+dependencies = [
+ "scitt-policy",
+ "scitt-receipt",
+ "serde_json",
+]
+
+[[package]]
 name = "scitt-network"
 version = "0.4.0"
 dependencies = [
@@ -824,6 +833,7 @@ name = "scitt-verifier"
 version = "0.4.0"
 dependencies = [
  "scitt-adapter-azure-confidential-ledger",
+ "scitt-adapter-image-reproduction",
  "scitt-network",
  "scitt-policy",
  "scitt-receipt",

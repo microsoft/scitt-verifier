@@ -42,14 +42,24 @@ fn main() -> ExitCode {
         // parse, so there is no format to honour. Documented in docs/output.md.
         Err(message) => {
             eprintln!("error: {message}\n");
-            eprintln!("{}{}", cli::USAGE, cli::ADAPTER_USAGE);
+            eprintln!(
+                "{}{}{}",
+                cli::USAGE,
+                cli::REPRODUCTION_USAGE,
+                cli::ADAPTER_USAGE
+            );
             return ExitCode::from(Verdict::UsageError.exit_code());
         }
     };
 
     match command {
         Command::Help => {
-            println!("{}{}", cli::USAGE, cli::ADAPTER_USAGE);
+            println!(
+                "{}{}{}",
+                cli::USAGE,
+                cli::REPRODUCTION_USAGE,
+                cli::ADAPTER_USAGE
+            );
             ExitCode::SUCCESS
         }
         Command::Version => {
@@ -222,7 +232,14 @@ fn progress_plan(args: &VerifyArgs) -> Vec<(progress::Stage, String)> {
             }
             .into(),
         ));
-        plan.push((Adapter, "Appraise node evidence".into()));
+        plan.push((
+            Adapter,
+            match args.adapter {
+                Some(cli::Adapter::ImageReproduction) => "Compare rebuild with reproduction record",
+                _ => "Appraise node evidence",
+            }
+            .into(),
+        ));
     }
     plan
 }
@@ -537,7 +554,9 @@ fn evaluate(args: &VerifyArgs, now: i64, progress: &mut dyn progress::Sink) -> A
     let resource = if let Some(adapter) = args.adapter {
         let resource = run_adapter(args, &policy, &statement_bytes, verdict, progress);
         if let Some(result) = &resource {
-            if result.findings.is_empty() {
+            // Only the ledger adapter reports per-node findings on success; for
+            // any other adapter an empty list says nothing about whether it ran.
+            if adapter == cli::Adapter::AzureConfidentialLedger && result.findings.is_empty() {
                 progress.emit(progress::Event::stage(
                     progress::Stage::Adapter,
                     progress::State::NotRun,
@@ -2348,7 +2367,7 @@ fn run_adapter(
         progress.emit(progress::Event::stage(
             progress::Stage::Adapter,
             progress::State::NotRun,
-            "Statement acceptance did not pass; node evidence was not appraised",
+            "Statement acceptance did not pass; adapter evidence was not appraised",
         ));
         return Some(adapters::not_attempted(
             adapter,
