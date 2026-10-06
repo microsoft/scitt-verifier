@@ -194,6 +194,19 @@ python tools/scitt-keys.py fetch \
 
 Steps 2 to 4 are unchanged, including the self-binding assertion.
 
+### In a browser
+
+A browser cannot do step 2: it will not accept a CCF certificate, and it
+cannot pin one. A page that reads the key set through a proxy therefore has
+no assurance about who served it. `scitt-wasm`'s
+`verifyStatementWithServiceCert` moves the anchor from the connection to the
+bytes: the page fetches the service certificate itself from the identity
+service, the step 4 assertion runs against it, and only the bound key is used
+for verification. Any other key in the set is discarded, because the proxy
+could have added it. A receipt signed by one of those keys is reported as
+unevaluated, never as verified. The assertion is the same
+`LedgerKeySet::service_key` the network path calls.
+
 ### `/jwks` is deliberately not a fallback
 
 If `/.well-known/scitt-keys` returns 404, the ledger predates the endpoint and

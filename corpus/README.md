@@ -16,6 +16,7 @@ implementing SCITT receipt verification independently.
 | `bad-artifact.bin` | A different artifact, for the negative binding case |
 | `mst-test-scitt-keys.cbor` | The transparency service's signing keys, as a COSE_KeySet |
 | `other-service-scitt-keys.cbor` | A key set from a *different* transparency service — parses fine, contains the wrong kid |
+| `mst-test-service-cert.pem` | The `ledgerTlsCertificate` the identity service publishes for the ledger that issued `mst-test-scitt-keys.cbor` (`CN=CCF Service`, DER sha-256 `b021d809…dc768`). Its public key hashes to the one `kid` in that key set |
 | `cbor-header.cose` | A component manifest carrying a detached supplier signature under a **CBOR-valued text label**, `external-signature`. ES256, a two-certificate chain, one CCF receipt |
 | `nested-sign1.cose` | The same claim in COSE's own shape: a tag-18 COSE_Sign1 with a **detached payload** under the text label `external-statement`. RS256 supplier signature, ES256 envelope, one CCF receipt |
 | `image-reproduction/statement.cose` | An `mst-tbs` schema-version 2 payload (`application/json`, 1061 bytes) committing to the scitt-ccf-ledger 0.20.1 reproduction record; build and image values are `example.invalid` placeholders. ES256, one CCF receipt, registered at entry 3.871 |
@@ -152,9 +153,10 @@ python corpus/tools/generate_fixtures.py \
 It mints throwaway keys and certificates, signs, registers each statement on
 the named service, recaptures the transparent statement, derives the three
 mutants structurally rather than by copying byte offsets, and captures the
-service's key set. It then prints the pinned values above and the `did:x509`
-issuer, both of which move with the freshly minted CA and have to be pasted
-into `conformance.rs`, `corpus.node.mjs` and `acceptance.rs`.
+service's key set and the service certificate it is bound to. It then prints
+the pinned values above, the service certificate digest, and the `did:x509`
+issuer, all of which can move with a fresh run and have to be pasted into
+`conformance.rs`, `service_key.rs`, `corpus.node.mjs` and `acceptance.rs`.
 
 The tool exists because the corpus previously could not be rebuilt: it was
 signed against one person's test ledger, and when that ledger was deleted every
