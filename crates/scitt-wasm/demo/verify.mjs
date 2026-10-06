@@ -121,6 +121,8 @@ const EXPECTED = [
   ['Verified \u2014 and about this artifact', 'v-pass'],
   ['Wrong artifact',                          'v-fail'],
   ['Unavailable',                             'v-none'],
+  ['Verified',                                'v-pass'],
+  ['Policy not satisfied',                    'v-warn'],
 ];
 
 for (let i = 0; i < EXPECTED.length; i++) {
@@ -241,6 +243,19 @@ check('and never reports a mismatch it has no evidence for',
   el('evidence').innerHTML.includes('Mismatch'), false);
 contains('naming the hash envelope as the reason', el('evidence').innerHTML, 'Hash Envelope');
 check('never styled as a failure', el('banner').className.includes('v-fail'), false);
+
+// A payload assertion is evaluated over the signed document, not the page's
+// rendering of it. Only one rule differs between the two scenarios, so only
+// one row may change outcome.
+console.log('\n--- payload claims are policy, evaluated inside the signature ---');
+const claims = load(8);
+contains('payload assertions are rendered', claims.assertions, 'payloadJson');
+check('none of them fail', claims.assertions.includes('t-fail'), false);
+const claimMiss = load(9);
+contains('a failing payload assertion is rendered', claimMiss.assertions, 't-fail');
+contains('naming the claim it read', claimMiss.assertions, 'source-repository');
+check('exactly one assertion fails', (claimMiss.assertions.match(/t-fail/g) || []).length, 1);
+contains('the statement itself is still genuine', claimMiss.evidence, 'Valid');
 
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`);
 process.exit(failures === 0 ? 0 : 1);

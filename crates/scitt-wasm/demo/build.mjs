@@ -28,6 +28,26 @@ const fixtures = join(repo, 'corpus', 'fixtures');
 const policies = join(repo, 'corpus', 'policies');
 
 const b64 = (path) => readFileSync(path).toString('base64');
+const b64json = (value) => Buffer.from(JSON.stringify(value, null, 2)).toString('base64');
+
+// Built from the corpus policy for the same statement, so the issuer pins stay
+// in step with the fixture when the corpus is regenerated; only the payload
+// rules are the demo's own.
+const payloadPolicy = (sourceRepository) => {
+  const base = JSON.parse(readFileSync(join(policies, 'image-reproduction.json'), 'utf8'));
+  return b64json({
+    policyId: 'demo/payload-claims',
+    policyVersion: '1',
+    assertions: {
+      ...base.assertions,
+      payloadJson: [
+        { path: ['component', 'app'], text: { equals: 'mst' } },
+        { path: ['component', 'provenance', 'source-repository'], text: { equals: sourceRepository } },
+        { path: ['component', 'provenance', 'reproduction-record-sha256'], exists: true },
+      ],
+    },
+  });
+};
 
 // Real artifacts from the conformance corpus, not fabricated ones. A demo
 // built on synthetic bytes demonstrates the demo.
@@ -115,6 +135,23 @@ const SCENARIOS = [
         + 'before binding is reached \u2014 read the binding in the evidence table, where it '
         + 'is bound to the file below. Switch the mode to payload-bytes to watch it refuse '
         + 'to compare rather than report a mismatch it has no evidence for.',
+  },
+  {
+    label: 'Claims inside the payload',
+    statement: b64(join(fixtures, 'image-reproduction', 'statement.cose')),
+    keys: b64(join(fixtures, 'mst-test-scitt-keys.cbor')),
+    policy: payloadPolicy('https://github.com/microsoft/scitt-ccf-ledger'),
+    note: 'The policy asserts on fields inside the signed JSON payload: which component this '
+        + 'is, the repository it was built from, and that it commits to a reproduction record. '
+        + 'The payload is read only because the issuer signed a content type saying it is JSON.',
+  },
+  {
+    label: 'Payload claim not satisfied',
+    statement: b64(join(fixtures, 'image-reproduction', 'statement.cose')),
+    keys: b64(join(fixtures, 'mst-test-scitt-keys.cbor')),
+    policy: payloadPolicy('https://github.com/example/another-repository'),
+    note: 'The same genuine statement. The policy now requires a different source repository, '
+        + 'so one payload assertion fails while signature, receipt and the other claims pass.',
   },
 ];
 
