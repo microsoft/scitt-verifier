@@ -79,6 +79,94 @@ pub fn verify_statement(statement: &[u8], key_set: &[u8]) -> Result<String, JsVa
     serde_json::to_string(&out).map_err(to_js)
 }
 
+/// Verify a statement using only the key the service certificate vouches for.
+///
+/// For a page that fetched the key set through a channel it cannot
+/// authenticate, such as a proxy in front of a ledger whose TLS certificate a
+/// browser will not accept. The service certificate comes from somewhere the
+/// page *can* authenticate, typically the identity service over the public web
+/// PKI, and is the only trust anchor here. The command-line tool gets the same
+/// assurance by pinning the ledger connection to that certificate; a browser
+/// cannot pin, so the binding is checked over the bytes instead.
+///
+/// Two consequences:
+///
+/// - The key set must contain exactly one entry whose `kid` is the hash of the
+///   certificate's public key and whose material hashes to that `kid`. If it
+///   does not, nothing is verified and `serviceKey.bound` is `false` with a
+///   `mismatch` code. This is a finding about the key set, and is returned as
+///   a result rather than an exception so a page can render it.
+/// - Every other key in the set is discarded before verification. Whoever
+///   served the set could have added one, so a receipt signed by any other key
+///   (for example one that predates a disaster recovery) is reported as an
+///   unknown `kid` and left unevaluated, never verified.
+///
+/// `serviceCert` is PEM holding exactly one certificate: the
+/// `ledgerTlsCertificate` field of the identity service's response.
+#[wasm_bindgen(js_name = verifyStatementWithServiceCert)]
+pub fn verify_statement_with_service_cert(
+    statement: &[u8],
+    key_set: &[u8],
+    service_cert: &str,
+) -> Result<String, JsValue> {
+    let certs = scitt_receipt::chain::parse_pem_certificates(service_cert).map_err(to_js)?;
+    let [cert] = certs.as_slice() else {
+        return Err(to_js(format!(
+            "serviceCert must hold exactly one certificate, found {}",
+            certs.len()
+        )));
+    };
+    let spki = scitt_receipt::spki_from_certificate_der(cert).map_err(to_js)?;
+    let service_key_kid = scitt_receipt::sha256_hex(&spki);
+    let service_cert_sha256 = scitt_receipt::sha256_hex(cert);
+
+    let keys = LedgerKeySet::from_cose_key_set(key_set).map_err(to_js)?;
+
+    let key_set_json = json!({
+        "keyCount": keys.keys.len(),
+        "revokedKids": keys.revoked_kids,
+        "skipped": keys.skipped,
+    });
+
+    let key = match keys.service_key(&service_key_kid) {
+        Ok(key) => key,
+        Err(mismatch) => {
+            let out = json!({
+                "serviceKey": {
+                    "kid": service_key_kid,
+                    "certificateSha256": service_cert_sha256,
+                    "bound": false,
+                    "mismatch": mismatch.code(),
+                },
+                "keySet": key_set_json,
+            });
+            return serde_json::to_string(&out).map_err(to_js);
+        }
+    };
+
+    let only = keys.restricted_to(key);
+    let facts = scitt_receipt::verify_statement(statement, &only).map_err(to_js)?;
+
+    let chain = Sign1::parse(statement)
+        .map(|s| s.describe_chain())
+        .unwrap_or_default();
+
+    let mut out = statement_facts_json(&facts);
+    out["certificateChain"] = Value::Array(chain.iter().map(certificate_json).collect());
+    out["serviceKey"] = json!({
+        "kid": service_key_kid,
+        "certificateSha256": service_cert_sha256,
+        "bound": true,
+        "mismatch": Value::Null,
+    });
+    out["keySet"] = key_set_json;
+    // How many served keys were set aside. A non-zero count is normal after a
+    // rotation and is reported so a page can explain an unevaluated receipt.
+    out["keySet"]["unvouchedKeyCount"] = json!(keys.keys.len() - 1);
+
+    serde_json::to_string(&out).map_err(to_js)
+}
+
 /// Describe a statement without trust material.
 ///
 /// Answers "what is in this file?" and deliberately not "should I trust it?".

@@ -116,6 +116,77 @@ impl LedgerKeySet {
             None => (KeyLookup::UnknownKid, None),
         }
     }
+
+    /// The one key in this set that belongs to the service certificate whose
+    /// public key hashes to `service_key_kid`.
+    ///
+    /// Comparing `kid` strings alone would be worthless: `kid` is a label
+    /// chosen by whoever wrote the key set. What makes this meaningful is that
+    /// each [`LedgerKey`] derives its expected identifier from its own key
+    /// material, so an entry claiming the service's `kid` while holding a
+    /// different point is already marked as unbound. Requiring both means the
+    /// set must contain the actual public key from the certificate.
+    ///
+    /// Lives here rather than in the network crate because a caller that
+    /// obtained the key set over a channel it cannot authenticate, such as a
+    /// browser reading through a proxy, needs the same check and must not
+    /// carry a second implementation of it.
+    pub fn service_key(
+        &self,
+        service_key_kid: &str,
+    ) -> std::result::Result<&LedgerKey, ServiceKeyMismatch> {
+        let mut matching = self.keys.iter().filter(|k| k.kid == service_key_kid);
+        let key = matching.next().ok_or(ServiceKeyMismatch::Absent)?;
+
+        // Two entries claiming the same identifier make "the key with this
+        // kid" ambiguous, and a verifier resolving a receipt by kid would pick
+        // one of them for reasons no policy author ever stated.
+        if matching.next().is_some() {
+            return Err(ServiceKeyMismatch::Ambiguous);
+        }
+
+        if !key.kid_bound_to_key {
+            return Err(ServiceKeyMismatch::Unbound);
+        }
+
+        Ok(key)
+    }
+
+    /// A set holding only `key`, keeping this set's revocations.
+    ///
+    /// For a caller that can vouch for one key and nothing else. Every other
+    /// entry then resolves as an unknown `kid`, so a receipt signed by one of
+    /// them is reported as unevaluated rather than verified on the word of
+    /// whoever served the set.
+    pub fn restricted_to(&self, key: &LedgerKey) -> LedgerKeySet {
+        LedgerKeySet {
+            keys: vec![key.clone()],
+            revoked_kids: self.revoked_kids.clone(),
+            skipped: Vec::new(),
+        }
+    }
+}
+
+/// Why a key set could not be tied to a service certificate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceKeyMismatch {
+    /// No entry claims the certificate's key identifier.
+    Absent,
+    /// More than one entry claims it.
+    Ambiguous,
+    /// The one entry claiming it holds different key material.
+    Unbound,
+}
+
+impl ServiceKeyMismatch {
+    /// A stable code for structured output.
+    pub fn code(self) -> &'static str {
+        match self {
+            ServiceKeyMismatch::Absent => "absent",
+            ServiceKeyMismatch::Ambiguous => "ambiguous",
+            ServiceKeyMismatch::Unbound => "unbound",
+        }
+    }
 }
 
 fn parse_cose_key(entry: &CborValue) -> Result<LedgerKey> {

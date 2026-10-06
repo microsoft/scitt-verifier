@@ -79,6 +79,7 @@ NOT_THE_ARTIFACT = b"Hello from MST Team!"
 # particular service is what made the last regeneration touch the test suite,
 # the workflows and the demo. Replacing the ledger should not rename a file.
 KEY_SET_NAME = "mst-test-scitt-keys.cbor"
+SERVICE_CERT_NAME = "mst-test-service-cert.pem"
 
 # The CWT subject of the base statement. Several policy tests match on it
 # exactly, so it is part of the corpus's contract rather than a free choice.
@@ -640,6 +641,13 @@ def main() -> int:
 
     keys = client.get("/.well-known/scitt-keys").read()
     emit(KEY_SET_NAME, keys)
+    # Captured with the key set so the two always describe the same service.
+    # Normalised to LF because `.gitattributes` does the same on checkout.
+    service_pem = bundle.read_text().strip().replace("\r\n", "\n") + "\n"
+    emit(SERVICE_CERT_NAME, service_pem.encode("ascii"))
+    cert = x509.load_pem_x509_certificate(service_pem.encode("ascii"))
+    print("\nservice certificate sha-256 for service_key.rs and corpus.node.mjs:", file=sys.stderr)
+    print(f"  {hashlib.sha256(der(cert)).hexdigest()}", file=sys.stderr)
 
     emit("artifact.bin", ARTIFACT)
     emit("bad-artifact.bin", NOT_THE_ARTIFACT)

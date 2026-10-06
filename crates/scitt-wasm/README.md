@@ -75,6 +75,7 @@ the boundary have to agree for the pinned digests to come out right.
 | Export | Returns |
 |---|---|
 | `verifyStatement(statement, keySet)` | Facts about the statement and every receipt |
+| `verifyStatementWithServiceCert(statement, keySet, serviceCertPem)` | The same facts, using only the key set entry bound to the service certificate; for a key set fetched over a channel the page cannot authenticate |
 | `evaluatePolicy(statement, keySet, policy, now)` | One outcome per assertion in a caller-supplied policy |
 | `bindArtifact(statement, artifact, mode, artifactName)` | Whether the statement is about *this* file |
 | `inspectStatement(statement)` | Structure only, with no trust material and therefore no evidence |

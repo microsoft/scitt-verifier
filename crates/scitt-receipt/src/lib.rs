@@ -55,7 +55,7 @@ pub mod statement;
 
 pub use binding::{bind, Binding, BindingMode, BindingReason, BindingReport};
 pub use error::{Error, Result};
-pub use keys::{KeyLookup, LedgerKey, LedgerKeySet};
+pub use keys::{KeyLookup, LedgerKey, LedgerKeySet, ServiceKeyMismatch};
 pub use receipt::{
     describe_inclusion_proof, describe_receipt, verify_receipt, InclusionProof, ProofStep,
     ReceiptFacts, ReceiptSummary,

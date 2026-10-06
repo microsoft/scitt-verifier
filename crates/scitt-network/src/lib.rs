@@ -27,7 +27,7 @@ pub mod provider;
 pub use error::{AcquireError, Diagnostic};
 pub use provider::{route_for, validate_host, Route};
 
-use scitt_receipt::{sha256_hex, spki_from_certificate_der, LedgerKeySet};
+use scitt_receipt::{sha256_hex, spki_from_certificate_der, LedgerKeySet, ServiceKeyMismatch};
 use std::time::Instant;
 use ureq::tls::Certificate;
 
@@ -434,15 +434,6 @@ fn parse_identity_document(bytes: &[u8]) -> Result<Certificate<'static>, Acquire
     })
 }
 
-/// Require the authenticated ledger's own key to be in the set it served.
-///
-/// Comparing `kid` strings alone would be worthless here: `kid` is a label
-/// chosen by whoever wrote the key set. What makes this check meaningful is
-/// that [`LedgerKeySet`] derives each key's expected identifier from the key
-/// material itself, so a key claiming the service's `kid` while holding a
-/// different point is already marked as unbound. Requiring both means the set
-/// must contain the actual public key from the certificate the identity service
-/// published.
 /// Identifiers that more than one key in the set claims.
 ///
 /// Only the service key's own identifier is treated as fatal elsewhere; every
@@ -461,54 +452,30 @@ fn ambiguous_kids(keys: &LedgerKeySet) -> Vec<String> {
     out
 }
 
+/// Require the authenticated ledger's own key to be in the set it served.
+///
+/// The check itself is [`LedgerKeySet::service_key`], shared with callers that
+/// cannot authenticate the ledger connection; this only words the failure.
 fn check_service_key_present(
     keys: &LedgerKeySet,
     service_key_kid: &str,
     issuer: &str,
 ) -> Result<(), AcquireError> {
-    let matching = keys
-        .keys
-        .iter()
-        .filter(|k| k.kid == service_key_kid)
-        .count();
-
-    if matching == 0 {
-        return Err(AcquireError::new(
-            Diagnostic::ServiceKeyMismatch,
-            format!(
-                "the key set served by {issuer} does not contain the service key \
-                 {service_key_kid} that its identity service published"
-            ),
-        ));
-    }
-
-    // Two entries claiming the same identifier make "the key with this kid"
-    // ambiguous, and a verifier resolving a receipt by kid would pick one of
-    // them for reasons no policy author ever stated.
-    if matching > 1 {
-        return Err(AcquireError::new(
-            Diagnostic::ServiceKeyMismatch,
-            format!("{issuer} served more than one key with identifier {service_key_kid}"),
-        ));
-    }
-
-    let key = keys
-        .keys
-        .iter()
-        .find(|k| k.kid == service_key_kid)
-        .expect("just counted exactly one");
-
-    if !key.kid_bound_to_key {
-        return Err(AcquireError::new(
-            Diagnostic::ServiceKeyMismatch,
-            format!(
-                "{issuer} served a key labelled {service_key_kid} whose material does not \
-                 hash to that identifier"
-            ),
-        ));
-    }
-
-    Ok(())
+    let why = match keys.service_key(service_key_kid) {
+        Ok(_) => return Ok(()),
+        Err(ServiceKeyMismatch::Absent) => format!(
+            "the key set served by {issuer} does not contain the service key \
+             {service_key_kid} that its identity service published"
+        ),
+        Err(ServiceKeyMismatch::Ambiguous) => {
+            format!("{issuer} served more than one key with identifier {service_key_kid}")
+        }
+        Err(ServiceKeyMismatch::Unbound) => format!(
+            "{issuer} served a key labelled {service_key_kid} whose material does not \
+             hash to that identifier"
+        ),
+    };
+    Err(AcquireError::new(Diagnostic::ServiceKeyMismatch, why))
 }
 
 #[cfg(test)]

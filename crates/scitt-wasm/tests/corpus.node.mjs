@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import {
   verifyStatement,
+  verifyStatementWithServiceCert,
   inspectStatement,
   claimDigest,
   evaluatePolicy,
@@ -375,6 +376,50 @@ check('an unknown mode is refused, not guessed', modeThrew, true);
 const unnamed = JSON.parse(bindArtifact(genuine, artifact, 'payload-bytes', ''));
 check('an unnamed artifact still reads as a sentence',
   unnamed.detail.includes('the artifact'), true);
+
+// ---------------------------------------------------------------------------
+// 14. Verifying with only the key the service certificate vouches for.
+//
+//     The path a browser takes when the key set came through a proxy it
+//     cannot authenticate: the certificate is the anchor, and every other key
+//     in the set is discarded rather than trusted on the proxy's word.
+// ---------------------------------------------------------------------------
+console.log('\n--- service certificate binding ---');
+const serviceCert = readFileSync(join(fixtures, 'mst-test-service-cert.pem'), 'utf8');
+const SERVICE_CERT_SHA256 = 'b021d80900d21bead1fb8b98f9442d7ed94ab5aa5bf26216202eb615e86dc768';
+
+const anchored = JSON.parse(verifyStatementWithServiceCert(genuine, keys, serviceCert));
+check('the key set is bound to the certificate', anchored.serviceKey.bound, true);
+check('the certificate is identified', anchored.serviceKey.certificateSha256, SERVICE_CERT_SHA256);
+check('the service key signed this receipt', anchored.receipts[0].kid, anchored.serviceKey.kid);
+check('the receipt verifies under it alone', anchored.receipts[0].fullyVerified, true);
+check('the facts agree with unanchored verification', anchored.claimDigest, PINNED.claimDigest);
+check('set-aside keys are counted', anchored.keySet.unvouchedKeyCount, verified.keySet.keyCount - 1);
+
+const unanchored = JSON.parse(verifyStatementWithServiceCert(genuine, staleKeys, serviceCert));
+check('a key set without the service key is not bound', unanchored.serviceKey.bound, false);
+check('and says why', unanchored.serviceKey.mismatch, 'absent');
+check('and verifies nothing', unanchored.receipts, undefined);
+
+// A tampered statement is still a finding, not an exception, on this path.
+const anchoredTampered = JSON.parse(
+  verifyStatementWithServiceCert(read('tampered-statement.cose'), keys, serviceCert));
+check('a tampered receipt still fails under the service key',
+  anchoredTampered.receipts[0].rootSignatureValid, false);
+
+for (const [label, pem] of [
+  ['an empty anchor', ''],
+  ['two certificates', serviceCert + serviceCert],
+  ['a non-certificate block', '-----BEGIN PRIVATE KEY-----\nAA==\n-----END PRIVATE KEY-----\n'],
+]) {
+  let refused = false;
+  try {
+    verifyStatementWithServiceCert(genuine, keys, pem);
+  } catch {
+    refused = true;
+  }
+  check(`${label} is refused`, refused, true);
+}
 
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`);
 process.exit(failures === 0 ? 0 : 1);
