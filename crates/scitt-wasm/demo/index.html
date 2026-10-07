@@ -59,6 +59,11 @@
   select { background: #21262d; color: var(--ink); border: 1px solid var(--line);
            border-radius: 7px; padding: 6px 9px; font-family: var(--mono);
            font-size: 12px; cursor: pointer; }
+  input[type=text] { background: #0d1017; color: var(--ink); border: 1px solid var(--line);
+           border-radius: 7px; padding: 6px 9px; font-family: var(--mono);
+           font-size: 12px; min-width: 340px; flex: 1; }
+  h3 { font-size: 13px; margin: 18px 0 4px; font-weight: 600; }
+  button.small { padding: 3px 9px; font-size: 12px; font-family: var(--mono); }
 
   #verdict { display: none; }
   #verdict.on { display: block; }
@@ -143,6 +148,23 @@
       </span>
       <button class="primary" id="run">Verify</button>
     </div>
+    <div class="row">
+      <span style="color:var(--dim);font-size:12.5px">Trust anchors</span>
+      <label class="file"><span class="chip" id="c-roots">Trusted roots (.pem, optional)</span>
+        <input type="file" id="f-roots"></label>
+      <button id="clear-roots" style="display:none">Clear roots</button>
+      <label class="file"><span class="chip" id="c-service">Service certificate (.pem, optional)</span>
+        <input type="file" id="f-service"></label>
+      <button id="clear-service" style="display:none">Clear certificate</button>
+    </div>
+    <p class="hint">
+      <b>Trusted roots</b> are CAs you already trust; the signer's chain must lead to
+      one of them. Without them the chain is checked only against the root the
+      statement carries, which proves consistency, not identity.
+      <b>Service certificate</b> is the ledger's TLS certificate, from its identity
+      service; only the key it vouches for is used to check receipts, so a key set
+      that arrived through a proxy cannot add keys of its own.
+    </p>
     <p class="hint" id="loaded-note"></p>
     <p class="hint" id="binding-hint" style="display:none">
       You declare how the artifact relates to the statement; it is never
@@ -191,6 +213,36 @@
         <summary id="payload-summary">Payload content</summary>
         <pre id="payload-body"></pre>
       </details>
+      <div id="decode" style="display:none">
+        <h3>Decode a claim</h3>
+        <p class="hint" style="margin-top:0">
+          Producers embed whole documents &mdash; a security policy, an SBOM &mdash; as
+          encoded strings. Name the claim and its encoding; nothing is decoded that
+          you did not ask for, and no encoding is guessed. The digest is over the
+          exact decoded bytes, so it compares directly with one a producer
+          publishes. Decoding is not verification: these bytes are only as
+          trustworthy as the verdict above.
+        </p>
+        <div class="row" id="decode-suggest"></div>
+        <div class="row">
+          <input type="text" id="decode-path" spellcheck="false"
+                 placeholder="['security-policy-base64']">
+          <select id="decode-as">
+            <option value="base64">base64</option>
+            <option value="base64url">base64url</option>
+          </select>
+          <button class="primary" id="decode-run">Decode</button>
+        </div>
+        <div class="err" id="decode-error" style="margin-top:10px"></div>
+        <table id="decode-meta" style="margin-top:10px"></table>
+        <details id="decode-details" style="display:none">
+          <summary id="decode-summary"></summary>
+          <pre id="decode-body"></pre>
+        </details>
+        <div class="row" style="margin-top:10px">
+          <button id="decode-save" style="display:none">Save the exact bytes</button>
+        </div>
+      </div>
     </div>
 
     <div class="panel">
@@ -200,10 +252,8 @@
         it fails is a gap its readers never learn about.
       </p>
       <ul class="gaps">
-        <li><b>The certificate chain was not validated to a trusted root.</b>
-          The statement's signature was checked against the leaf certificate
-          carried inside it. Nothing here establishes that the leaf belongs to
-          the organisation named in it.</li>
+        <li id="gap-chain"></li>
+        <li id="gap-keys"></li>
         <li><b>Revocation was not checked.</b> No CRL or OCSP was consulted, and
           could not be &mdash; this page makes no network requests.</li>
         <li id="gap-artifact"><b>The artifact was not bound.</b> This build takes a statement, not
@@ -247,7 +297,8 @@ const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({'&':'&amp;','<':'&lt;','
 // results so that re-evaluating a policy re-derives the facts from the same
 // source, instead of from something the page has been holding and could have
 // altered.
-const state = { statement: null, keys: null, artifact: null, artifactName: null, label: null };
+const state = { statement: null, keys: null, artifact: null, artifactName: null, label: null,
+                roots: null, serviceCert: null };
 
 const TAG = { pass: 't-pass', fail: 't-fail', warn: 't-warn', none: 't-none' };
 const tag = (kind, label) => `<span class="tag ${TAG[kind]}">${esc(label)}</span>`;
@@ -261,13 +312,32 @@ const tag = (kind, label) => `<span class="tag ${TAG[kind]}">${esc(label)}</span
 // binding. A page that let a policy pass paper over a broken signature would be
 // a worse tool than no page at all.
 // ---------------------------------------------------------------------------
-function decide(facts, policy, binding) {
+function decide(facts, policy, binding, rootsSupplied) {
   const receipts = facts.receipts || [];
+  const chain = facts.chainValidation || {};
 
   if (facts.signatureValid === false) {
     return { kind: 'fail', mark: '\u2718', headline: 'Failed',
       because: "The statement's own signature did not verify. These bytes are " +
                'not what the signer signed, so nothing else here is evidence about them.' };
+  }
+
+  // A chain that was evaluated and is broken is evidence against the signer,
+  // whether or not trusted roots were supplied.
+  if (chain.outcome === 'invalid') {
+    return { kind: 'fail', mark: '\u2718', headline: 'Failed',
+      because: "The signer's certificate chain did not validate" +
+               (rootsSupplied ? ' to any of the trusted roots you supplied' : '') +
+               '. The signature is over these bytes, but by a certificate nothing vouches for.' };
+  }
+
+  // Anchoring was asked for and could not be established. That is not a
+  // forgery finding, and it is not a pass either.
+  if (rootsSupplied && chain.outcome !== 'valid') {
+    return { kind: 'none', mark: '\u2014', headline: 'Unavailable',
+      because: 'You supplied trusted roots, but the chain could not be evaluated against ' +
+               'them (' + (chain.reason || chain.outcome || 'not evaluated') + '). ' +
+               'The anchoring you asked for was not established.' };
   }
 
   if (!facts.anyReceiptVerified) {
@@ -374,6 +444,81 @@ function renderBindingGap(binding) {
       'Load one above, or use the CLI\u2019s <code>--artifact</code>.';
 }
 
+// The chain row distinguishes the case that matters most: a chain that is
+// internally consistent up to the root it carries proves nothing about who
+// signed, because anyone can mint a root and a consistent chain under it.
+function chainRow(facts) {
+  const c = facts.chainValidation || {};
+  if (c.outcome === 'valid') {
+    const reg = facts.certificatesValidAtRegistration === true
+      ? ' Every certificate was in its validity window at registration.'
+      : facts.certificatesValidAtRegistration === false
+        ? ' Not every certificate was in its validity window at registration.' : '';
+    return ['Signer certificate chain',
+      c.anchoredExternally ? tag('pass', 'Anchored') : tag('warn', 'Self-anchored'),
+      (c.anchoredExternally
+        ? 'Validated to a root you supplied.'
+        : 'Consistent up to the root the statement carries; no trusted root was supplied.') +
+      ` ${c.pathLength} certificate(s); root SHA-256 ${c.rootSha256}.` + reg];
+  }
+  if (c.outcome === 'invalid') {
+    return ['Signer certificate chain', tag('fail', 'Invalid'), c.reason || ''];
+  }
+  const label = c.outcome === 'unsupported' ? 'Unsupported'
+              : c.outcome === 'insufficient' ? 'Insufficient' : 'Not evaluated';
+  return ['Signer certificate chain', tag('none', label), c.reason || ''];
+}
+
+function serviceKeyRow(facts) {
+  const s = facts.serviceKey;
+  if (!s) {
+    return ['Ledger key vouched for by', tag('none', 'Nothing'),
+      'No service certificate was supplied, so every key in the key set was trusted as served.'];
+  }
+  return ['Ledger key vouched for by',
+    s.bound ? tag('pass', 'Service certificate') : tag('fail', 'Not in key set'),
+    `Certificate SHA-256 ${s.certificateSha256}; key ${hexish(s.kid, 16)}` +
+    (s.bound
+      ? (facts.keySet && facts.keySet.unvouchedKeyCount
+          ? ` \u2014 ${facts.keySet.unvouchedKeyCount} other served key(s) set aside`
+          : '')
+      : ` \u2014 ${s.mismatch}`)];
+}
+
+function renderChainGap(facts) {
+  const li = $('gap-chain');
+  const c = (facts && facts.chainValidation) || {};
+  if (c.outcome === 'valid' && c.anchoredExternally) {
+    li.style.display = 'none';
+    return;
+  }
+  li.style.display = '';
+  if (c.outcome === 'valid') {
+    li.innerHTML = '<b>The certificate chain was validated only against the root carried ' +
+      'inside the statement.</b> That proves the chain is consistent, not who signed: an ' +
+      'attacker who mints their own root produces an equally consistent chain. Supply ' +
+      'trusted roots above to anchor it.';
+  } else if (c.outcome === 'unsupported' || c.outcome === 'insufficient') {
+    li.innerHTML = '<b>The certificate chain was not validated.</b> ' + esc(c.reason || '') +
+      ' The statement\u2019s signature was checked against the leaf it carries, and ' +
+      'nothing here establishes that the leaf belongs to the organisation named in it.';
+  } else {
+    li.innerHTML = '<b>The certificate chain was not validated to a trusted root.</b>';
+  }
+}
+
+function renderKeysGap(facts) {
+  const li = $('gap-keys');
+  if (facts && facts.serviceKey && facts.serviceKey.bound) {
+    li.style.display = 'none';
+    return;
+  }
+  li.style.display = '';
+  li.innerHTML = '<b>The ledger key set was not tied to the service.</b> Receipts were ' +
+    'checked against whatever keys you loaded. Supply the service certificate above so ' +
+    'only the key it vouches for is used.';
+}
+
 function renderEvidence(facts, inspected, binding) {
   const r = (facts.receipts || [])[0] || {};
   const cwt = facts.cwt || {};
@@ -398,11 +543,13 @@ function renderEvidence(facts, inspected, binding) {
       `Leaf of a ${facts.certificateChainLength || 0}-certificate chain, issued by ` +
       (facts.leafIssuer || 'an unnamed issuer')],
     ['Statement signature', sig, 'Checked against the leaf certificate above'],
+    chainRow(facts),
     ['Claim digest', `<span title="${esc(facts.claimDigest || '')}">${esc(hexish(facts.claimDigest, 32))}</span>`,
       'The identity of these bytes. This is what a receipt commits to.'],
     ['Transparency service', esc(r.issuer || '\u2014'),
       'Reported, not enforced \u2014 assert on it in policy if it matters'],
     ['Receipt signature', root, `Signed with key ${hexish(r.kid, 16)}`],
+    serviceKeyRow(facts),
     ['Receipt commits to these bytes', bound,
       'The check that separates a receipt about this artifact from a genuine receipt about another'],
     ['Registered', esc(when), r.registeredAt ? `Unix ${r.registeredAt}` : ''],
@@ -521,9 +668,35 @@ function run() {
     return showError('Load a statement and a key set first.');
   }
   try {
-    const facts = JSON.parse(wasm_bindgen.verifyStatement(state.statement, state.keys));
+    const roots = state.roots || undefined;
+    const factsJson = state.serviceCert
+      ? wasm_bindgen.verifyStatementWithServiceCert(
+          state.statement, state.keys, state.serviceCert, roots)
+      : wasm_bindgen.verifyStatement(state.statement, state.keys, roots);
+    const facts = JSON.parse(factsJson);
     const inspected = JSON.parse(wasm_bindgen.inspectStatement(state.statement));
     const payload = JSON.parse(wasm_bindgen.statementPayload(state.statement));
+
+    // The service certificate vouches for no key in the set: nothing was
+    // verified, because there was nothing it would have been honest to verify
+    // with. Stop here rather than evaluate policy over an unchecked receipt.
+    if (facts.serviceKey && facts.serviceKey.bound === false) {
+      setBanner({ kind: 'none', mark: '\u2014', headline: 'Unavailable',
+        because: 'The key set holds no key bound to the service certificate you supplied ' +
+                 `(${facts.serviceKey.mismatch}). It may be another service\u2019s keys, a stale ` +
+                 'download, or a substitution; either way no receipt was checked.' });
+      $('evidence').innerHTML = rows([serviceKeyRow(facts)]);
+      $('raw-facts').textContent = JSON.stringify(facts, null, 2);
+      $('raw-inspect').textContent = JSON.stringify(inspected, null, 2);
+      renderPayload(payload);
+      renderDecodePanel(payload);
+      renderPolicy(null);
+      renderBindingGap(null);
+      renderChainGap(null);
+      renderKeysGap(facts);
+      $('verdict').classList.add('on');
+      return;
+    }
 
     let decision = null;
     const src = $('policy').value.trim();
@@ -531,7 +704,8 @@ function run() {
       const r0 = (facts.receipts || [])[0];
       const now = r0 && r0.registeredAt ? r0.registeredAt + 60 : Math.floor(Date.now() / 1000);
       decision = JSON.parse(wasm_bindgen.evaluatePolicy(
-        state.statement, state.keys, new TextEncoder().encode(src), now));
+        state.statement, state.keys, new TextEncoder().encode(src), now,
+        roots, state.serviceCert || undefined));
     }
 
     // Only when an artifact was actually supplied. Comparing against nothing
@@ -543,20 +717,130 @@ function run() {
         state.artifactName || ''));
     }
 
-    const v = decide(facts, decision, binding);
-    $('banner').className = 'banner v-' + v.kind;
-    $('banner-mark').textContent = v.mark;
-    $('banner-headline').textContent = v.headline;
-    $('banner-because').textContent = v.because;
+    setBanner(decide(facts, decision, binding, !!state.roots));
 
     renderEvidence(facts, inspected, binding);
     renderPayload(payload);
+    renderDecodePanel(payload);
     renderPolicy(decision);
     renderBindingGap(binding);
+    renderChainGap(facts);
+    renderKeysGap(facts);
     $('verdict').classList.add('on');
   } catch (e) {
     showError(e);
   }
+}
+
+function setBanner(v) {
+  $('banner').className = 'banner v-' + v.kind;
+  $('banner-mark').textContent = v.mark;
+  $('banner-headline').textContent = v.headline;
+  $('banner-because').textContent = v.because;
+}
+
+// ---------------------------------------------------------------------------
+// Decoding a claim. Suggestions are offered for string claims whose name says
+// they are base64, but clicking one only fills the path: the operator still
+// chooses the encoding and asks for the decode. The result is shown with
+// textContent, never as markup, because it is producer-controlled bytes.
+// ---------------------------------------------------------------------------
+let decoded = null;
+
+function resetDecode() {
+  decoded = null;
+  $('decode-error').textContent = '';
+  $('decode-meta').innerHTML = '';
+  $('decode-details').style.display = 'none';
+  $('decode-save').style.display = 'none';
+}
+
+const pathLiteral = (segs) =>
+  '[' + segs.map((s) => (typeof s === 'number' ? String(s) : `'${s}'`)).join(', ') + ']';
+
+function findEncodedClaims(value, path, out) {
+  if (out.length >= 8 || value === null || typeof value !== 'object') return;
+  for (const [k, v] of Object.entries(value)) {
+    const key = Array.isArray(value) ? Number(k) : k;
+    if (typeof key === 'string' && /['\\]/.test(key)) continue;
+    const next = path.concat([key]);
+    if (typeof v === 'string' && typeof key === 'string' && /base64/i.test(key)) {
+      out.push(next);
+    } else {
+      findEncodedClaims(v, next, out);
+    }
+  }
+}
+
+function renderDecodePanel(p) {
+  resetDecode();
+  const isText = !p.detached && !p.hashEnvelope && p.text !== null && p.text !== undefined;
+  $('decode').style.display = isText ? '' : 'none';
+  const sug = $('decode-suggest');
+  sug.textContent = '';
+  if (!isText) return;
+  let parsed;
+  try { parsed = JSON.parse(p.text); } catch { return; }
+  const found = [];
+  findEncodedClaims(parsed, [], found);
+  if (!found.length) return;
+  const lead = document.createElement('span');
+  lead.className = 'hint';
+  lead.style.margin = '0';
+  lead.textContent = 'Claims that look encoded:';
+  sug.appendChild(lead);
+  for (const segs of found) {
+    const b = document.createElement('button');
+    b.className = 'small';
+    b.textContent = pathLiteral(segs);
+    b.addEventListener('click', () => { $('decode-path').value = pathLiteral(segs); });
+    sug.appendChild(b);
+  }
+}
+
+function hexToBytes(hex) {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.substr(i * 2, 2), 16);
+  return out;
+}
+
+function decodeClaimNow() {
+  resetDecode();
+  if (!state.statement) return;
+  try {
+    const d = JSON.parse(wasm_bindgen.decodeClaim(
+      state.statement, $('decode-path').value, $('decode-as').value));
+    decoded = d;
+    $('decode-meta').innerHTML = rows([
+      ['Claim', esc(d.path), ''],
+      ['Encoding', esc(d.encoding), ''],
+      ['Decoded size', esc(`${d.length} bytes`), ''],
+      ['SHA-256 of the decoded bytes', esc(d.sha256),
+        'Compare with a digest the producer publishes, such as a *-sha256 claim.'],
+    ]);
+    $('decode-details').style.display = '';
+    if (d.utf8) {
+      $('decode-summary').textContent = 'Decoded content (UTF-8 text)';
+      $('decode-body').textContent = d.text;
+    } else {
+      $('decode-summary').textContent = 'Decoded content (binary \u2014 shown as hex)';
+      $('decode-body').textContent = (d.hex || '').replace(/(.{64})/g, '$1\n');
+    }
+    $('decode-save').style.display = '';
+  } catch (e) {
+    $('decode-error').textContent = String(e && e.message ? e.message : e);
+  }
+}
+
+function saveDecoded() {
+  if (!decoded) return;
+  const bytes = decoded.utf8 ? new TextEncoder().encode(decoded.text) : hexToBytes(decoded.hex || '');
+  const url = URL.createObjectURL(new Blob([bytes], { type: 'application/octet-stream' }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'claim-' + decoded.sha256.slice(0, 12) + '.bin';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function clearArtifact() {
@@ -569,6 +853,26 @@ function clearArtifact() {
   $('binding-hint').style.display = 'none';
 }
 
+function clearTrust(which) {
+  const spec = which === 'roots'
+    ? ['roots', 'f-roots', 'c-roots', 'clear-roots', 'Trusted roots (.pem, optional)']
+    : ['serviceCert', 'f-service', 'c-service', 'clear-service', 'Service certificate (.pem, optional)'];
+  state[spec[0]] = null;
+  $(spec[1]).value = '';
+  $(spec[2]).classList.remove('loaded');
+  $(spec[2]).textContent = spec[4];
+  $(spec[3]).style.display = 'none';
+}
+
+function setTrust(which, pem, name) {
+  const spec = which === 'roots' ? ['roots', 'c-roots', 'clear-roots']
+                                 : ['serviceCert', 'c-service', 'clear-service'];
+  state[spec[0]] = pem;
+  $(spec[1]).classList.add('loaded');
+  $(spec[1]).textContent = name;
+  $(spec[2]).style.display = '';
+}
+
 function loadScenario(s) {
   state.statement = b64(s.statement);
   state.keys = b64(s.keys);
@@ -578,6 +882,13 @@ function loadScenario(s) {
   $('c-keys').classList.remove('loaded');
   $('c-statement').textContent = 'Statement (.cose)';
   $('c-keys').textContent = 'Ledger keys (.cbor)';
+  // Trust anchors belong to the scenario that set them; carrying them into the
+  // next one would quietly change what that scenario demonstrates.
+  clearTrust('roots');
+  clearTrust('service');
+  if (s.roots) setTrust('roots', s.roots, s.rootsName || 'trusted-roots.pem');
+  if (s.serviceCert) setTrust('service', s.serviceCert, s.serviceCertName || 'service-cert.pem');
+  $('decode-path').value = '';
   // A scenario replaces the statement, so an artifact left over from the last
   // one would be compared against bytes it was never meant to describe.
   clearArtifact();
@@ -644,6 +955,20 @@ function wireFile(inputId, chipId, field) {
   });
   $('clear-artifact').addEventListener('click', () => { clearArtifact(); run(); });
   $('binding-mode').addEventListener('change', run);
+
+  for (const [which, input] of [['roots', 'f-roots'], ['service', 'f-service']]) {
+    $(input).addEventListener('change', async (ev) => {
+      const f = ev.target.files[0];
+      if (!f) return;
+      setTrust(which, await f.text(), f.name);
+      run();
+    });
+  }
+  $('clear-roots').addEventListener('click', () => { clearTrust('roots'); run(); });
+  $('clear-service').addEventListener('click', () => { clearTrust('service'); run(); });
+  $('decode-run').addEventListener('click', decodeClaimNow);
+  $('decode-path').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') decodeClaimNow(); });
+  $('decode-save').addEventListener('click', saveDecoded);
 
   if (SCENARIOS.length) loadScenario(SCENARIOS[0]);
 })();

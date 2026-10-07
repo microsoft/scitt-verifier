@@ -13,6 +13,7 @@
 //   node demo/verify.mjs
 
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import vm from 'node:vm';
@@ -38,6 +39,8 @@ const el = (id) => {
         contains(c) { return this._s.has(c); },
       },
       addEventListener() {},
+      appendChild() {},
+      click() {},
       getAttribute() { return null; },
       setAttribute() {},
     });
@@ -120,6 +123,12 @@ const EXPECTED = [
   ['Unavailable',                             'v-none'],
   ['Verified \u2014 and about this artifact', 'v-pass'],
   ['Wrong artifact',                          'v-fail'],
+  ['Unavailable',                             'v-none'],
+  ['Verified',                                'v-pass'],
+  ['Policy not satisfied',                    'v-warn'],
+  ['Verified',                                'v-pass'],
+  ['Failed',                                  'v-fail'],
+  ['Verified',                                'v-pass'],
   ['Unavailable',                             'v-none'],
 ];
 
@@ -241,6 +250,91 @@ check('and never reports a mismatch it has no evidence for',
   el('evidence').innerHTML.includes('Mismatch'), false);
 contains('naming the hash envelope as the reason', el('evidence').innerHTML, 'Hash Envelope');
 check('never styled as a failure', el('banner').className.includes('v-fail'), false);
+
+// A payload assertion is evaluated over the signed document, not the page's
+// rendering of it. Only one rule differs between the two scenarios, so only
+// one row may change outcome.
+console.log('\n--- payload claims are policy, evaluated inside the signature ---');
+const claims = load(8);
+contains('payload assertions are rendered', claims.assertions, 'payloadJson');
+check('none of them fail', claims.assertions.includes('t-fail'), false);
+const claimMiss = load(9);
+contains('a failing payload assertion is rendered', claimMiss.assertions, 't-fail');
+contains('naming the claim it read', claimMiss.assertions, 'source-repository');
+check('exactly one assertion fails', (claimMiss.assertions.match(/t-fail/g) || []).length, 1);
+contains('the statement itself is still genuine', claimMiss.evidence, 'Valid');
+
+// A chain consistent up to the root it carries proves nothing about who signed.
+// The page must say so on success, and stop saying it only once a root the
+// operator trusts has been supplied.
+console.log('\n--- the signer chain: consistent is not anchored ---');
+const selfAnchored = load(0);
+contains('the chain row is rendered', selfAnchored.evidence, 'Signer certificate chain');
+contains('a chain with no supplied root is self-anchored', selfAnchored.evidence, 'Self-anchored');
+check('and the verdict does not hide that', el('gap-chain').style.display, '');
+contains('the gap explains why that is weak', el('gap-chain').innerHTML, 'mints their own root');
+
+const anchored = load(10);
+contains('a supplied root anchors the chain', anchored.evidence, 'Anchored');
+contains('naming the root by digest', anchored.evidence, 'root SHA-256');
+check('the chain gap is closed', el('gap-chain').style.display, 'none');
+
+const wrongRoot = load(11);
+contains('a root the chain does not reach is a failure', wrongRoot.because, 'did not validate');
+contains('and says it was the roots supplied', wrongRoot.because, 'trusted roots you supplied');
+contains('the chain row is marked invalid', wrongRoot.evidence, 'Invalid');
+contains('the statement signature is still reported valid', wrongRoot.evidence, 'Valid');
+
+// Roots belong to their scenario. Carrying them forward would turn a later
+// "Verified" into an anchoring claim nobody made.
+load(0);
+contains('roots do not leak into the next scenario', el('evidence').innerHTML, 'Self-anchored');
+
+console.log('\n--- an ECDSA chain is unsupported, not failed ---');
+contains('the image-reproduction chain is reported as unsupported', claims.evidence, 'Unsupported');
+check('and that does not fail the statement', claims.banner, 'banner v-pass');
+
+console.log('\n--- the service certificate decides which key may vouch ---');
+const vouched = load(12);
+contains('the vouching key is shown', vouched.evidence, 'Ledger key vouched for by');
+contains('as bound to the certificate', vouched.evidence, 'Service certificate');
+check('the key-set gap is closed', el('gap-keys').style.display, 'none');
+contains('and the policy was evaluated under it', vouched.assertions, 't-pass');
+
+const unvouched = load(13);
+contains('an unbound key set is explained', unvouched.because, 'no key bound to the service certificate');
+contains('naming why', unvouched.because, 'absent');
+contains('the evidence names the mismatch', unvouched.evidence, 'Not in key set');
+check('no policy is evaluated over an unchecked receipt', el('policy-meta').textContent, '');
+check('not styled as a failure', unvouched.banner.includes('v-fail'), false);
+
+load(0);
+check('without a certificate the key-set gap is stated', el('gap-keys').style.display, '');
+
+// Decoding is a view onto bytes the signature already covers. The digest must
+// be of the decoded bytes, because that is what a producer publishes.
+console.log('\n--- decoding a claim ---');
+load(7);
+check('no decode panel for a hash envelope', el('decode').style.display, 'none');
+load(8);
+check('the decode panel is offered for a JSON payload', el('decode').style.display, '');
+const payloadText = vm.runInContext(
+  'JSON.parse(wasm_bindgen.statementPayload(state.statement)).text', ctx);
+const commit = JSON.parse(payloadText).component.provenance['source-commit'];
+const commitSha = createHash('sha256').update(Buffer.from(commit, 'base64')).digest('hex');
+el('decode-path').value = "['component', 'provenance', 'source-commit']";
+el('decode-as').value = 'base64';
+vm.runInContext('decodeClaimNow()', ctx);
+check('decoded without an error', el('decode-error').textContent, '');
+contains('the digest is of the decoded bytes', el('decode-meta').innerHTML, commitSha);
+contains('binary is shown as hex', el('decode-summary').textContent, 'hex');
+check('the bytes can be saved', el('decode-save').style.display, '');
+
+el('decode-path').value = "['component', 'nothing-here']";
+vm.runInContext('decodeClaimNow()', ctx);
+check('a missing claim is an error, not an empty result', el('decode-error').textContent.length > 0, true);
+check('and leaves no stale result behind', el('decode-meta').innerHTML, '');
+check('nor a stale download', el('decode-save').style.display, 'none');
 
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`);
 process.exit(failures === 0 ? 0 : 1);

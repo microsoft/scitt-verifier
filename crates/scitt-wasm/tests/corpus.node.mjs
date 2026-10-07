@@ -22,6 +22,8 @@ import {
   evaluatePolicy,
   statementPayload,
   bindArtifact,
+  describeCertificate,
+  decodeClaim,
 } from '../pkg-node/scitt_wasm.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -419,6 +421,143 @@ for (const [label, pem] of [
     refused = true;
   }
   check(`${label} is refused`, refused, true);
+}
+
+// ---------------------------------------------------------------------------
+// 15. Certificate chain validation, with and without trusted roots.
+//
+//     The root is located independently of the code under test: by subject,
+//     among the DER certificates inside the statement, and hashed here. A
+//     digest reported by the verifier and recomputed by the verifier would
+//     agree with itself whatever it was.
+// ---------------------------------------------------------------------------
+console.log('\n--- certificate chain validation ---');
+const certificatesIn = (bytes) => {
+  const found = [];
+  for (let i = 0; i + 4 < bytes.length; i++) {
+    if (bytes[i] !== 0x30 || bytes[i + 1] !== 0x82) continue;
+    const der = bytes.slice(i, i + 4 + ((bytes[i + 2] << 8) | bytes[i + 3]));
+    try {
+      const d = JSON.parse(describeCertificate(0, der));
+      if (d.subject && !d.problem) found.push({ der, subject: d.subject });
+    } catch { /* not a certificate */ }
+  }
+  return found;
+};
+const pem = (der) => '-----BEGIN CERTIFICATE-----\n'
+  + Buffer.from(der).toString('base64').replace(/(.{64})/g, '$1\n')
+  + '\n-----END CERTIFICATE-----\n';
+const rootCert = certificatesIn(genuine).find((c) => c.subject === 'CN=Example Corpus Root CA');
+check('the corpus root is found in the statement', Boolean(rootCert), true);
+const rootPem = pem(rootCert.der);
+const rootSha = createHash('sha256').update(rootCert.der).digest('hex');
+
+const selfAnchored = verified.chainValidation;
+check('the chain is validated with no roots supplied', selfAnchored.outcome, 'valid');
+check('but only to its own embedded root', selfAnchored.anchoredExternally, false);
+check('which is the corpus root', selfAnchored.rootSha256, rootSha);
+check('over all four certificates', selfAnchored.pathLength, 4);
+check('live when the ledger registered it', verified.certificatesValidAtRegistration, true);
+
+const externally = JSON.parse(verifyStatement(genuine, keys, rootPem)).chainValidation;
+check('a supplied root anchors the chain', externally.outcome, 'valid');
+check('and is reported as external', externally.anchoredExternally, true);
+check('to the same root', externally.rootSha256, rootSha);
+
+// The service certificate is a real certificate, and not one this chain leads to.
+const wrongRoot = JSON.parse(verifyStatement(genuine, keys, serviceCert));
+check('a root the chain does not lead to is a failure', wrongRoot.chainValidation.outcome, 'invalid');
+check('never a quiet fallback to the embedded root', wrongRoot.chainValidation.anchoredExternally, undefined);
+check('and is named as a problem',
+  wrongRoot.problems.some((p) => p.startsWith('certificate chain did not validate')), true);
+check('the statement signature is a separate finding', wrongRoot.signatureValid, true);
+
+const ecdsa = JSON.parse(verifyStatement(read('cbor-header.cose'), keys)).chainValidation;
+check('an ECDSA chain is unsupported, not invalid', ecdsa.outcome, 'unsupported');
+const leafOnly = JSON.parse(verifyStatement(read('hash-envelope.cose'), keys)).chainValidation;
+check('a lone leaf with no roots is insufficient, not invalid', leafOnly.outcome, 'insufficient');
+
+for (const [label, roots] of [
+  ['empty trusted roots', ''],
+  ['a non-certificate block as a root', '-----BEGIN PRIVATE KEY-----\nAA==\n-----END PRIVATE KEY-----\n'],
+]) {
+  let refused = false;
+  try { verifyStatement(genuine, keys, roots); } catch { refused = true; }
+  check(`${label} are refused rather than ignored`, refused, true);
+}
+
+const chainPolicy = new TextEncoder().encode(JSON.stringify({
+  policyId: 'test/chain', policyVersion: '1',
+  assertions: {
+    issuer: [ISSUER],
+    certificateChainValidated: true,
+    requireChainToRootSha256: rootSha,
+  },
+}));
+const outcomes = (d) => Object.fromEntries(d.assertions.map((a) => [a.name, a.outcome]));
+const chainAnchored = JSON.parse(
+  evaluatePolicy(genuine, keys, chainPolicy, AT_REGISTRATION, rootPem));
+check('chain assertions pass against a supplied root', outcomes(chainAnchored), {
+  issuer: 'pass', certificateChainValidated: 'pass', requireChainToRootSha256: 'pass',
+});
+const chainWrong = JSON.parse(
+  evaluatePolicy(genuine, keys, chainPolicy, AT_REGISTRATION, serviceCert));
+check('and fail against a root the chain does not reach', outcomes(chainWrong), {
+  issuer: 'pass', certificateChainValidated: 'fail', requireChainToRootSha256: 'fail',
+});
+
+// ---------------------------------------------------------------------------
+// 16. Policy through the service certificate.
+//
+//     Policy must be evaluated over the same receipts the page displays. With
+//     the service certificate, those are the receipts checked against the one
+//     key it vouches for.
+// ---------------------------------------------------------------------------
+console.log('\n--- policy under the service certificate ---');
+const viaCert = JSON.parse(evaluatePolicy(
+  genuine, keys, policy('fixture-mst.json'), AT_REGISTRATION, undefined, serviceCert));
+check('a bound key set evaluates as before', viaCert.satisfied, true);
+let unboundRefused = '';
+try {
+  evaluatePolicy(genuine, staleKeys, policy('fixture-mst.json'), AT_REGISTRATION, undefined, serviceCert);
+} catch (e) { unboundRefused = String(e); }
+check('an unbound key set is refused, not evaluated against unvouched keys',
+  unboundRefused.includes('no key bound to the service certificate'), true);
+
+// ---------------------------------------------------------------------------
+// 17. Decoding a claim inside the payload.
+//
+//     No corpus statement carries an encoded document, so the success case
+//     decodes a commit hash as base64. It is meaningless as content and exact
+//     as a test: the digest must be over the decoded bytes, computed here by
+//     Node from the same text, and not over the text that carried them.
+// ---------------------------------------------------------------------------
+console.log('\n--- decoding a payload claim ---');
+const repro = read(join('image-reproduction', 'statement.cose'));
+const reproDoc = JSON.parse(JSON.parse(statementPayload(repro)).text);
+const commit = reproDoc.component.provenance['source-commit'];
+const decoded = JSON.parse(decodeClaim(repro, "['component', 'provenance', 'source-commit']", 'base64'));
+const expectedBytes = Buffer.from(commit, 'base64');
+check('the path is echoed as inspect prints it', decoded.path, "['component', 'provenance', 'source-commit']");
+check('the length is of the decoded bytes', decoded.length, expectedBytes.length);
+check('the digest is over the decoded bytes',
+  decoded.sha256, createHash('sha256').update(expectedBytes).digest('hex'));
+check('not over the text that carried them',
+  decoded.sha256 === createHash('sha256').update(commit).digest('hex'), false);
+check('bytes that are not text are shown as hex', [decoded.utf8, decoded.text, decoded.hex],
+  [false, null, expectedBytes.toString('hex')]);
+
+for (const [label, args, says] of [
+  ['a payload not declared JSON', [genuine, "['a']", 'base64'], 'not JSON'],
+  ['a claim that is not there', [repro, "['component', 'nope']", 'base64'], 'no such claim'],
+  ['a claim that is not a string', [repro, "['component']", 'base64'], 'an object'],
+  ['a value not in the named encoding', [repro, "['component', 'image']", 'base64'], 'not valid base64'],
+  ['an encoding nobody named', [repro, "['component', 'app']", 'hex'], 'unknown encoding'],
+  ['a malformed path', [repro, "['component'", 'base64'], "does not close with ']'"],
+]) {
+  let message = '';
+  try { decodeClaim(...args); } catch (e) { message = String(e); }
+  check(`${label} is refused, and says why`, message.includes(says), true);
 }
 
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`);
