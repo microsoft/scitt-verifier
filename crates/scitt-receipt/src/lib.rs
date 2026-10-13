@@ -148,7 +148,24 @@ pub struct StatementFacts {
     /// that survived — otherwise appending an unparseable blob looks identical
     /// to appending nothing.
     pub receipts_present: usize,
+    /// Receipt blobs that were present but could not be evaluated at all.
+    ///
+    /// Kept apart from `problems` so a caller can tell "this statement carries
+    /// a receipt nobody could read" from "this statement carries no receipt".
+    /// The two call for opposite actions — re-fetch versus register — and an
+    /// operator told to register a statement that is already registered goes
+    /// the wrong way.
+    pub unevaluable_receipts: Vec<UnevaluableReceipt>,
     pub problems: Vec<String>,
+}
+
+/// A receipt blob that did not get far enough to produce [`ReceiptFacts`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnevaluableReceipt {
+    /// Position in the statement's receipt array, so it lines up with
+    /// [`ReceiptFacts::index`] of the receipts that did parse.
+    pub index: usize,
+    pub reason: String,
 }
 
 impl StatementFacts {
@@ -271,6 +288,7 @@ pub fn verify_statement_with(
     }
 
     let mut receipts = Vec::new();
+    let mut unevaluable_receipts = Vec::new();
     for (index, blob) in receipt_blobs.iter().enumerate() {
         match verify_receipt(blob, &statement, key_set) {
             Ok(mut facts) => {
@@ -281,7 +299,13 @@ pub fn verify_statement_with(
             }
             // One unverifiable receipt must not hide a verifiable one, so the
             // failure is recorded and the loop continues.
-            Err(e) => problems.push(format!("receipt[{index}] could not be evaluated: {e}")),
+            Err(e) => {
+                problems.push(format!("receipt[{index}] could not be evaluated: {e}"));
+                unevaluable_receipts.push(UnevaluableReceipt {
+                    index,
+                    reason: e.to_string(),
+                });
+            }
         }
     }
 
@@ -306,6 +330,7 @@ pub fn verify_statement_with(
         protected: Some(statement.protected.clone()),
         receipts,
         receipts_present: receipt_blobs.len(),
+        unevaluable_receipts,
         problems,
     })
 }

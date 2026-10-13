@@ -630,6 +630,12 @@ sound. One verified receipt establishes transparency and noise appended beside
 it cannot retract it; see RFC 9943 §7.1. Broken receipts are reported as
 warnings, and a statement with none that verify is exit 3.
 
+A receipt that is present but cannot be read is reported as
+`ReceiptUnevaluable`, never as `NoReceipt`. `NoReceipt` means the statement
+carries no receipt at all and needs registering; an unreadable one needs
+re-fetching, and the two are kept apart so the operator is not sent the wrong
+way.
+
 A malformed statement is **exit 3, not 1**. Earlier releases returned 1 on the
 reasoning that a gate should stop on garbage input — but exit 1 means "this
 artifact is untrusted", and a file that was truncated in transit is not evidence
@@ -796,6 +802,12 @@ The `receipts` block is the one to read carefully. Its *presence* is
 unprotected header, so anyone can add or strip one without breaking the
 Issuer's signature. Each entry's *contents* are `transparency-service`. Those
 are two different trust statements.
+
+`receipts.count` is the number of receipts evaluated, which is what `entries`
+holds. `receipts.present` is the number the statement carried, and
+`receipts.unevaluable` lists by `index` and `reason` those that could not be
+evaluated at all. `count` of 0 with `present` above 0 means a receipt is there
+but unreadable, not that the statement is unregistered.
 
 `provenance.signatureVerified` is `false` only when a signature was checked and
 failed. Where no signature covers the block it is `null`, so "nobody signed

@@ -12,6 +12,16 @@ transaction. JSON output and the WASM `inspectStatement` and `describeReceipt`
 results gain `registrationTxId`, which is `null` when the commit evidence is
 not in that form.
 
+### An unreadable receipt is no longer reported as no receipt
+
+A statement whose receipt is present but cannot be evaluated used to be
+reported as `NoReceipt`, with the advice to register the statement. It is now
+reported as `ReceiptUnevaluable` plus `NoVerifiedReceipt`, with the advice to
+re-fetch the statement. The exit code is unchanged (3). The JSON `receipts`
+block gains `present` and `unevaluable`; `count` still counts evaluated
+receipts. Receipt diagnostics are now numbered by position in the statement,
+so an unreadable receipt no longer shifts the numbers of those after it.
+
 ### An `image-reproduction` adapter compares a rebuild with its record
 
 `--binding-mode saved-evidence --adapter image-reproduction --evidence DIR`

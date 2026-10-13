@@ -316,6 +316,105 @@ fn a_statement_whose_only_receipt_fails_exits_three_not_one() {
     );
 }
 
+/// The real fixture with its one receipt made unreadable, written to `dir`.
+///
+/// Derived at test time from genuine bytes rather than committed: only the
+/// receipt's first byte changes, to a CBOR break code that cannot start an
+/// item, so the envelope still parses and the Issuer's signature still holds.
+fn statement_with_unreadable_receipt(dir: &std::path::Path) -> String {
+    let mut bytes = std::fs::read(corpus(&["fixtures", "transparent-statement.cose"])).unwrap();
+    let statement = scitt_receipt::Sign1::parse(&bytes).expect("fixture must parse");
+    let receipts = statement.receipts();
+    assert_eq!(receipts.len(), 1, "fixture must carry exactly one receipt");
+    let receipt = &receipts[0];
+    let at = bytes
+        .windows(receipt.len())
+        .position(|w| w == receipt.as_slice())
+        .expect("receipt bytes must appear in the statement");
+    bytes[at] = 0xff;
+    std::fs::create_dir_all(dir).unwrap();
+    let path = dir.join("unreadable-receipt.cose");
+    std::fs::write(&path, bytes).unwrap();
+    path.display().to_string()
+}
+
+/// A receipt that is present but unreadable is not an absent receipt.
+///
+/// The two call for opposite actions. A statement with no receipt needs to be
+/// registered; one whose receipt cannot be read may already be, and needs the
+/// receipt re-fetched. Collapsing them told operators to register statements
+/// that were already registered.
+#[test]
+fn an_unreadable_receipt_is_not_reported_as_no_receipt() {
+    let dir = std::env::temp_dir().join("scitt-verifier-unreadable-receipt");
+    let statement = statement_with_unreadable_receipt(&dir);
+    let keys = corpus(&["fixtures", "mst-test-scitt-keys.cbor"]);
+    let policy = corpus(&["policies", "fixture-mst.json"]);
+    let args = [
+        "verify",
+        "--statement",
+        &statement,
+        "--scitt-keys",
+        &keys,
+        "--policy",
+        &policy,
+    ];
+
+    let r = run(&args);
+    assert_eq!(
+        r.code, 3,
+        "an unreadable receipt proves nothing:\n{}",
+        r.stdout
+    );
+    assert!(r.stdout.contains("This is not a pass"), "{}", r.stdout);
+    assert!(
+        !r.stdout.contains("NoReceipt "),
+        "a present receipt must not be reported as absent: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains("Register the statement"),
+        "the operator must not be told to register a registered statement: {}",
+        r.stdout
+    );
+    assert!(r.stdout.contains("ReceiptUnevaluable"), "{}", r.stdout);
+    assert!(r.stdout.contains("NoVerifiedReceipt"), "{}", r.stdout);
+    assert!(
+        r.stdout.contains("Re-fetch the transparent statement"),
+        "the action must follow what stopped verification: {}",
+        r.stdout
+    );
+
+    let mut json_args = args.to_vec();
+    json_args.extend_from_slice(&["--format", "json"]);
+    let j = run(&json_args);
+    assert_eq!(j.code, 3, "{}", j.stdout);
+    let value: serde_json::Value = serde_json::from_str(&j.stdout).unwrap();
+    let receipts = &value["receipts"];
+    assert_eq!(receipts["count"], 0, "{receipts}");
+    assert_eq!(receipts["present"], 1, "{receipts}");
+    assert_eq!(receipts["unevaluable"][0]["index"], 0, "{receipts}");
+    let codes: Vec<&str> = value["appraisal"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|d| d["code"].as_str())
+        .collect();
+    assert!(!codes.contains(&"NoReceipt"), "{codes:?}");
+    assert!(codes.contains(&"ReceiptUnevaluable"), "{codes:?}");
+
+    let mut verbose_args = args.to_vec();
+    verbose_args.push("--verbose");
+    let v = run(&verbose_args);
+    assert!(
+        !v.stdout
+            .contains("none — this statement is signed, but not transparent"),
+        "the detailed report must not call a present receipt absent: {}",
+        v.stdout
+    );
+    assert!(v.stdout.contains("could not be evaluated"), "{}", v.stdout);
+}
+
 #[test]
 fn stale_trust_material_exits_three_not_one() {
     // The distinction this test defends: a rotated signing key must not be

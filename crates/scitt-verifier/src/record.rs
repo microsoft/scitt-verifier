@@ -484,6 +484,17 @@ fn receipts_json(assessment: &Assessment) -> Value {
              by that receipt's transparency-service signature",
         ),
         "count": facts.receipts.len(),
+        // `count` is the receipts that were evaluated, which is all `entries`
+        // can hold. `present` is what the statement carried, so a reader can
+        // tell an unreadable receipt from an absent one.
+        "present": facts.receipts_present,
+        "unevaluable": Value::Array(
+            facts
+                .unevaluable_receipts
+                .iter()
+                .map(|u| json!({ "index": u.index, "reason": u.reason }))
+                .collect(),
+        ),
         "entries": Value::Array(facts.receipts.iter().map(receipt_entry_json).collect()),
     })
 }

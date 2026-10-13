@@ -1912,8 +1912,12 @@ fn diagnose(
         ));
     }
 
-    for (i, r) in facts.receipts.iter().enumerate() {
-        let n = i + 1;
+    for r in &facts.receipts {
+        // Numbered by position in the statement, not in `facts.receipts`: an
+        // earlier blob that failed to parse is absent from that list, and
+        // counting from it would attach this receipt's findings to its
+        // neighbour.
+        let n = r.index + 1;
         // These are warnings, not errors, however alarming they read. Neither
         // says anything about the artifact: a receipt that fails to verify is
         // indistinguishable from one an attacker appended, because appending
@@ -1955,7 +1959,22 @@ fn diagnose(
         }
     }
 
-    if facts.receipts.is_empty() {
+    // A warning for the same reason as the receipt findings above: an
+    // unreadable blob is what anyone handling the file could append, so it
+    // carries no weight against a receipt that did verify.
+    for u in &facts.unevaluable_receipts {
+        out.push(Diagnostic::warning(
+            "ReceiptUnevaluable",
+            Category::Input,
+            format!("receipt {}: could not be evaluated: {}", u.index + 1, u.reason),
+            "This receipt was disregarded. If you expected it to count, re-fetch the transparent statement from the transparency service, or run `scitt-verifier inspect` to see what it carries.",
+        ));
+    }
+
+    // Decided by the receipts present, not those that parsed. A statement
+    // whose only receipt is unreadable may well be registered, and telling
+    // the operator to register it again sends them the wrong way.
+    if facts.receipts_present == 0 {
         out.push(Diagnostic::error(
             "NoReceipt",
             Category::Trust,
@@ -1963,11 +1982,18 @@ fn diagnose(
             "Register the statement with a transparency service before deploying it.",
         ));
     } else if !facts.any_receipt_verified() {
+        // Fresh keys cannot help with a receipt nobody could read, so the
+        // advice follows what actually stopped verification.
+        let action = if facts.receipts.is_empty() {
+            "No receipt on this statement could be read. Re-fetch the transparent statement from the transparency service, then re-run."
+        } else {
+            "Refresh the SCITT trust material, then re-run."
+        };
         out.push(Diagnostic::error(
             "NoVerifiedReceipt",
             Category::Trust,
             "no receipt on this statement could be fully verified",
-            "Refresh the SCITT trust material, then re-run.",
+            action,
         ));
     }
 
