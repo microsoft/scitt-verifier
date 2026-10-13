@@ -93,7 +93,10 @@ pub struct ReceiptSummary {
     pub subject: Option<String>,
     pub registered_at: Option<i64>,
     pub vds: Option<i64>,
-    /// CCF's `<view>.<seqno>` for the *receipt* transaction.
+    /// CCF's `<view>.<seqno>` for the *signature* transaction: where the
+    /// ledger signed the Merkle root this receipt's proof leads to. It is not
+    /// the transaction that registered the statement; see
+    /// [`Self::registration_txid`].
     pub ccf_txid: Option<String>,
     /// Labels present in the protected bucket, including ones we do not read.
     pub protected_labels: Vec<String>,
@@ -107,6 +110,15 @@ pub struct ReceiptSummary {
     /// may cover more than one entry.
     pub commit_evidence: Option<String>,
     pub write_set_digest: Option<String>,
+    /// The `<view>.<seqno>` that registered the statement, read from
+    /// [`Self::commit_evidence`].
+    ///
+    /// This is the transaction a ledger looks the statement up by. Users
+    /// reached for `ccf_txid` instead, and the ledger refuses it because a
+    /// signature transaction is not a submission. `None` when there is no
+    /// commit evidence or it is not in CCF's `ce:<view>.<seqno>:<nonce>`
+    /// form; it is never guessed.
+    pub registration_txid: Option<String>,
     pub path_length: Option<usize>,
     /// The inclusion proof, decoded but not evaluated.
     pub inclusion_proof: Option<InclusionProof>,
@@ -177,6 +189,28 @@ pub fn describe_inclusion_proof(proof_bytes: &[u8]) -> Result<InclusionProof> {
     })
 }
 
+/// The registration transaction ID carried in CCF commit evidence.
+///
+/// CCF writes commit evidence as `ce:<view>.<seqno>:<nonce>`, with decimal
+/// view and seqno and a hex nonce. Anything else yields `None` rather than a
+/// best-effort split, because a wrong transaction ID sends the reader to look
+/// up a different entry. Nothing is verified: the value is what the receipt
+/// carries, and `verify` is what binds it into the leaf hash.
+pub fn registration_txid(commit_evidence: &str) -> Option<String> {
+    let rest = commit_evidence.strip_prefix("ce:")?;
+    let (txid, nonce) = rest.split_once(':')?;
+    let (view, seqno) = txid.split_once('.')?;
+    let decimal = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if !decimal(view)
+        || !decimal(seqno)
+        || nonce.is_empty()
+        || !nonce.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    Some(txid.to_owned())
+}
+
 /// Read a path step's direction flag.
 ///
 /// CCF has emitted this as both a CBOR bool and an integer, so both are
@@ -227,6 +261,7 @@ pub fn describe_receipt(receipt_bytes: &[u8]) -> Result<ReceiptSummary> {
         Ok(Some(proof)) => {
             summary.write_set_digest = Some(proof.write_set_digest.clone());
             summary.commit_evidence = Some(proof.commit_evidence.clone());
+            summary.registration_txid = registration_txid(&proof.commit_evidence);
             summary.claims_digest = Some(proof.claims_digest.clone());
             summary.path_length = Some(proof.path.len());
             summary.inclusion_proof = Some(proof);
@@ -531,6 +566,37 @@ mod tests {
         assert_eq!(decoded.commit_evidence, "ce:2.1:beef");
         assert_eq!(decoded.write_set_digest, "aa".repeat(32));
         assert_eq!(decoded.claims_digest, "bb".repeat(32));
+    }
+
+    #[test]
+    fn the_registration_txid_is_read_from_commit_evidence() {
+        assert_eq!(registration_txid("ce:2.1:beef").as_deref(), Some("2.1"));
+        assert_eq!(
+            registration_txid("ce:1213.315872:8ca6db96").as_deref(),
+            Some("1213.315872")
+        );
+    }
+
+    /// A wrong transaction ID sends the reader to a different entry, so
+    /// anything outside CCF's documented form is refused rather than split.
+    #[test]
+    fn malformed_commit_evidence_yields_no_registration_txid() {
+        for evidence in [
+            "",
+            "ce:",
+            "2.1:beef",
+            "ce:2.1",
+            "ce:2.1:",
+            "ce:2:beef",
+            "ce:.1:beef",
+            "ce:2.:beef",
+            "ce:2.x:beef",
+            "ce:-2.1:beef",
+            "ce:2.1:not-hex",
+            "CE:2.1:beef",
+        ] {
+            assert_eq!(registration_txid(evidence), None, "{evidence:?}");
+        }
     }
 
     /// A malformed leaf must fail rather than be shown as if it were fine.

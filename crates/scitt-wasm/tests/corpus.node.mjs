@@ -84,6 +84,10 @@ check('standalone claim digest agrees', claimDigest(genuine), PINNED.claimDigest
 const inspected = JSON.parse(inspectStatement(genuine));
 check('inspect claim digest agrees', inspected.claimDigest, PINNED.claimDigest);
 check('inspect sees one receipt', inspected.receiptsPresent, 1);
+// The signature transaction is not a lookup key; the registration one is read
+// from the commit evidence so browser callers need not parse it themselves.
+check('inspect reports the registration txid', inspected.receipts[0].registrationTxId, '2.57');
+check('inspect keeps the signature txid apart', inspected.receipts[0].ccfTxId, '2.58');
 
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------

@@ -1774,6 +1774,38 @@ fn inspect_prints_the_numeric_value_of_an_algorithm() {
     );
 }
 
+/// The receipt's `txid` is where the ledger signed the Merkle root, not where
+/// the statement was submitted, and a ledger refuses it as a lookup key. The
+/// registration transaction is the one in the commit evidence, and the
+/// fixture's two differ (2.57 registered, 2.58 signed), so swapping them
+/// cannot pass.
+#[test]
+fn inspect_shows_the_registration_txid_apart_from_the_signature_txid() {
+    let statement = corpus(&["fixtures", "transparent-statement.cose"]);
+    let r = run(&["inspect", "--statement", &statement]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        has_line(&r.stdout, "  registration txid   2.57"),
+        "the registration transaction must be shown without --verbose: {}",
+        r.stdout
+    );
+    assert!(
+        has_line(
+            &r.stdout,
+            "  ccf txid            2.58 (signature transaction)"
+        ),
+        "the signature transaction must say what it is: {}",
+        r.stdout
+    );
+
+    let j = run(&["inspect", "--statement", &statement, "--format", "json"]);
+    assert_eq!(j.code, 0, "{}", j.stderr);
+    let value: serde_json::Value = serde_json::from_str(&j.stdout).expect("stdout must be JSON");
+    let flat = value.to_string();
+    assert!(flat.contains(r#""registrationTxId":"2.57""#), "{flat}");
+    assert!(flat.contains(r#""txid":"2.58""#), "{flat}");
+}
+
 /// The RFC 9995 payload hash algorithm decides how an artifact gets hashed, and
 /// is the likeliest hash-envelope header to appear in a policy.
 #[test]

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### `inspect` shows the registration transaction ID
+
+A CCF receipt's `txid` is the signature transaction, where the ledger signed
+the Merkle root, and a ledger refuses it when asked for the entry. `inspect`
+now prints a `registration txid` line read from the commit evidence
+(`ce:<view>.<seqno>:<nonce>`) and labels `ccf txid` as the signature
+transaction. JSON output and the WASM `inspectStatement` and `describeReceipt`
+results gain `registrationTxId`, which is `null` when the commit evidence is
+not in that form.
+
 ### An `image-reproduction` adapter compares a rebuild with its record
 
 `--binding-mode saved-evidence --adapter image-reproduction --evidence DIR`

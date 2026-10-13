@@ -1265,11 +1265,23 @@ fn inspect_receipts(statement: &Sign1, verbose: bool) {
             }
         );
         println!(
+            "  registration txid   {}",
+            match (&summary.registration_txid, &summary.commit_evidence) {
+                (Some(txid), _) => safe_whole(txid),
+                (None, Some(_)) =>
+                    "(commit evidence is not in ce:<view>.<seqno>:<nonce> form)".into(),
+                (None, None) => "(none)".into(),
+            }
+        );
+        // Labelled because readers took this for the registration and looked
+        // the statement up by it, which the ledger refuses: it is where the
+        // Merkle root was signed, not where the statement was submitted.
+        println!(
             "  ccf txid            {}",
             summary
                 .ccf_txid
                 .as_deref()
-                .map(safe_whole)
+                .map(|t| format!("{} (signature transaction)", safe_whole(t)))
                 .unwrap_or_else(|| "(none)".into())
         );
 

@@ -280,6 +280,7 @@ fn receipts(value: &CborValue, verbose: bool) -> Value {
                             "ccf".into(),
                             json!({
                                 "txid": summary.ccf_txid,
+                                "registrationTxId": summary.registration_txid,
                                 "commitEvidence": summary.commit_evidence,
                                 "writeSetDigest": summary.write_set_digest,
                                 "claimsDigest": summary.claims_digest,
