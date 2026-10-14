@@ -1,6 +1,19 @@
 # Changelog
 
-## Unreleased
+## 0.5.0
+
+### Upgrading from 0.4.0
+
+- A policy with `"issuer": []` is now refused when it is loaded, instead of
+  failing every statement.
+- Default text output is now a progress transcript and a short verdict block;
+  the full report, including limitations, moves to `--verbose`. Scripts that
+  read the text output should read `--format json`, whose changes in this
+  release are added fields only (`schemaVersion` stays `v0`).
+- `inspect` adds a `registration txid` line and labels `ccf txid` as the
+  signature transaction.
+- Policies using `adapters.*` need 0.5.0; 0.4.0 refuses them as unknown keys
+  rather than skipping them.
 
 ### `inspect` shows the registration transaction ID
 
@@ -99,7 +112,10 @@ Observed values longer than 64 characters are now summarised with their length.
 The policy's own literal is never shortened — it is the string an operator
 compares against.
 
-### The ledger adapter is now named `azure-confidential-ledger` (breaking)
+### The ledger adapter is now named `azure-confidential-ledger`
+
+This renames the adapter only as it existed on `main`; no release before 0.5.0
+shipped it, so 0.4.0 users have nothing to change.
 
 The adapter appraises a deployed Azure Confidential Ledger. It was named after
 MST, which is one service built on that ledger and not the thing being

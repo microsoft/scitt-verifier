@@ -218,7 +218,7 @@ before v1.0; pin releases in automation.
 ## Pipeline use
 
 ```yaml
-- uses: microsoft/scitt-verifier@v0.4.0
+- uses: microsoft/scitt-verifier@v0.5.0
   with:
     statement: document.cose
     artifact: document.json

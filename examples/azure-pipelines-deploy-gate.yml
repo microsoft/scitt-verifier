@@ -17,7 +17,7 @@ pool:
 variables:
   # Pin to an exact release. A deploy gate that follows a moving ref can change
   # what it enforces without a reviewed change to this file.
-  SCITT_VERIFIER_VERSION: v0.4.0
+  SCITT_VERIFIER_VERSION: v0.5.0
 
 steps:
   - checkout: self

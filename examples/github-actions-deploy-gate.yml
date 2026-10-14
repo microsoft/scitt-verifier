@@ -44,7 +44,7 @@ jobs:
 
       - name: Verify the SBOM was registered on the transparency service
         id: scitt
-        uses: microsoft/scitt-verifier@v0.4.0
+        uses: microsoft/scitt-verifier@v0.5.0
         with:
           statement: sbom.spdx.json.cose
           artifact: sbom.spdx.json

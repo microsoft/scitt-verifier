@@ -781,7 +781,7 @@ dependencies = [
 
 [[package]]
 name = "scitt-adapter-azure-confidential-ledger"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "scitt-receipt",
  "tee-attestation-verification-caci",
@@ -790,7 +790,7 @@ dependencies = [
 
 [[package]]
 name = "scitt-adapter-image-reproduction"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "scitt-policy",
  "scitt-receipt",
@@ -799,7 +799,7 @@ dependencies = [
 
 [[package]]
 name = "scitt-network"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "rustls",
  "rustls-graviola",
@@ -812,7 +812,7 @@ dependencies = [
 
 [[package]]
 name = "scitt-policy"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "scitt-receipt",
  "serde",
@@ -821,7 +821,7 @@ dependencies = [
 
 [[package]]
 name = "scitt-receipt"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "sha2",
  "tee-attestation-verification-cose",
@@ -830,7 +830,7 @@ dependencies = [
 
 [[package]]
 name = "scitt-verifier"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "scitt-adapter-azure-confidential-ledger",
  "scitt-adapter-image-reproduction",
@@ -843,7 +843,7 @@ dependencies = [
 
 [[package]]
 name = "scitt-wasm"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "scitt-policy",
  "scitt-receipt",
