@@ -492,7 +492,7 @@ fn receipts_json(assessment: &Assessment) -> Value {
             facts
                 .unevaluable_receipts
                 .iter()
-                .map(|u| json!({ "index": u.index, "reason": u.reason }))
+                .map(|u| json!({ "index": u.index, "kind": u.kind.as_str(), "reason": u.reason }))
                 .collect(),
         ),
         "entries": Value::Array(facts.receipts.iter().map(receipt_entry_json).collect()),

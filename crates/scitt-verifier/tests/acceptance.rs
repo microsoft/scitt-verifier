@@ -394,6 +394,10 @@ fn an_unreadable_receipt_is_not_reported_as_no_receipt() {
     assert_eq!(receipts["count"], 0, "{receipts}");
     assert_eq!(receipts["present"], 1, "{receipts}");
     assert_eq!(receipts["unevaluable"][0]["index"], 0, "{receipts}");
+    assert_eq!(
+        receipts["unevaluable"][0]["kind"], "unreadable",
+        "{receipts}"
+    );
     let codes: Vec<&str> = value["appraisal"]["diagnostics"]
         .as_array()
         .unwrap()

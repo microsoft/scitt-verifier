@@ -559,15 +559,19 @@ fn receipts_detail(out: &mut impl Write, facts: &StatementFacts) -> io::Result<(
     }
     // Walked by position in the statement so an unreadable receipt keeps its
     // place and number rather than vanishing, which would make a statement
-    // whose only receipt is unreadable look like one that carries none.
+    // whose only receipt is unreadable look like one that carries none. Both
+    // lists are in statement order, so each is consumed once: a statement
+    // padded with junk blobs must not make this quadratic.
+    let mut unevaluable = facts.unevaluable_receipts.iter().peekable();
+    let mut evaluated = facts.receipts.iter().peekable();
     for index in 0..facts.receipts_present {
-        if let Some(u) = facts.unevaluable_receipts.iter().find(|u| u.index == index) {
+        if let Some(u) = unevaluable.next_if(|u| u.index == index) {
             writeln!(out)?;
             writeln!(out, "  Receipt {}", index + 1)?;
             writeln!(out, "    could not be evaluated  {}", safe(&u.reason))?;
             continue;
         }
-        let Some(r) = facts.receipts.iter().find(|r| r.index == index) else {
+        let Some(r) = evaluated.next_if(|r| r.index == index) else {
             continue;
         };
         writeln!(out)?;

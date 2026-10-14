@@ -16,9 +16,12 @@ not in that form.
 
 A statement whose receipt is present but cannot be evaluated used to be
 reported as `NoReceipt`, with the advice to register the statement. It is now
-reported as `ReceiptUnevaluable` plus `NoVerifiedReceipt`, with the advice to
-re-fetch the statement. The exit code is unchanged (3). The JSON `receipts`
-block gains `present` and `unevaluable`; `count` still counts evaluated
+reported as `ReceiptUnevaluable` plus `NoVerifiedReceipt`, with an action that
+follows why evaluation stopped: re-fetch an unreadable receipt, upgrade for an
+unsupported structure or algorithm, or refresh the SCITT keys when they could
+not be used. The exit code is unchanged (3). The JSON `receipts`
+block gains `present` and `unevaluable` (each with `index`, `kind` and
+`reason`); `count` still counts evaluated
 receipts. Receipt diagnostics are now numbered by position in the statement,
 so an unreadable receipt no longer shifts the numbers of those after it.
 

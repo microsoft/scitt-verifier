@@ -1959,15 +1959,26 @@ fn diagnose(
         }
     }
 
-    // A warning for the same reason as the receipt findings above: an
-    // unreadable blob is what anyone handling the file could append, so it
-    // carries no weight against a receipt that did verify.
+    // A warning for the same reason as the receipt findings above: a blob
+    // that cannot be evaluated is what anyone handling the file could append,
+    // so it carries no weight against a receipt that did verify. The action
+    // follows the kind, because evaluation can also stop on a receipt that
+    // parsed cleanly, where re-fetching would change nothing.
     for u in &facts.unevaluable_receipts {
+        let action = match u.kind {
+            scitt_receipt::UnevaluableKind::Unreadable => "This receipt was disregarded. If you expected it to count, re-fetch the transparent statement from the transparency service, or run `scitt-verifier inspect` to see what it carries.",
+            scitt_receipt::UnevaluableKind::Unsupported => "This receipt was disregarded because this release cannot verify it. If you expected it to count, check for a newer scitt-verifier release.",
+            scitt_receipt::UnevaluableKind::TrustMaterial => "This receipt was disregarded because the supplied SCITT keys could not be used for it. If you expected it to count, refresh the SCITT trust material, then re-run.",
+        };
         out.push(Diagnostic::warning(
             "ReceiptUnevaluable",
             Category::Input,
-            format!("receipt {}: could not be evaluated: {}", u.index + 1, u.reason),
-            "This receipt was disregarded. If you expected it to count, re-fetch the transparent statement from the transparency service, or run `scitt-verifier inspect` to see what it carries.",
+            format!(
+                "receipt {}: could not be evaluated: {}",
+                u.index + 1,
+                u.reason
+            ),
+            action,
         ));
     }
 
@@ -1982,10 +1993,18 @@ fn diagnose(
             "Register the statement with a transparency service before deploying it.",
         ));
     } else if !facts.any_receipt_verified() {
-        // Fresh keys cannot help with a receipt nobody could read, so the
-        // advice follows what actually stopped verification.
-        let action = if facts.receipts.is_empty() {
+        // Re-fetching is the advice only when every receipt failed to parse;
+        // a receipt that parsed and still could not be evaluated points at the
+        // keys or the verifier, which a fresh copy of the statement cannot fix.
+        let all_unreadable = facts.receipts.is_empty()
+            && facts
+                .unevaluable_receipts
+                .iter()
+                .all(|u| u.kind == scitt_receipt::UnevaluableKind::Unreadable);
+        let action = if all_unreadable {
             "No receipt on this statement could be read. Re-fetch the transparent statement from the transparency service, then re-run."
+        } else if facts.receipts.is_empty() {
+            "No receipt on this statement could be evaluated. Follow the action given for each receipt above, then re-run."
         } else {
             "Refresh the SCITT trust material, then re-run."
         };
