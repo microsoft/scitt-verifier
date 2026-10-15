@@ -2106,6 +2106,316 @@ fn naming_the_wrong_convention_cannot_be_evaluated() {
     );
 }
 
+fn external_chain_fixture(file: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("external-chain")
+        .join(file)
+}
+
+fn external_chain_expected() -> serde_json::Value {
+    serde_json::from_str(include_str!("fixtures/external-chain/expected.json")).unwrap()
+}
+
+fn external_chain_rule() -> serde_json::Value {
+    serde_json::json!({
+        "path": ["external-signature", 0],
+        "signedOver": "payload",
+        "requireChainToRootSha256": external_chain_expected()["rootSha256"],
+    })
+}
+
+fn verify_external_chain(
+    name: &str,
+    fixture: &str,
+    rules: &[serde_json::Value],
+) -> (Run, serde_json::Value, serde_json::Value) {
+    let dir = std::env::temp_dir().join(format!(
+        "scitt-verifier-external-chain-{}-{name}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let policy = dir.join("policy.json");
+    let facts = dir.join("facts.json");
+    std::fs::write(
+        &policy,
+        serde_json::to_vec(&serde_json::json!({
+            "policyId": "synthetic-external-chain",
+            "policyVersion": "1",
+            "assertions": { "externalSignatures": rules },
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let r = run(&[
+        "verify",
+        "--statement",
+        external_chain_fixture(&format!("{fixture}.cose"))
+            .to_str()
+            .unwrap(),
+        "--scitt-keys",
+        external_chain_fixture("keys.cbor").to_str().unwrap(),
+        "--policy",
+        policy.to_str().unwrap(),
+        "--format",
+        "json",
+        "--facts",
+        facts.to_str().unwrap(),
+    ]);
+    let record = serde_json::from_str(&r.stdout)
+        .unwrap_or_else(|e| panic!("{e}: stdout: {}; stderr: {}", r.stdout, r.stderr));
+    let observations = if facts.exists() {
+        serde_json::from_slice(&std::fs::read(&facts).unwrap()).unwrap()
+    } else {
+        serde_json::Value::Null
+    };
+    std::fs::remove_dir_all(&dir).unwrap();
+    (r, record, observations)
+}
+
+fn external_assertion(record: &serde_json::Value, index: usize) -> &serde_json::Value {
+    &record["relyingPartyPolicy"]["assertions"][index]
+}
+
+fn has_external_chain_gap(record: &serde_json::Value) -> bool {
+    record["appraisal"]["notChecked"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|gap| gap["code"] == "ExternalSignerChainNotValidated")
+}
+
+#[test]
+fn external_chain_correct_pin_passes_and_exposes_the_validated_path() {
+    for (fixture, signed_over) in [("valid", "payload"), ("nested", "coseSign1")] {
+        let mut rule = external_chain_rule();
+        rule["signedOver"] = signed_over.into();
+        rule["requireChainToRootSha256"] = format!(
+            " {} ",
+            external_chain_expected()["rootSha256"]
+                .as_str()
+                .unwrap()
+                .to_uppercase()
+        )
+        .into();
+        let (r, record, facts) = verify_external_chain(fixture, fixture, &[rule]);
+        assert_eq!(r.code, 0, "{}", r.stdout);
+        assert_eq!(record["appraisal"]["verdict"], "statement-transparent");
+        assert_eq!(external_assertion(&record, 0)["outcome"], "pass");
+        assert!(!has_external_chain_gap(&record), "{}", r.stdout);
+        let evidence = &external_assertion(&record, 0)["externalSignature"];
+        assert_eq!(
+            evidence["path"],
+            serde_json::json!(["external-signature", 0])
+        );
+        assert_eq!(evidence["signatureVerified"], true);
+        assert_eq!(evidence["rootPinMatched"], true);
+        assert!(evidence["certificatesValidAtRegistration"].is_null());
+        let path = &evidence["certificateChain"];
+        let expected = external_chain_expected();
+        assert_eq!(path["rootSha256"], expected["rootSha256"]);
+        assert_eq!(path["certificateSha256"], expected["certificateSha256"]);
+        assert_eq!(path["pathLength"], 3);
+        assert_eq!(path["validatedAt"], expected["pathNotBefore"]);
+        assert_eq!(path["pathNotBefore"], expected["pathNotBefore"]);
+        assert_eq!(path["pathNotAfter"], expected["pathNotAfter"]);
+        assert_eq!(
+            record["signedStatement"]["externalSignatures"][0],
+            *evidence
+        );
+        assert_eq!(
+            facts["signedStatement"]["externalSignatures"],
+            record["signedStatement"]["externalSignatures"]
+        );
+    }
+}
+
+#[test]
+fn external_chain_wrong_pin_fails_after_validating_the_path() {
+    for (fixture, signed_over) in [("valid", "payload"), ("nested", "coseSign1")] {
+        let mut rule = external_chain_rule();
+        rule["signedOver"] = signed_over.into();
+        rule["requireChainToRootSha256"] = "00".repeat(32).into();
+        let (r, record, _) =
+            verify_external_chain(&format!("{fixture}-wrong-pin"), fixture, &[rule]);
+        assert_eq!(r.code, 2, "{}", r.stdout);
+        let assertion = external_assertion(&record, 0);
+        assert_eq!(assertion["outcome"], "fail");
+        assert_eq!(assertion["externalSignature"]["rootPinMatched"], false);
+        assert_eq!(
+            assertion["externalSignature"]["certificateChain"]["rootSha256"],
+            external_chain_expected()["rootSha256"]
+        );
+    }
+}
+
+#[test]
+fn external_chain_tampered_truncated_or_malformed_paths_fail() {
+    for fixture in [
+        "tampered-leaf",
+        "tampered-intermediate",
+        "missing-root",
+        "missing-intermediate",
+        "leaf-only",
+        "truncated-der",
+        "malformed-entry",
+        "nested-malformed-entry",
+    ] {
+        let mut rule = external_chain_rule();
+        if fixture.starts_with("nested") {
+            rule["signedOver"] = "coseSign1".into();
+        }
+        let (r, record, _) = verify_external_chain(fixture, fixture, &[rule]);
+        assert_eq!(r.code, 2, "{fixture}: {}", r.stdout);
+        // The envelope and receipt still verify. The external path itself
+        // must fail, rather than a broken outer signature masking the bug.
+        assert_eq!(record["signedStatement"]["signatureValid"], true);
+        assert_eq!(record["receipts"]["entries"][0]["rootSignatureValid"], true);
+        let assertion = external_assertion(&record, 0);
+        assert_eq!(assertion["outcome"], "fail", "{fixture}: {}", r.stdout);
+        assert_eq!(assertion["externalSignature"]["signatureVerified"], true);
+        assert!(assertion["externalSignature"]["rootPinMatched"].is_null());
+        assert!(assertion["externalSignature"]["certificateChain"].is_null());
+    }
+}
+
+#[test]
+fn external_chain_truncated_leaf_der_fails_even_when_the_signature_cannot_run() {
+    for (fixture, signed_over) in [
+        ("truncated-leaf-der", "payload"),
+        ("nested-truncated-leaf-der", "coseSign1"),
+    ] {
+        let mut rule = external_chain_rule();
+        rule["signedOver"] = signed_over.into();
+        let (r, record, _) = verify_external_chain(fixture, fixture, &[rule]);
+        assert_eq!(r.code, 2, "{}", r.stdout);
+        assert_eq!(external_assertion(&record, 0)["outcome"], "fail");
+        let evidence = &external_assertion(&record, 0)["externalSignature"];
+        assert!(evidence["signatureVerified"].is_null());
+        assert!(evidence["certificateChain"].is_null());
+        assert!(evidence["rootPinMatched"].is_null());
+    }
+}
+
+#[test]
+fn external_chain_unsupported_algorithms_and_critical_extensions_never_pass() {
+    for fixture in [
+        "unsupported-pss",
+        "unsupported-ecdsa",
+        "unsupported-critical",
+    ] {
+        let (r, record, _) = verify_external_chain(fixture, fixture, &[external_chain_rule()]);
+        assert_eq!(r.code, 3, "{fixture}: {}", r.stdout);
+        assert_eq!(record["signedStatement"]["signatureValid"], true);
+        let assertion = external_assertion(&record, 0);
+        assert_eq!(assertion["outcome"], "cannotEvaluate");
+        assert_eq!(assertion["externalSignature"]["signatureVerified"], true);
+        assert!(assertion["externalSignature"]["rootPinMatched"].is_null());
+        assert!(assertion["externalSignature"]["certificateChain"].is_null());
+        assert_eq!(record["relyingPartyPolicy"]["satisfied"], false);
+    }
+}
+
+#[test]
+fn external_chain_a_root_pin_does_not_replace_signature_verification() {
+    let (r, record, _) =
+        verify_external_chain("bad-signature", "bad-signature", &[external_chain_rule()]);
+    assert_eq!(r.code, 2, "{}", r.stdout);
+    assert_eq!(external_assertion(&record, 0)["outcome"], "fail");
+    assert_eq!(
+        external_assertion(&record, 0)["externalSignature"]["signatureVerified"],
+        false
+    );
+}
+
+#[test]
+fn external_chain_rules_keep_independent_pins_and_limitations() {
+    let pinned = external_chain_rule();
+    let mut unpinned = pinned.clone();
+    unpinned
+        .as_object_mut()
+        .unwrap()
+        .remove("requireChainToRootSha256");
+    for (name, rules) in [
+        ("pinned-first", vec![pinned.clone(), unpinned.clone()]),
+        ("pinned-last", vec![unpinned.clone(), pinned.clone()]),
+        ("unpinned-only", vec![unpinned]),
+    ] {
+        let (r, record, _) = verify_external_chain(name, "valid", &rules);
+        assert_eq!(r.code, 0, "{}", r.stdout);
+        assert!(has_external_chain_gap(&record), "{}", r.stdout);
+    }
+    let mut wrong = pinned.clone();
+    wrong["requireChainToRootSha256"] = "00".repeat(32).into();
+    let (r, record, _) = verify_external_chain("two-pins", "valid", &[pinned, wrong]);
+    assert_eq!(r.code, 2, "{}", r.stdout);
+    assert_eq!(external_assertion(&record, 0)["outcome"], "pass");
+    assert_eq!(external_assertion(&record, 1)["outcome"], "fail");
+}
+
+#[test]
+fn external_chain_validity_uses_verified_registration_times() {
+    for (fixture, required, code, outcome, valid) in [
+        ("valid", true, 0, "pass", Some(true)),
+        ("late-registration", true, 2, "fail", Some(false)),
+        ("late-registration", false, 0, "pass", Some(false)),
+        ("valid", false, 2, "fail", Some(true)),
+        ("no-registration-time", true, 3, "cannotEvaluate", None),
+        ("no-registration-time", false, 3, "cannotEvaluate", None),
+    ] {
+        let mut rule = external_chain_rule();
+        rule["certificateValidAtSigningTime"] = required.into();
+        let (r, record, _) =
+            verify_external_chain(&format!("time-{fixture}-{required}"), fixture, &[rule]);
+        assert_eq!(r.code, code, "{}", r.stdout);
+        let assertion = external_assertion(&record, 0);
+        assert_eq!(assertion["outcome"], outcome);
+        assert_eq!(
+            assertion["externalSignature"]["certificatesValidAtRegistration"],
+            serde_json::json!(valid)
+        );
+    }
+    let mut rule = external_chain_rule();
+    rule.as_object_mut()
+        .unwrap()
+        .remove("requireChainToRootSha256");
+    rule["certificateValidAtSigningTime"] = true.into();
+    let (r, record, _) = verify_external_chain("time-without-pin", "valid", &[rule]);
+    assert_eq!(r.code, 0, "{}", r.stdout);
+    assert!(has_external_chain_gap(&record), "{}", r.stdout);
+    assert!(external_assertion(&record, 0)["externalSignature"]["rootPinMatched"].is_null());
+}
+
+#[test]
+fn external_chain_malformed_root_fingerprints_are_refused() {
+    for pin in ["", "00", &"gg".repeat(32), &"00".repeat(33)] {
+        let mut rule = external_chain_rule();
+        rule["requireChainToRootSha256"] = pin.into();
+        let (r, record, _) =
+            verify_external_chain(&format!("invalid-pin-{}", pin.len()), "valid", &[rule]);
+        assert_eq!(r.code, 4, "{}", r.stdout);
+        assert!(
+            record.to_string().contains("must be 64 hex digits"),
+            "{}",
+            r.stdout
+        );
+    }
+}
+
+#[test]
+fn external_chain_absent_descriptor_is_unevaluable_even_with_a_pin() {
+    let mut rule = external_chain_rule();
+    rule["path"] = serde_json::json!(["no-such-external-signature"]);
+    let (r, record, _) = verify_external_chain("absent-pinned", "valid", &[rule]);
+    assert_eq!(r.code, 3, "{}", r.stdout);
+    assert_eq!(external_assertion(&record, 0)["outcome"], "cannotEvaluate");
+    let evidence = &external_assertion(&record, 0)["externalSignature"];
+    assert!(evidence["signatureVerified"].is_null());
+    assert!(evidence["certificateChain"].is_null());
+    assert!(evidence["rootPinMatched"].is_null());
+}
+
 // ---------------------------------------------------------------------------
 // Online key acquisition.
 //

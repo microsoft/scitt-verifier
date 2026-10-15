@@ -771,6 +771,36 @@ signing moment, which is the closest independently attested time that exists.
 `null` when the chain did not validate, or when no fully verified receipt
 carried a time. As everywhere else in this document, `null` is not a failure.
 
+### `signedStatement.externalSignatures`
+
+One evidence entry per `externalSignatures` policy rule, in rule order. Present
+in `--facts` too. The matching assertion in
+`relyingPartyPolicy.assertions[]` carries the same entry as `externalSignature`;
+its `outcome` remains the result of the whole rule, not just path validation.
+
+Each entry has the descriptor's protected-header `path`, a three-valued
+`signatureVerified`, `rootPinMatched`, and `certificatesValidAtRegistration`.
+`null` means that particular check did not run. `rootPinMatched: true` requires
+both a validated path and a matching configured fingerprint; a signature or
+time check can still fail independently.
+
+`certificateChain` is `null` unless the whole external path validated. When
+present it contains:
+
+| Field | Meaning |
+|---|---|
+| `rootSha256` | SHA-256 of the actual anchor's DER, even when the pin mismatched |
+| `certificateSha256` | SHA-256 of each validated certificate's DER, leaf first and anchor last |
+| `pathLength` | Certificate count, including the anchor |
+| `validatedAt` | Unix time used for structural path validation |
+| `pathNotBefore`, `pathNotAfter` | Simultaneous validity window of the whole path |
+
+Path validation alone does not establish external trust. The root is carried
+by the statement; only a matching pin obtained independently from the
+manufacturer authenticates it. A wrong pin leaves the validated path visible
+but fails the rule. An unsupported algorithm or critical extension yields
+`cannotEvaluate` with no validated path or pin result, never a pass.
+
 ### `artifactBinding.bound`
 
 Three-valued, and the third value matters:

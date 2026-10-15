@@ -436,6 +436,9 @@ fn statement_json(assessment: &Assessment) -> Value {
         "signatureValid": facts.signature_valid,
         "certificateChainLength": facts.certificate_chain_len,
         "certificateChain": chain_json(facts),
+        "externalSignatures": assessment.decision.as_ref().map(|decision| {
+            decision.results.iter().filter_map(|r| r.external_signature.as_ref()).collect::<Vec<_>>()
+        }).unwrap_or_default(),
         // Named for registration rather than signing: the time is the ledger's
         // countersigned `iat`, which witnesses when the statement was
         // registered and is the closest independently attested instant there
@@ -846,6 +849,7 @@ mod tests {
                 name: "issuer".into(),
                 outcome: Outcome::Pass,
                 detail: "d".into(),
+                external_signature: None,
             }],
         };
 
@@ -902,6 +906,7 @@ mod tests {
                 name: "issuer".into(),
                 outcome: Outcome::Pass,
                 detail: "d".into(),
+                external_signature: None,
             }],
         });
         let check = |name: &str, state: CheckState| AdapterCheck {

@@ -78,6 +78,24 @@ build signed by the wrong team, or by a legitimate CA you did not intend to
 accept — and worthless as a defence against forgery. Do not treat them as a
 substitute for supplying roots.
 
+### External signer identity without a root pin
+
+*Reported at runtime:* `appraisal.notChecked` code
+`ExternalSignerChainNotValidated` when a passing external-signature rule did
+not validate its path to a pinned root.
+
+Per-rule `externalSignatures[].requireChainToRootSha256` validates the external
+path using the same supported RFC 5280 subset as the statement chain, then
+compares its root DER's SHA-256. The fingerprint must come from the manufacturer
+through an independent, authenticated channel. Pinning a root extracted from
+the statement itself is circular and authenticates nobody.
+
+A matching pinned rule removes this limitation only for that rule; another
+passing unpinned rule still reports it. Broken or incomplete required paths fail;
+unsupported algorithms or extensions yield `cannotEvaluate`, never a pass.
+Revocation is still not checked, and authenticating a signer does not establish
+the truth of its claims.
+
 ## Not implemented in this release
 
 ### ECDSA-signed certificate chains, and RSA-PSS parameters the backend refuses
@@ -87,8 +105,9 @@ naming the signature algorithm OID and the backend's own reason.
 
 The pinned crypto backend verifies RSA certificate signatures only — PKCS#1 v1.5
 with SHA-256/384/512, and RSA-PSS. A chain whose certificates are signed with
-ECDSA cannot be checked here at all. AMD's hardware bill-of-materials signing
-chain is one real example.
+ECDSA cannot be checked here at all. The observed AMD hardware
+bill-of-materials chain is **not** an ECDSA example: it uses RSA-PSS SHA-384,
+MGF1 SHA-384 and a 48-byte salt, which this backend supports.
 
 RSA-PSS is admitted by OID and then constrained further: the backend requires
 MGF1 over the same digest and one specific salt length per digest. A legal
@@ -100,6 +119,10 @@ The check is asked of the backend itself rather than of a list of OIDs kept
 alongside it. A list agrees with the backend about the algorithm and not about
 its parameters, and the disagreement surfaces as a chain that "failed to
 verify" — an accusation against the signer for what is a limit of the tool.
+
+These algorithm and extension limits also apply to pinned external-signer
+paths. A required external path that cannot be examined reports a
+`cannotEvaluate` policy assertion rather than claiming that its pin matched.
 
 *Consequence:* the chain is **unexamined**, not known-good. This is deliberately
 a different code from the gaps above: supplying a root will not fix it, and only

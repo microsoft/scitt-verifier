@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### External signer chains can be pinned to an independently selected root
+
+`externalSignatures[]` accepts `requireChainToRootSha256` and optional
+`certificateValidAtSigningTime`. Required external paths use the existing
+certificate-chain validator: matching anchors pass, wrong anchors or damaged
+paths fail, and unsupported algorithms or extensions yield `cannotEvaluate`.
+Certificate-time checks use verified receipt registration times, not the
+statement's own clock.
+
+Passing pinned rules no longer report `ExternalSignerChainNotValidated`;
+unpinned rules retain it. JSON and `--facts` expose each external rule's
+validated certificate path, anchor and pin comparison. Obtain manufacturer
+fingerprints independently: pinning a root read from the statement is circular.
+The observed RSA-PSS SHA-384 chain with a 48-byte salt is supported, correcting
+the earlier ECDSA example in the limitations.
+
+Older binaries refuse policies containing either new per-rule field rather
+than silently skipping it.
+
 ## 0.5.0
 
 ### Upgrading from 0.4.0

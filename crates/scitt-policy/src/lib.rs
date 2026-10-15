@@ -219,11 +219,9 @@ pub struct Assertions {
     /// the point. A passing check says: the bytes at label `-1` are a valid
     /// signature over this statement's payload by the key in the certificate
     /// at label `33`. It does *not* say that certificate belongs to anyone in
-    /// particular — this build does not validate the chain to a trusted root,
-    /// so a signer who mints their own certificate passes. `signerSubject
-    /// Contains` narrows that to a named subject, which raises the bar from
-    /// "someone" to "someone who wrote this string into a certificate", and a
-    /// run that uses this assertion says so in `notChecked`.
+    /// particular unless the rule also pins the validated chain's root with
+    /// `requireChainToRootSha256`. Without that pin, a signer who mints their
+    /// own certificate passes, and the run says so in `notChecked`.
     ///
     /// It is still worth having. It converts a claim that could be fabricated
     /// with a random-number generator into one that requires a private key,
@@ -260,13 +258,20 @@ pub struct ExternalSignature {
     pub signer_subject_contains: Option<String>,
     /// Substring that must appear in the external signer's certificate issuer.
     ///
-    /// Worth more than `signerSubjectContains` against a self-signed
-    /// certificate, where subject and issuer are the same attacker-chosen
-    /// string. Pinning an issuer at least requires the forger to name a real
-    /// CA — which this build cannot yet hold them to, so the two are of the
-    /// same strength class until chain validation lands.
+    /// Like the subject, this is only a name unless the chain is root-pinned.
     #[serde(default)]
     pub signer_issuer_contains: Option<String>,
+    /// Hex SHA-256 of the root DER, selected independently of the statement.
+    ///
+    /// The whole external chain must validate before its anchor is compared.
+    #[serde(default)]
+    pub require_chain_to_root_sha256: Option<String>,
+    /// Check the validated external path at every verified receipt's `iat`.
+    ///
+    /// As with the top-level assertion, this witnesses registration, not the
+    /// signer-controlled time in the statement.
+    #[serde(default)]
+    pub certificate_valid_at_signing_time: Option<bool>,
 }
 
 /// What a detached signature covers.
@@ -818,6 +823,33 @@ pub struct AssertionResult {
     pub name: String,
     pub outcome: Outcome,
     pub detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_signature: Option<ExternalSignatureEvidence>,
+}
+
+/// Evidence for one addressed external signature, kept separate per rule.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalSignatureEvidence {
+    pub path: Vec<PathSegment>,
+    pub signature_verified: Option<bool>,
+    /// Present only when the entire path validated, even if its pin mismatched.
+    pub certificate_chain: Option<ExternalCertificatePath>,
+    /// `None` means no pin comparison ran, never a successful comparison.
+    pub root_pin_matched: Option<bool>,
+    pub certificates_valid_at_registration: Option<bool>,
+}
+
+/// The external path actually validated, with certificate hashes leaf first.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalCertificatePath {
+    pub root_sha256: String,
+    pub certificate_sha256: Vec<String>,
+    pub path_length: usize,
+    pub validated_at: i64,
+    pub path_not_before: i64,
+    pub path_not_after: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -893,7 +925,17 @@ fn validate_path(path: &[PathSegment], field: &str) -> Result<(), String> {
 
 impl ExternalSignature {
     fn validate(&self, index: usize) -> Result<(), String> {
-        validate_path(&self.path, &format!("externalSignatures[{index}]"))
+        let field = format!("externalSignatures[{index}]");
+        validate_path(&self.path, &field)?;
+        if let Some(pin) = &self.require_chain_to_root_sha256 {
+            let pin = pin.trim();
+            if pin.len() != 64 || !pin.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(format!(
+                    "{field}.requireChainToRootSha256 must be 64 hex digits (SHA-256 of root DER)"
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Render the path the way a reader would write it back into the policy.
@@ -927,6 +969,188 @@ impl ExternalSignature {
             }
         }
         Ok(())
+    }
+
+    fn evaluate(&self, facts: &StatementFacts) -> AssertionResult {
+        let mut evidence = ExternalSignatureEvidence {
+            path: self.path.clone(),
+            signature_verified: None,
+            certificate_chain: None,
+            root_pin_matched: None,
+            certificates_valid_at_registration: None,
+        };
+        let (outcome, detail) = self.evaluate_signature(facts, &mut evidence);
+        let mut evaluated = result(
+            "externalSignatures",
+            outcome,
+            format!("{}: {detail}", self.describe_path()),
+        );
+        evaluated.external_signature = Some(evidence);
+        evaluated
+    }
+
+    fn evaluate_signature(
+        &self,
+        facts: &StatementFacts,
+        evidence: &mut ExternalSignatureEvidence,
+    ) -> (Outcome, String) {
+        let Some(protected) = &facts.protected else {
+            return (Outcome::CannotEvaluate, "no statement was parsed".into());
+        };
+        let descriptor = match resolve_path(protected, &self.path) {
+            Err(why) => return (Outcome::Fail, why),
+            Ok(None) => {
+                return (
+                    Outcome::CannotEvaluate,
+                    "no such protected header, so there is no signature here".into(),
+                )
+            }
+            Ok(Some(descriptor)) => descriptor,
+        };
+        let checked = match self.signed_over {
+            SignedOver::Payload => external::verify_detached(descriptor, facts.payload.as_deref()),
+            SignedOver::CoseSign1 => {
+                external::verify_cose_sign1(descriptor, facts.payload.as_deref())
+            }
+        };
+        let signer = match checked {
+            external::Detached::Unusable(why) => {
+                // A malformed leaf can stop the signature check before it
+                // reaches the path. Do not let that turn a broken required
+                // chain into merely absent evidence.
+                if (self.require_chain_to_root_sha256.is_some()
+                    || self.certificate_valid_at_signing_time.is_some())
+                    && self.certificate_chain(descriptor).is_ok()
+                {
+                    if let Err(finding) = self.check_chain(descriptor, facts, evidence) {
+                        return finding;
+                    }
+                }
+                return (Outcome::CannotEvaluate, why);
+            }
+            external::Detached::Invalid { signer, why } => {
+                evidence.signature_verified = Some(false);
+                return (
+                    Outcome::Fail,
+                    format!("{why} — signed by {}", describe_signer(&signer)),
+                );
+            }
+            external::Detached::Valid(signer) => signer,
+        };
+        evidence.signature_verified = Some(true);
+        if let Err(why) = self.check_signer(&signer) {
+            return (Outcome::Fail, why);
+        }
+        let chain_detail = match self.check_chain(descriptor, facts, evidence) {
+            Ok(detail) => detail,
+            Err(finding) => return finding,
+        };
+        (
+            Outcome::Pass,
+            format!(
+                "valid signature over the payload by {}{chain_detail}",
+                describe_signer(&signer)
+            ),
+        )
+    }
+
+    fn certificate_chain(&self, descriptor: &CborValue) -> scitt_receipt::Result<Vec<Vec<u8>>> {
+        match self.signed_over {
+            SignedOver::Payload => external::certificate_chain(descriptor),
+            SignedOver::CoseSign1 => external::cose_sign1_certificate_chain(descriptor),
+        }
+    }
+
+    fn check_chain(
+        &self,
+        descriptor: &CborValue,
+        facts: &StatementFacts,
+        evidence: &mut ExternalSignatureEvidence,
+    ) -> Result<String, (Outcome, String)> {
+        if self.require_chain_to_root_sha256.is_none()
+            && self.certificate_valid_at_signing_time.is_none()
+        {
+            return Ok(String::new());
+        }
+        let chain = self
+            .certificate_chain(descriptor)
+            .map_err(|e| (Outcome::Fail, e.to_string()))?;
+        let outcome = scitt_receipt::chain::validate(&chain, &Default::default()).map_err(|e| {
+            let outcome = match e {
+                scitt_receipt::Error::Malformed(_)
+                | scitt_receipt::Error::Structure(_)
+                | scitt_receipt::Error::TrustMaterial(_) => Outcome::Fail,
+                scitt_receipt::Error::Crypto(_)
+                | scitt_receipt::Error::UnsupportedAlgorithm(_)
+                | scitt_receipt::Error::UnsupportedVds(_)
+                | scitt_receipt::Error::UnknownKid(_) => Outcome::CannotEvaluate,
+            };
+            (
+                outcome,
+                format!("the external chain could not be checked: {e}"),
+            )
+        })?;
+        let details = match outcome {
+            ChainOutcome::Valid(details) => details,
+            ChainOutcome::Invalid(why) | ChainOutcome::Insufficient(why) => {
+                // A transported path that stops short of a root does not meet
+                // this rule. A fingerprint alone cannot supply the missing DER.
+                return Err((
+                    Outcome::Fail,
+                    format!("the external chain did not validate: {why}"),
+                ));
+            }
+            ChainOutcome::Unsupported(why) => {
+                return Err((
+                    Outcome::CannotEvaluate,
+                    format!("this build cannot check the external chain: {why}"),
+                ))
+            }
+        };
+        let root = hex(&details.root_sha256);
+        evidence.certificate_chain = Some(ExternalCertificatePath {
+            root_sha256: root.clone(),
+            certificate_sha256: chain
+                .iter()
+                .map(|der| scitt_receipt::sha256_hex(der))
+                .collect(),
+            path_length: details.path_len,
+            validated_at: details.validated_at,
+            path_not_before: details.path_not_before,
+            path_not_after: details.path_not_after,
+        });
+        if let Some(expected) = &self.require_chain_to_root_sha256 {
+            let matches = root.eq_ignore_ascii_case(expected.trim());
+            evidence.root_pin_matched = Some(matches);
+            if !matches {
+                return Err((
+                    Outcome::Fail,
+                    format!("the external chain terminates at root {root}, not {expected}"),
+                ));
+            }
+        }
+        if let Some(required) = self.certificate_valid_at_signing_time {
+            let valid = scitt_receipt::valid_at_registrations(&details, &facts.receipts);
+            evidence.certificates_valid_at_registration = valid;
+            match valid {
+                None => return Err((
+                    Outcome::CannotEvaluate,
+                    "no fully verified receipt carried an iat to check the external path against"
+                        .into(),
+                )),
+                Some(valid) if valid != required => {
+                    return Err((
+                        Outcome::Fail,
+                        format!(
+                            "external certificates valid at every registration: {valid}, \
+                             but the policy required {required}"
+                        ),
+                    ))
+                }
+                Some(_) => {}
+            }
+        }
+        Ok(format!("; external chain validated to root {root}"))
     }
 }
 
@@ -1616,74 +1840,7 @@ impl Policy {
 
         if let Some(externals) = &a.external_signatures {
             for external in externals {
-                let name = "externalSignatures";
-                let at = external.describe_path();
-
-                let Some(protected) = &facts.protected else {
-                    results.push(result(
-                        name,
-                        Outcome::CannotEvaluate,
-                        format!("{at}: no statement was parsed"),
-                    ));
-                    continue;
-                };
-
-                let found = match resolve_path(protected, &external.path) {
-                    Ok(found) => found,
-                    Err(why) => {
-                        results.push(result(name, Outcome::Fail, format!("{at}: {why}")));
-                        continue;
-                    }
-                };
-
-                let Some(descriptor) = found else {
-                    results.push(result(
-                        name,
-                        Outcome::CannotEvaluate,
-                        format!("{at}: no such protected header, so there is no signature here"),
-                    ));
-                    continue;
-                };
-
-                // Every convention is named by the policy, never inferred from
-                // the value's shape. An exhaustive match makes adding one a
-                // compile error rather than a silent fallthrough.
-                let payload = facts.payload.as_deref();
-                let checked = match external.signed_over {
-                    SignedOver::Payload => external::verify_detached(descriptor, payload),
-                    SignedOver::CoseSign1 => external::verify_cose_sign1(descriptor, payload),
-                };
-
-                results.push(match checked {
-                    // The tool could not put the question. Never a pass, and
-                    // not a failure either: nobody has been shown to have done
-                    // anything wrong, and a report that conflated the two
-                    // would send an operator hunting for a forgery that is
-                    // actually a missing field.
-                    external::Detached::Unusable(why) => {
-                        result(name, Outcome::CannotEvaluate, format!("{at}: {why}"))
-                    }
-                    external::Detached::Invalid { signer, why } => result(
-                        name,
-                        Outcome::Fail,
-                        format!("{at}: {why} — signed by {}", describe_signer(&signer)),
-                    ),
-                    external::Detached::Valid(signer) => match external.check_signer(&signer) {
-                        // A valid signature by the wrong signer is a failure,
-                        // not a pass with a caveat. It is exactly the shape a
-                        // substitution attack takes: real cryptography, wrong
-                        // party.
-                        Err(why) => result(name, Outcome::Fail, format!("{at}: {why}")),
-                        Ok(()) => result(
-                            name,
-                            Outcome::Pass,
-                            format!(
-                                "{at}: valid signature over the payload by {}",
-                                describe_signer(&signer)
-                            ),
-                        ),
-                    },
-                });
+                results.push(external.evaluate(facts));
             }
         }
 
@@ -1898,6 +2055,7 @@ fn result(name: &str, outcome: Outcome, detail: impl Into<String>) -> AssertionR
         name: name.to_string(),
         outcome,
         detail: detail.into(),
+        external_signature: None,
     }
 }
 
@@ -2025,8 +2183,8 @@ fn hex(bytes: &[u8]) -> String {
 /// Name an external signer for a report.
 ///
 /// Says "certificate naming X" rather than "X", because that is all that was
-/// established: no chain was validated, so the subject is a string the
-/// certificate's own author chose.
+/// established by the signature alone. A separately validated and pinned path
+/// is needed to authenticate the certificate's claim.
 fn describe_signer(signer: &DetachedSigner) -> String {
     match &signer.subject {
         Some(subject) => format!("a certificate naming '{subject}'"),

@@ -420,12 +420,9 @@ fn anchor_candidates(
 /// Returning `Some` means no verdict is available because of a limit in this
 /// tool, so the caller reports [`Outcome::Unsupported`] — not
 /// [`Outcome::Insufficient`], which is for material that was simply absent and
-/// might be supplied next run. All three cases below are real: a production
-/// AMD chain is ECDSA-signed, a production Microsoft chain marks its
-/// extendedKeyUsage critical, and RSA-PSS is admitted by OID while the pinned
-/// backend accepts only one salt length per digest. OpenSSL-based verifiers
-/// accept all of them, so calling any one invalid would contradict the service
-/// that issued it.
+/// might be supplied next run. ECDSA certificate signatures, unhandled critical
+/// extensions and unsupported RSA-PSS parameters are capability limits, not
+/// evidence that the chain is invalid.
 ///
 /// `path` and `path_der` are anchor-first and must describe the same path.
 fn capability_gap(path: &[&Cert], path_der: &[&[u8]]) -> Result<Option<String>> {

@@ -387,7 +387,7 @@ pub fn verify_statement_with(
 /// is a separate registration event, and a statement whose certificates had
 /// expired by the time of its second registration has not satisfied "the
 /// certificates were live when this was registered".
-fn valid_at_registrations(details: &chain::Details, receipts: &[ReceiptFacts]) -> Option<bool> {
+pub fn valid_at_registrations(details: &chain::Details, receipts: &[ReceiptFacts]) -> Option<bool> {
     let mut attested = receipts
         .iter()
         .filter(|facts| facts.fully_verified())

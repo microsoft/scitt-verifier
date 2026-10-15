@@ -885,7 +885,9 @@ computes it.
   {
     "path": ["external-statement"],
     "signedOver": "coseSign1",
-    "signerSubjectContains": "Example Component Supplier"
+    "signerSubjectContains": "Example Component Supplier",
+    "requireChainToRootSha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "certificateValidAtSigningTime": true
   },
   {
     "path": ["external-signature", 0],
@@ -955,6 +957,37 @@ says so in the detail. An embedded payload that matches exactly is accepted.
 on the signer's certificate. They behave exactly like the top-level assertions
 of the same name, and carry the same caveat — see below.
 
+#### Authenticate the external signer with an independent root pin
+
+`requireChainToRootSha256` is optional **per rule**, for both `signedOver`
+conventions. It requires the whole external `x5chain`, leaf first, to validate
+to its embedded self-issued root using the same RFC 5280 subset and crypto
+backend as the statement chain. Only then is the root DER's SHA-256 compared
+with the configured 64 hex digits, case-insensitively. The example above uses
+an invented fingerprint; replace it with the independently authenticated value.
+
+**Obtain that fingerprint from the manufacturer through an independent,
+authenticated channel.** Reading the root out of the statement and pinning its
+hash is circular: an attacker can replace both the chain and the value you
+decide to trust. Such a pin can demonstrate the mechanics, not authenticate the
+manufacturer. `--trusted-roots` applies to the outer statement chain, not these
+external paths.
+
+`certificateValidAtSigningTime` optionally checks every certificate on the
+validated external path at **every fully verified receipt's registration
+time**, like the top-level assertion. It never uses the statement's own `iat`.
+It is off by default, so later certificate expiry does not invalidate a
+historical registration. `true` requires every attested time inside the path's
+validity window; `false` requires at least one outside it. No verified receipt
+time means `cannotEvaluate`, even for `false`. This check can be used without
+a root pin, but does not independently authenticate the signer.
+
+A passing pinned rule no longer reports `ExternalSignerChainNotValidated`.
+Another unpinned rule still reports that limitation; pinning one external
+signer does not authenticate all of them. JSON and `--facts` expose each rule's
+addressed signature, validated certificate path and anchor under
+`signedStatement.externalSignatures`.
+
 #### Why this is worth more than matching the header
 
 Every byte `protectedHeaders` can read was chosen by whoever assembled the
@@ -968,12 +1001,13 @@ covers is no longer the payload present.
 
 #### What it does not establish
 
-**Not whose key it is.** This build does not validate the external certificate
-chain to a trusted root, so a signer who mints their own certificate passes.
-`signerSubjectContains` raises the bar from "someone" to "someone who wrote this
-string into a certificate they issued themselves" — useful against mistakes,
-not against forgery. A run that uses this assertion says so explicitly under
-**Not checked**, as `ExternalSignerChainNotValidated`.
+**Without an independent root pin, not whose key it is.** A signer who mints
+their own certificate passes an unpinned rule. `signerSubjectContains` raises
+the bar from "someone" to "someone who wrote this string into a certificate
+they issued themselves" — useful against mistakes, not against forgery. A
+passing unpinned rule says so explicitly under **Not checked**, as
+`ExternalSignerChainNotValidated`. Even a pinned path does not establish
+certificate revocation status or the truth of the signed payload.
 
 What it *does* give you, even unpinned, is that the descriptor sits in the
 protected bucket: the statement's issuer signed over it and the ledger witnessed
@@ -987,6 +1021,12 @@ party committed to, on the record, at a time the receipt fixes.
 | Signature verifies and the signer pins match | `pass` |
 | Signature does not verify over the payload | `fail` |
 | Signature verifies but a signer pin does not match | `fail` — real cryptography, wrong party, which is the shape a substitution attack takes |
+| A required external path validates and its root fingerprint matches | `pass`, provided the signature and all other requirements pass |
+| The external path validates to a different root | `fail` |
+| A required external path is tampered, malformed, or stops short of its root | `fail` |
+| The external path uses an unsupported certificate algorithm or extension | `cannotEvaluate`, never `pass` |
+| Required external certificate validity differs from the attested registration times | `fail` |
+| External certificate validity is required but no verified receipt attests a time | `cannotEvaluate` |
 | A nested COSE_Sign1 embeds a payload that differs from the statement's | `fail` — its signature may be valid over those bytes; they are not the bytes being deployed |
 | The path leads to no such header | `cannotEvaluate` |
 | The value is not the shape `signedOver` names | `cannotEvaluate` |

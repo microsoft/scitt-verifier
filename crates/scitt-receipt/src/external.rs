@@ -26,9 +26,8 @@ use tav_crypto::{
 
 /// Who made a detached signature, as far as the certificate says.
 ///
-/// Names only. A subject is what a certificate claims, and this build does not
-/// validate the chain to a trusted root, so two statements naming the same
-/// subject are not thereby from the same signer.
+/// Names only. A subject is what a certificate claims; callers must separately
+/// validate and pin its chain before treating it as an identity.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DetachedSigner {
     pub subject: Option<String>,
@@ -118,6 +117,42 @@ fn leaf_der(descriptor: &CborValue) -> Option<(Vec<u8>, usize)> {
     }
 }
 
+/// Read the whole descriptor's `x5chain`, leaf first.
+///
+/// Unlike the leaf-only signature check, path validation must not silently
+/// omit malformed entries: doing so could validate a path other than the one
+/// the producer supplied.
+pub fn certificate_chain(descriptor: &CborValue) -> Result<Vec<Vec<u8>>> {
+    match member(descriptor, labels::X5CHAIN) {
+        Some(CborValue::ByteString(der)) => Ok(vec![der.clone()]),
+        Some(CborValue::Array(items)) if !items.is_empty() => items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| match item {
+                CborValue::ByteString(der) => Ok(der.clone()),
+                _ => Err(Error::Structure(format!(
+                    "x5chain entry {index} is not a DER byte string"
+                ))),
+            })
+            .collect(),
+        _ => Err(Error::Structure(
+            "the external signature carries no certificate chain at label 33".into(),
+        )),
+    }
+}
+
+/// Read the whole protected `x5chain` of a nested COSE_Sign1.
+pub fn cose_sign1_certificate_chain(descriptor: &CborValue) -> Result<Vec<Vec<u8>>> {
+    certificate_chain(&parse_sign1(descriptor)?.protected)
+}
+
+fn parse_sign1(descriptor: &CborValue) -> Result<Sign1> {
+    let bytes = descriptor
+        .to_bytes()
+        .map_err(|e| Error::Structure(format!("could not encode the nested COSE_Sign1: {e:?}")))?;
+    Sign1::parse(&bytes)
+}
+
 /// Check one detached signature descriptor against the bytes it should cover.
 ///
 /// `payload` is the statement's payload. A detached payload leaves nothing to
@@ -197,15 +232,7 @@ pub fn verify_cose_sign1(descriptor: &CborValue, payload: Option<&[u8]>) -> Deta
     // outer statement would not be. Nothing here is compared against the wire:
     // the protected bucket is a byte string, which round-trips exactly, and it
     // is those bytes — not this array — that the signature covers.
-    let bytes = match descriptor.to_bytes() {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            return Detached::Unusable(format!(
-                "the value at this path could not be read as a COSE_Sign1: {e:?}"
-            ))
-        }
-    };
-    let inner = match Sign1::parse(&bytes) {
+    let inner = match parse_sign1(descriptor) {
         Ok(inner) => inner,
         Err(e) => {
             return Detached::Unusable(format!(

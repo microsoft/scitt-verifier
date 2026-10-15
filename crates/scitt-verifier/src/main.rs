@@ -2262,14 +2262,15 @@ fn gaps(
 
     match decision {
         Some(d) => {
-            // A passing external-signature check proves possession of a private
-            // key, and nothing about whose key it is: the certificate that
-            // carried it was not validated to any root. Saying so here keeps
-            // the report from reading as an endorsement of the named signer.
-            if d.results
-                .iter()
-                .any(|r| r.name == "externalSignatures" && r.outcome == AssertionOutcome::Pass)
-            {
+            // One pinned rule must not hide another rule's unanchored signer.
+            if d.results.iter().any(|r| {
+                r.name == "externalSignatures"
+                    && r.outcome == AssertionOutcome::Pass
+                    && !r
+                        .external_signature
+                        .as_ref()
+                        .is_some_and(|e| e.root_pin_matched == Some(true))
+            }) {
                 gaps.push(Gap::new(
                     "ExternalSignerChainNotValidated",
                     Category::SignerIdentity,
