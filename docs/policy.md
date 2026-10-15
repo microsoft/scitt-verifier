@@ -124,7 +124,7 @@ for whoever opens the policy file, so put anything an auditor needs into
 ### Optional adapter requirements
 
 `assertions` contains statement rules only. Resource-specific requirements are
-namespaced under `adapters`. Two keys are supported, and a policy may use at
+namespaced under `adapters`. Three keys are supported, and a policy may use at
 most one of them:
 
 ```text
@@ -135,11 +135,16 @@ adapters.azure-confidential-ledger.binding  Execution-policy claim and node requ
 adapters.image-reproduction.profile           How the statement and records are read.
 adapters.image-reproduction.sourceRepository  The only repository the statement may name.
 adapters.image-reproduction.component         The only component (app, variant) it may be about.
+
+adapters.amd-snp-device.profile     How the hardware BOM payload is read (spdx3-hbom).
+adapters.amd-snp-device.category    The SPDX package category naming the device.
+adapters.amd-snp-device.minimumTcb  Per-generation floor for the report's reported TCB.
 ```
 
 See [adapters](adapters.md#policy-shape) for the complete JSON shape and field
 reference of each, and [image reproduction](adapters.md#image-reproduction)
-for the second. The unpublished top-level `ledger`/`trust` and
+for the second, and [AMD SNP device](adapters.md#amd-snp-device) for the
+third. The unpublished top-level `ledger`/`trust` and
 `assertions.bindLedgerPolicy` form is removed, not accepted as an alias.
 Unknown adapters and unknown fields are errors.
 

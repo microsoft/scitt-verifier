@@ -152,6 +152,7 @@ mod tests {
                     variant: "v".into(),
                 },
             }),
+            amd_snp_device: None,
         };
         assert!(!adapters.is_empty());
     }

@@ -134,6 +134,18 @@ scitt-verifier verify ... --binding-mode saved-evidence \
   --adapter image-reproduction --evidence DIR
 ```
 
+`amd-snp-device` checks that a fresh SEV-SNP report from the machine you are
+on was signed by the device a hardware BOM statement names. It is behind the
+`adapter-amd-snp-device` build feature; evidence is collected on the device
+with `tools/collect-snp-evidence.ps1`. See
+[AMD SNP device](docs/adapters.md#amd-snp-device).
+
+```console
+cargo build --release --features adapter-amd-snp-device
+scitt-verifier verify ... --binding-mode saved-evidence \
+  --adapter amd-snp-device --evidence DIR
+```
+
 `azure-confidential-ledger` compares an execution policy
 embedded in the statement with policy enforcement evidenced by attested ledger
 nodes.

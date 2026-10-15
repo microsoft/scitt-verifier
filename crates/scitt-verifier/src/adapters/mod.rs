@@ -6,6 +6,7 @@ mod live;
 #[cfg(feature = "adapter-azure-confidential-ledger")]
 mod load;
 mod reproduction;
+mod snp_device;
 
 use scitt_policy::Policy;
 use scitt_receipt::Sign1;
@@ -61,6 +62,9 @@ fn configured(policy: &Policy) -> Vec<Adapter> {
     if policy.adapters.image_reproduction.is_some() {
         out.push(Adapter::ImageReproduction);
     }
+    if policy.adapters.amd_snp_device.is_some() {
+        out.push(Adapter::AmdSnpDevice);
+    }
     out
 }
 
@@ -101,6 +105,7 @@ pub fn not_attempted(adapter: Adapter, reason: impl Into<String>) -> AdapterAsse
     match adapter {
         Adapter::AzureConfidentialLedger => acl::not_attempted(reason),
         Adapter::ImageReproduction => reproduction::not_attempted(reason),
+        Adapter::AmdSnpDevice => snp_device::not_attempted(reason),
     }
 }
 
@@ -113,6 +118,7 @@ pub fn check_event(
     match adapter {
         Adapter::AzureConfidentialLedger => acl::check_event(check, detail, findings),
         Adapter::ImageReproduction => reproduction::check_event(check, detail),
+        Adapter::AmdSnpDevice => snp_device::check_event(check, detail),
     }
 }
 
@@ -134,6 +140,10 @@ pub fn appraise(
         Adapter::ImageReproduction => match &policy.adapters.image_reproduction {
             Some(config) => reproduction::appraise_evidence(source, statement, config, progress),
             None => not_attempted(adapter, "policy.adapters.image-reproduction is missing"),
+        },
+        Adapter::AmdSnpDevice => match &policy.adapters.amd_snp_device {
+            Some(config) => snp_device::appraise_evidence(source, statement, config, progress),
+            None => not_attempted(adapter, "policy.adapters.amd-snp-device is missing"),
         },
     }
 }

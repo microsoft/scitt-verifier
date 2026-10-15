@@ -55,6 +55,20 @@ Malformed external chains fail regardless of which entry is malformed. A
 nested payload mismatch fails the rule without claiming that a signature
 check ran (`signatureVerified: null`).
 
+### An `amd-snp-device` adapter binds an SNP report to a hardware BOM
+
+`--binding-mode saved-evidence --adapter amd-snp-device --evidence DIR`
+checks that a fresh SEV-SNP report was signed by the chip whose serial an
+accepted hardware BOM statement records: the report authenticates to AMD's
+pinned root, meets a per-generation TCB floor, carries the operator's nonce,
+and its VCEK hardware ID equals the statement's `hardware_serialNumber`. The
+guest's launch measurement is reported, not appraised. The adapter is behind
+the `adapter-amd-snp-device` build feature, and
+`tools/collect-snp-evidence.ps1` collects the evidence on the device. See
+[adapters](docs/adapters.md#amd-snp-device).
+
+Older binaries refuse a policy containing `adapters.amd-snp-device`.
+
 ## 0.5.0
 
 ### Upgrading from 0.4.0
