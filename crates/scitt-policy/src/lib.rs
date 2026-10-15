@@ -91,6 +91,7 @@ pub struct Assertions {
     #[serde(default)]
     pub require_chain_to_root_sha256: Option<String>,
     /// Every listed OID must occur in the leaf EKU on a validated path.
+    /// Requires a supplied trusted anchor or `requireChainToRootSha256`.
     /// Pair with an independently selected root and registration-time validity.
     #[serde(default)]
     pub require_eku: Option<Vec<String>>,
@@ -1925,7 +1926,11 @@ impl Policy {
             results.push(chain_root_result(facts, expected));
         }
         if let Some(required) = &a.require_eku {
-            results.push(eku_result(facts, required));
+            results.push(eku_result(
+                facts,
+                required,
+                a.require_chain_to_root_sha256.is_some(),
+            ));
         }
 
         if let Some(required) = a.certificate_valid_at_signing_time {
@@ -2212,9 +2217,23 @@ fn chain_root_result(facts: &StatementFacts, expected: &str) -> AssertionResult 
     }
 }
 
-fn eku_result(facts: &StatementFacts, required: &[String]) -> AssertionResult {
+fn eku_result(
+    facts: &StatementFacts,
+    required: &[String],
+    root_pin_configured: bool,
+) -> AssertionResult {
     let name = "requireEku";
     match &facts.chain_outcome {
+        Some(ChainOutcome::Valid(details))
+            if !details.anchored_externally && !root_pin_configured =>
+        {
+            result(
+                name,
+                Outcome::CannotEvaluate,
+                "the path uses only the statement's embedded anchor; supply --trusted-roots or \
+                 configure requireChainToRootSha256 before relying on its leaf EKU",
+            )
+        }
         Some(ChainOutcome::Valid(details)) => match &details.leaf_eku_oids {
             Some(oids) if !required.is_empty() && required.iter().all(|oid| oids.contains(oid)) => {
                 result(
@@ -3070,6 +3089,47 @@ mod tests {
             let json =
                 format!(r#"{{"policyId":"t","policyVersion":"1","assertions":{{{assertion}}}}}"#);
             assert!(Policy::from_json(json.as_bytes()).is_err(), "{assertion}");
+        }
+    }
+
+    #[test]
+    fn require_eku_needs_an_external_anchor_or_a_separate_root_pin() {
+        let mut facts = facts_with_chain(Some(valid_chain([0x11; 32], false)));
+        if let Some(ChainOutcome::Valid(details)) = &mut facts.chain_outcome {
+            details.leaf_eku_oids = Some(vec!["1.2.3".into()]);
+        }
+        let unpinned = chain_policy(r#""requireEku":["1.2.3"]"#);
+        assert_eq!(outcome_of(&unpinned, &facts), Outcome::CannotEvaluate);
+        assert!(detail_of(&unpinned, &facts).contains("requireChainToRootSha256"));
+
+        for (pin, expected_outcome, satisfied) in [
+            ("11".repeat(32), Outcome::Pass, true),
+            ("22".repeat(32), Outcome::Fail, false),
+        ] {
+            let policy = chain_policy(&format!(
+                r#""requireEku":["1.2.3"],"requireChainToRootSha256":"{pin}""#
+            ));
+            let decision = policy.evaluate(&facts, 0);
+            assert_eq!(decision.satisfied(), satisfied);
+            assert_eq!(decision.results.len(), 2);
+            assert_eq!(
+                decision
+                    .results
+                    .iter()
+                    .find(|r| r.name == "requireEku")
+                    .unwrap()
+                    .outcome,
+                Outcome::Pass
+            );
+            assert_eq!(
+                decision
+                    .results
+                    .iter()
+                    .find(|r| r.name == "requireChainToRootSha256")
+                    .unwrap()
+                    .outcome,
+                expected_outcome
+            );
         }
     }
 

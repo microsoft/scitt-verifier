@@ -254,7 +254,11 @@ pub(crate) fn parse_certificate_eku_oids_strict(certificate: &[u8]) -> Result<Ve
             let Some((0x06, oid, mut value)) = read_tlv(extension) else {
                 return Err(malformed());
             };
-            if let Some((0x01, _, rest)) = read_tlv(value) {
+            if let Some((0x01, critical, rest)) = read_tlv(value) {
+                // DER encodes TRUE as FF; DEFAULT FALSE must be omitted.
+                if critical != [0xFF] {
+                    return Err(malformed());
+                }
                 value = rest;
             }
             let Some((0x04, value, [])) = read_tlv(value) else {
@@ -625,6 +629,34 @@ fn decode_oid(contents: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod eku_tests {
     use super::*;
+
+    fn certificate_with_eku_critical_flag(flag: Option<&[u8]>) -> Vec<u8> {
+        let mut extension = tlv(0x06, &[0x55, 0x1D, 0x25]);
+        if let Some(flag) = flag {
+            extension.extend(tlv(0x01, flag));
+        }
+        extension.extend(tlv(0x04, &[0x30, 0x04, 0x06, 0x02, 0x2A, 0x03]));
+        let extensions = tlv(0xA3, &tlv(0x30, &tlv(0x30, &extension)));
+        tlv(0x30, &tlv(0x30, &extensions))
+    }
+
+    #[test]
+    fn certificate_eku_critical_flag_must_be_absent_or_der_true() {
+        for flag in [None, Some(&[0xFF][..])] {
+            assert_eq!(
+                parse_certificate_eku_oids_strict(&certificate_with_eku_critical_flag(flag))
+                    .unwrap(),
+                ["1.2.3"]
+            );
+        }
+        for flag in [&[][..], &[0x00], &[0x01], &[0x7F], &[0xFF, 0xFF]] {
+            assert!(
+                parse_certificate_eku_oids_strict(&certificate_with_eku_critical_flag(Some(flag)))
+                    .is_err(),
+                "invalid critical flag {flag:?} must not be ignored"
+            );
+        }
+    }
 
     #[test]
     fn parses_a_sequence_of_oids() {

@@ -2132,6 +2132,15 @@ fn verify_critical_eku(
     fixture: &str,
     assertions: serde_json::Value,
 ) -> (Run, serde_json::Value) {
+    verify_critical_eku_with_roots(name, fixture, assertions, None)
+}
+
+fn verify_critical_eku_with_roots(
+    name: &str,
+    fixture: &str,
+    assertions: serde_json::Value,
+    trusted_roots: Option<&str>,
+) -> (Run, serde_json::Value) {
     let dir = std::env::temp_dir().join(format!(
         "scitt-verifier-critical-eku-{}-{name}",
         std::process::id()
@@ -2148,19 +2157,25 @@ fn verify_critical_eku(
         .unwrap(),
     )
     .unwrap();
-    let r = run(&[
+    let statement_path = critical_eku_fixture(&format!("{fixture}.cose"));
+    let keys_path = critical_eku_fixture("keys.cbor");
+    let roots_path = dir.join("roots.pem");
+    let mut args = vec![
         "verify",
         "--statement",
-        critical_eku_fixture(&format!("{fixture}.cose"))
-            .to_str()
-            .unwrap(),
+        statement_path.to_str().unwrap(),
         "--scitt-keys",
-        critical_eku_fixture("keys.cbor").to_str().unwrap(),
+        keys_path.to_str().unwrap(),
         "--policy",
         policy.to_str().unwrap(),
         "--format",
         "json",
-    ]);
+    ];
+    if let Some(roots) = trusted_roots {
+        std::fs::write(&roots_path, roots).unwrap();
+        args.extend(["--trusted-roots", roots_path.to_str().unwrap()]);
+    }
+    let r = run(&args);
     let record = serde_json::from_str(&r.stdout)
         .unwrap_or_else(|e| panic!("{e}: stdout: {}; stderr: {}", r.stdout, r.stderr));
     std::fs::remove_dir_all(&dir).unwrap();
@@ -2308,14 +2323,53 @@ fn critical_eku_incomplete_path_cannot_evaluate_and_noncritical_eku_is_checked()
 }
 
 #[test]
-fn critical_eku_alone_is_a_nonempty_assertion() {
-    let (r, record) = verify_critical_eku(
-        "only-purpose",
+fn critical_eku_alone_is_nonempty_but_cannot_trust_an_embedded_anchor() {
+    for fixture in ["valid", "noncritical"] {
+        let (r, record) = verify_critical_eku(
+            &format!("only-purpose-{fixture}"),
+            fixture,
+            serde_json::json!({"requireEku": critical_eku_expected()["leafEkuOids"]}),
+        );
+        assert_eq!(r.code, 3, "{}", r.stdout);
+        assert_eq!(record["appraisal"]["verdict"], "cannot-evaluate");
+        assert_eq!(eku_assertion(&record)["outcome"], "cannotEvaluate");
+        assert!(eku_assertion(&record)["detail"]
+            .as_str()
+            .unwrap()
+            .contains("requireChainToRootSha256"));
+        assert_eq!(record["relyingPartyPolicy"]["satisfied"], false);
+        assert_eq!(
+            record["signedStatement"]["certificateChain"]["outcome"],
+            "valid"
+        );
+        assert!(!has_unsupported_chain_gap(&record));
+        assert!(record["appraisal"]["notChecked"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|gap| gap["code"] == "CertificateChainNotAnchoredExternally"));
+    }
+}
+
+#[test]
+fn critical_eku_alone_can_use_an_independently_supplied_anchor() {
+    let statement =
+        scitt_receipt::Sign1::parse(&std::fs::read(critical_eku_fixture("valid.cose")).unwrap())
+            .unwrap();
+    let root = pem(statement.x5chain().last().unwrap());
+    let (r, record) = verify_critical_eku_with_roots(
+        "only-purpose-trusted-roots",
         "valid",
         serde_json::json!({"requireEku": critical_eku_expected()["leafEkuOids"]}),
+        Some(&root),
     );
     assert_eq!(r.code, 0, "{}", r.stdout);
     assert_eq!(eku_assertion(&record)["outcome"], "pass");
+    assert_eq!(
+        record["signedStatement"]["certificateChain"]["anchoredExternally"],
+        true
+    );
+    assert_eq!(record["relyingPartyPolicy"]["satisfied"], true);
 }
 
 #[test]

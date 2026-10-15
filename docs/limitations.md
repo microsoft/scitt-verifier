@@ -142,6 +142,13 @@ purpose through a non-empty `requireEku` assertion. Each listed OID must occur
 in the strictly decoded leaf EKU; absent or malformed EKU, or a missing required
 OID, invalidates the required-purpose path, never passes it.
 
+Matching EKU on a path anchored only in the statement is insufficient for
+`requireEku` to pass. Without `--trusted-roots` or a separate
+`requireChainToRootSha256` assertion, the purpose assertion reports
+`cannotEvaluate` and the run cannot pass. The path can still be structurally
+valid; `CertificateChainNotAnchoredExternally` and `PolicyAssertionUnevaluable`
+explain why those facts do not satisfy the policy.
+
 Without that purpose check, critical EKU still reports
 `CertificateChainUnsupported`. A root pin or an issuer string containing
 `::eku:` does not enable it. Critical CA EKU and other unhandled critical
@@ -158,6 +165,11 @@ issuer, validity, CA, key-usage and path-length checks, with signatures still
 verified by TAV. Other paths continue through TAV's validator unchanged. The
 TAV pin is not advanced. Follow-up: upstream a purpose-aware policy hook and
 conditional critical-EKU processing, then replace the local mirror.
+This pin is the last TAV revision with the pure-Rust backend. Moving to a
+newer pin with the OpenSSL backend would give normal paths OpenSSL's validator
+while critical-EKU paths still use this local copy. Re-audit policy parity
+and migrate both paths together (or use the upstream purpose hook) before
+changing the pin/backend; do not assume this mirror remains equivalent.
 
 The same applies to four extensions the policy refuses **even when they are not
 critical**: `policyMappings`, `nameConstraints`, `policyConstraints`, and

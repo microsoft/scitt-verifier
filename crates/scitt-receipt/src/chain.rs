@@ -351,6 +351,9 @@ fn check_leaf_eku(leaf: &[u8], required: &[String]) -> std::result::Result<Vec<S
 /// path and only for a critical leaf EKU that `check_leaf_eku` will process.
 /// Never strip or rewrite the signed extension to get past TAV's policy.
 /// All other paths still use TAV's validator directly.
+/// Re-audit parity when moving the pin/backend: this is the last pure-Rust
+/// TAV revision, and OpenSSL's normal validator could diverge from this copy.
+/// Upstream the purpose hook or migrate both paths together.
 fn verify_path_with_leaf_eku(path: &[&Cert], time: std::time::Duration) -> tav_crypto::Result<()> {
     let Some(anchor) = path.first() else {
         return Err("certificate path must not be empty".into());

@@ -9,6 +9,11 @@ all occur in the strictly decoded leaf EKU on a validated path. This enables
 processing a critical leaf EKU; without a purpose requirement the same chain
 still reports `CertificateChainUnsupported`. Missing required purposes and
 malformed EKUs fail closed. Root pins remain independent requirements.
+An embedded-only anchor cannot satisfy `requireEku` without a separate policy
+root pin: the assertion reports `cannotEvaluate` unless the path used supplied
+trusted roots or the policy also requires `requireChainToRootSha256`. A wrong
+configured pin still fails independently of a matching EKU. Strict extension
+decoding rejects non-DER critical flags as well as duplicate EKU extensions.
 
 Pair with `certificateValidAtSigningTime`: short-lived signing leaves are
 judged at verified receipt registration time, not at today's clock or the

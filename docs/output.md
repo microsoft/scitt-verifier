@@ -768,6 +768,12 @@ purpose produces `invalid`, with a failed `requireEku` assertion and exit 1,
 not an unevaluated success. A matching purpose with a wrong root pin still
 fails the root assertion (exit 2). Unsupported or absent paths make
 `requireEku` `cannotEvaluate`.
+An otherwise valid matching EKU also yields `cannotEvaluate` (exit 3) when
+`anchoredExternally` is false and no `requireChainToRootSha256` assertion is
+configured. The chain facts remain valid, but `relyingPartyPolicy.satisfied`
+is false and `PolicyAssertionUnevaluable` explains the missing independent
+anchor. Supplying trusted roots or requiring a root pin is necessary for
+purpose-based policy acceptance.
 
 ### `signedStatement.certificatesValidAtRegistration`
 

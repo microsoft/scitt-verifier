@@ -586,6 +586,24 @@ check('a critical EKU without purpose is unsupported',
 check('the policy entry point enables matching critical EKU',
   ekuEvaluate('valid').satisfied, true);
 check('noncritical EKU is also checked', ekuEvaluate('noncritical').satisfied, true);
+const ekuOnly = { requireEku: ekuExpected.leafEkuOids };
+for (const fixture of ['valid', 'noncritical']) {
+  const unpinnedPurpose = ekuEvaluate(fixture, ekuOnly);
+  check(`${fixture}: embedded EKU alone cannot satisfy policy`,
+    unpinnedPurpose.satisfied, false);
+  check(`${fixture}: independent anchoring is unevaluable, not satisfied`,
+    unpinnedPurpose.assertions.find((a) => a.name === 'requireEku').outcome,
+    'cannotEvaluate');
+}
+const ekuRoot = certificatesIn(ekuRead('valid.cose'))
+  .find((c) => c.subject === 'CN=Synthetic Purpose Root');
+check('the synthetic purpose root is found', Boolean(ekuRoot), true);
+const externallyAnchoredPurpose = JSON.parse(evaluatePolicy(
+  ekuRead('valid.cose'), ekuKeys, ekuPolicy(ekuOnly), ekuExpected.registeredAt,
+  pem(ekuRoot.der),
+));
+check('a supplied trusted anchor satisfies EKU without a root pin',
+  externallyAnchoredPurpose.satisfied, true);
 for (const fixture of ['absent-eku', 'any-eku', 'malformed-eku', 'duplicate-eku']) {
   check(`${fixture} cannot satisfy the purpose requirement`,
     ekuEvaluate(fixture).assertions.find((a) => a.name === 'requireEku').outcome, 'fail');

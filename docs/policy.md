@@ -531,7 +531,12 @@ empty list or an invalid OID is a policy usage error, not a purpose check.
 These are invented identifiers, not deployable trust material. Choose the root
 fingerprint and purpose OIDs through an independent, authenticated channel.
 An EKU under an attacker-created root is no more an identity guarantee than
-that root's subject name.
+that root's subject name. `requireEku` therefore reports `cannotEvaluate`
+(exit 3) when the validated path uses only an embedded anchor and the policy
+has no `requireChainToRootSha256`. Supply `--trusted-roots` or require the root
+fingerprint in the same policy. `certificateChainValidated: true` alone does
+not meet this prerequisite. A configured pin is still evaluated independently:
+a wrong pin fails the policy even if the EKU matches.
 
 This assertion enables processing a **leaf's** critical EKU (`2.5.29.37`).
 Without it, critical EKU remains `CertificateChainUnsupported`, even with a root
@@ -541,7 +546,8 @@ resolution is performed; that and intermediate-subject assertions remain #29
 work. This assertion does not apply to `externalSignatures[]`.
 
 The decoder consumes the entire EKU value strictly and rejects duplicate EKU
-extensions. Missing required OIDs,
+extensions. Present extension critical flags must be DER TRUE (`FF`); default
+FALSE must be omitted. Missing required OIDs,
 an absent EKU, or malformed EKU invalidate the required-purpose path and make
 `requireEku` fail; the CLI reports `untrusted` (exit 1), as for other invalid
 statement paths. `anyExtendedKeyUsage` is not a substitute for an explicitly
