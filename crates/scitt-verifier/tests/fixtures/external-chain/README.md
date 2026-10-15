@@ -25,3 +25,8 @@ usable even in unsupported-chain cases. Registration-time fixtures establish
 that validity uses verified receipt times, not the envelope's out-of-window
 `iat`. `expected.json` records generated anchor/path hashes and validity bounds;
 these are synthetic values, not independently authenticated manufacturer pins.
+
+Review regressions also cover a malformed first chain entry, empty or
+wrong-typed chains, missing chains, rejected nested signatures, and a nested
+signature over a different embedded payload. The latter fails payload binding
+before its signature is checked, so its signature result must remain `null`.

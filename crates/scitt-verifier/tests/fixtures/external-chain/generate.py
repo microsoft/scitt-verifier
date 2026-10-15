@@ -126,19 +126,27 @@ def main():
     )
     signature = leaf_key.sign(PAYLOAD, PSS, hashes.SHA384())
 
-    def statement(name, external_chain, *, nested=False, bad_signature=False,
-                  registered_at=REGISTERED_AT):
+    def statement(name, external_chain, *, nested=False, nested_payload=None,
+                  bad_signature=False, registered_at=REGISTERED_AT):
         detached_signature = signature
         if bad_signature:
             detached_signature = bytes(len(signature))
         if nested:
-            protected = cbor2.dumps({1: -38, 33: external_chain})
+            headers = {1: -38}
+            if external_chain is not None:
+                headers[33] = external_chain
+            protected = cbor2.dumps(headers)
             inner_signature = leaf_key.sign(
-                sig_structure(protected, PAYLOAD), PSS, hashes.SHA384()
+                sig_structure(protected, PAYLOAD if nested_payload is None else nested_payload),
+                PSS, hashes.SHA384()
             )
-            descriptor = cbor2.CBORTag(18, [protected, {}, None, inner_signature])
+            if bad_signature:
+                inner_signature = bytes(len(inner_signature))
+            descriptor = cbor2.CBORTag(18, [protected, {}, nested_payload, inner_signature])
         else:
-            descriptor = {1: -38, 33: external_chain, -1: detached_signature}
+            descriptor = {1: -38, -1: detached_signature}
+            if external_chain is not None:
+                descriptor[33] = external_chain
         # Deliberately outside the certificate window. Time assertions must
         # use independently attested receipt times, not this signer's claim.
         protected = cbor2.dumps({
@@ -167,6 +175,9 @@ def main():
     statement("valid", chain)
     statement("nested", chain, nested=True)
     statement("bad-signature", chain, bad_signature=True)
+    statement("nested-bad-signature", chain, nested=True, bad_signature=True)
+    statement("nested-payload-mismatch", chain, nested=True,
+              nested_payload=b'{"component":"different-synthetic-component"}')
     statement("tampered-leaf", [corrupt_signature(chain[0]), *chain[1:]])
     statement("tampered-intermediate", [chain[0], corrupt_signature(chain[1]), chain[2]])
     statement("missing-root", chain[:-1])
@@ -177,6 +188,12 @@ def main():
     statement("nested-truncated-leaf-der", [chain[0][:-16], *chain[1:]], nested=True)
     statement("malformed-entry", [chain[0], 7, chain[1], chain[2]])
     statement("nested-malformed-entry", [chain[0], 7, chain[1], chain[2]], nested=True)
+    statement("malformed-first-entry", [7, *chain])
+    statement("nested-malformed-first-entry", [7, *chain], nested=True)
+    statement("empty-chain", [])
+    statement("wrong-chain-type", 7)
+    statement("missing-chain", None)
+    statement("nested-missing-chain", None, nested=True)
     statement("unsupported-pss", [der(unsupported), *chain[1:]])
     statement("unsupported-ecdsa", [der(ec_leaf), der(ec_ca)])
     statement("unsupported-critical", [der(critical), *chain[1:]])

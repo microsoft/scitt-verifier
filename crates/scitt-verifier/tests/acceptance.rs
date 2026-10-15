@@ -2319,14 +2319,115 @@ fn external_chain_unsupported_algorithms_and_critical_extensions_never_pass() {
 
 #[test]
 fn external_chain_a_root_pin_does_not_replace_signature_verification() {
-    let (r, record, _) =
-        verify_external_chain("bad-signature", "bad-signature", &[external_chain_rule()]);
+    for (fixture, signed_over) in [
+        ("bad-signature", "payload"),
+        ("nested-bad-signature", "coseSign1"),
+    ] {
+        let mut rule = external_chain_rule();
+        rule["signedOver"] = signed_over.into();
+        let (r, record, facts) = verify_external_chain(fixture, fixture, &[rule]);
+        assert_eq!(r.code, 2, "{}", r.stdout);
+        assert_eq!(external_assertion(&record, 0)["outcome"], "fail");
+        assert_eq!(
+            external_assertion(&record, 0)["externalSignature"]["signatureVerified"],
+            false
+        );
+        assert_eq!(
+            record["signedStatement"]["externalSignatures"][0]["signatureVerified"],
+            false
+        );
+        assert_eq!(
+            facts["signedStatement"]["externalSignatures"][0]["signatureVerified"],
+            false
+        );
+    }
+}
+
+#[test]
+fn external_chain_malformed_supplied_chains_fail_before_a_signature_can_run() {
+    for fixture in ["malformed-first-entry", "empty-chain", "wrong-chain-type"] {
+        let (r, record, facts) = verify_external_chain(fixture, fixture, &[external_chain_rule()]);
+        assert_eq!(r.code, 2, "{fixture}: {}", r.stdout);
+        assert_eq!(record["signedStatement"]["signatureValid"], true);
+        assert_eq!(record["receipts"]["entries"][0]["rootSignatureValid"], true);
+        assert_eq!(external_assertion(&record, 0)["outcome"], "fail");
+        let evidence = &external_assertion(&record, 0)["externalSignature"];
+        assert!(evidence["signatureVerified"].is_null());
+        assert!(evidence["certificateChain"].is_null());
+        assert!(evidence["rootPinMatched"].is_null());
+        assert_eq!(facts["signedStatement"]["externalSignatures"][0], *evidence);
+    }
+    let mut rule = external_chain_rule();
+    rule["signedOver"] = "coseSign1".into();
+    let (r, record, _) = verify_external_chain(
+        "nested-malformed-first-entry",
+        "nested-malformed-first-entry",
+        &[rule],
+    );
     assert_eq!(r.code, 2, "{}", r.stdout);
     assert_eq!(external_assertion(&record, 0)["outcome"], "fail");
-    assert_eq!(
-        external_assertion(&record, 0)["externalSignature"]["signatureVerified"],
-        false
+    assert!(
+        external_assertion(&record, 0)["detail"]
+            .as_str()
+            .unwrap()
+            .contains("x5chain entry 0 is not a DER byte string"),
+        "{}",
+        r.stdout
     );
+}
+
+#[test]
+fn external_chain_missing_or_wrong_convention_is_not_a_malformed_supplied_chain() {
+    for (name, fixture, signed_over) in [
+        ("missing-chain", "missing-chain", "payload"),
+        ("nested-missing-chain", "nested-missing-chain", "coseSign1"),
+        ("map-as-cose", "valid", "coseSign1"),
+        ("cose-as-map", "nested", "payload"),
+    ] {
+        let mut rule = external_chain_rule();
+        rule["signedOver"] = signed_over.into();
+        let (r, record, facts) = verify_external_chain(name, fixture, &[rule]);
+        assert_eq!(r.code, 3, "{name}: {}", r.stdout);
+        assert_eq!(external_assertion(&record, 0)["outcome"], "cannotEvaluate");
+        let evidence = &external_assertion(&record, 0)["externalSignature"];
+        assert!(evidence["signatureVerified"].is_null());
+        assert!(evidence["certificateChain"].is_null());
+        assert!(evidence["rootPinMatched"].is_null());
+        assert_eq!(facts["signedStatement"]["externalSignatures"][0], *evidence);
+    }
+}
+
+#[test]
+fn external_chain_payload_mismatch_fails_without_claiming_a_signature_check_ran() {
+    let mut rule = external_chain_rule();
+    rule["signedOver"] = "coseSign1".into();
+    let (r, record, facts) = verify_external_chain(
+        "nested-payload-mismatch",
+        "nested-payload-mismatch",
+        &[rule],
+    );
+    assert_eq!(r.code, 2, "{}", r.stdout);
+    assert_eq!(record["signedStatement"]["signatureValid"], true);
+    assert_eq!(record["receipts"]["entries"][0]["rootSignatureValid"], true);
+    let assertion = external_assertion(&record, 0);
+    assert_eq!(assertion["outcome"], "fail");
+    assert!(
+        assertion["detail"]
+            .as_str()
+            .unwrap()
+            .contains("embeds its own payload"),
+        "{}",
+        r.stdout
+    );
+    let evidence = &assertion["externalSignature"];
+    assert!(evidence["signatureVerified"].is_null());
+    assert!(evidence["certificateChain"].is_null());
+    assert!(evidence["rootPinMatched"].is_null());
+    assert_eq!(
+        record["signedStatement"]["externalSignatures"][0],
+        *evidence
+    );
+    assert_eq!(facts["signedStatement"]["externalSignatures"][0], *evidence);
 }
 
 #[test]

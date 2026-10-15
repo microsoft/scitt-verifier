@@ -784,6 +784,10 @@ Each entry has the descriptor's protected-header `path`, a three-valued
 both a validated path and a matching configured fingerprint; a signature or
 time check can still fail independently.
 
+A nested COSE_Sign1 whose embedded payload differs from the statement fails
+its rule before cryptographic verification. Its `signatureVerified` is `null`,
+not `false`; `false` means a signature check actually ran and rejected it.
+
 `certificateChain` is `null` unless the whole external path validated. When
 present it contains:
 

@@ -1018,18 +1018,17 @@ impl ExternalSignature {
                 // A malformed leaf can stop the signature check before it
                 // reaches the path. Do not let that turn a broken required
                 // chain into merely absent evidence.
-                if (self.require_chain_to_root_sha256.is_some()
-                    || self.certificate_valid_at_signing_time.is_some())
-                    && self.certificate_chain(descriptor).is_ok()
-                {
-                    if let Err(finding) = self.check_chain(descriptor, facts, evidence) {
-                        return finding;
-                    }
+                if let Err(finding) = self.check_chain(descriptor, facts, evidence) {
+                    return finding;
                 }
                 return (Outcome::CannotEvaluate, why);
             }
-            external::Detached::Invalid { signer, why } => {
-                evidence.signature_verified = Some(false);
+            external::Detached::Invalid {
+                signer,
+                why,
+                signature_verified,
+            } => {
+                evidence.signature_verified = signature_verified;
                 return (
                     Outcome::Fail,
                     format!("{why} — signed by {}", describe_signer(&signer)),
@@ -1054,7 +1053,7 @@ impl ExternalSignature {
         )
     }
 
-    fn certificate_chain(&self, descriptor: &CborValue) -> scitt_receipt::Result<Vec<Vec<u8>>> {
+    fn certificate_chain(&self, descriptor: &CborValue) -> external::ChainMaterial {
         match self.signed_over {
             SignedOver::Payload => external::certificate_chain(descriptor),
             SignedOver::CoseSign1 => external::cose_sign1_certificate_chain(descriptor),
@@ -1072,9 +1071,13 @@ impl ExternalSignature {
         {
             return Ok(String::new());
         }
-        let chain = self
-            .certificate_chain(descriptor)
-            .map_err(|e| (Outcome::Fail, e.to_string()))?;
+        let chain = match self.certificate_chain(descriptor) {
+            external::ChainMaterial::Present(chain) => chain,
+            external::ChainMaterial::Unavailable(why) => {
+                return Err((Outcome::CannotEvaluate, why))
+            }
+            external::ChainMaterial::Malformed(why) => return Err((Outcome::Fail, why)),
+        };
         let outcome = scitt_receipt::chain::validate(&chain, &Default::default()).map_err(|e| {
             let outcome = match e {
                 scitt_receipt::Error::Malformed(_)

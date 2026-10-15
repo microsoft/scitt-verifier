@@ -21,6 +21,10 @@ the earlier ECDSA example in the limitations.
 Older binaries refuse policies containing either new per-rule field rather
 than silently skipping it.
 
+Malformed external chains fail regardless of which entry is malformed. A
+nested payload mismatch fails the rule without claiming that a signature
+check ran (`signatureVerified: null`).
+
 ## 0.5.0
 
 ### Upgrading from 0.4.0
