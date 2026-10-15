@@ -1,11 +1,13 @@
 //! Optional relying-party requirements that need adapter-specific evidence.
 
 pub mod acl;
+pub mod amd_snp_device;
 pub mod image_reproduction;
 pub mod maa;
 
 use crate::{result, AssertionResult, Outcome};
 use acl::AzureConfidentialLedgerPolicy;
+use amd_snp_device::AmdSnpDevicePolicy;
 use image_reproduction::ImageReproductionPolicy;
 use serde::{Deserialize, Serialize};
 
@@ -26,11 +28,20 @@ pub struct Adapters {
         skip_serializing_if = "Option::is_none"
     )]
     pub image_reproduction: Option<ImageReproductionPolicy>,
+    #[serde(
+        rename = "amd-snp-device",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub amd_snp_device: Option<AmdSnpDevicePolicy>,
 }
 
 impl Adapters {
     pub fn is_empty(&self) -> bool {
-        self.acl.is_none() && self.image_reproduction.is_none() && self.maa.is_none()
+        self.acl.is_none()
+            && self.image_reproduction.is_none()
+            && self.maa.is_none()
+            && self.amd_snp_device.is_none()
     }
 
     pub(crate) fn validate(&self) -> Result<(), String> {
@@ -48,6 +59,11 @@ impl Adapters {
             policy
                 .validate()
                 .map_err(|e| format!("adapters.image-reproduction: {e}"))?;
+        }
+        if let Some(policy) = &self.amd_snp_device {
+            policy
+                .validate()
+                .map_err(|e| format!("adapters.amd-snp-device: {e}"))?;
         }
         Ok(())
     }
@@ -73,6 +89,13 @@ impl Adapters {
                 "adapters.image-reproduction",
                 Outcome::CannotEvaluate,
                 "image reproduction appraisal requires rebuild evidence unavailable through this API",
+            ));
+        }
+        if self.amd_snp_device.is_some() {
+            results.push(result(
+                "adapters.amd-snp-device",
+                Outcome::CannotEvaluate,
+                "SNP device appraisal requires attestation evidence unavailable through this API",
             ));
         }
         results
