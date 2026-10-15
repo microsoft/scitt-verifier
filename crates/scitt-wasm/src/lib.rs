@@ -322,6 +322,7 @@ fn chain_validation_json(outcome: Option<&chain::Outcome>) -> Value {
             "pathLength": details.path_len,
             "pathNotBefore": details.path_not_before,
             "pathNotAfter": details.path_not_after,
+            "leafEkuOids": details.leaf_eku_oids,
         }),
         chain::Outcome::Invalid(reason) => {
             json!({ "status": "evaluated", "outcome": "invalid", "reason": reason })
@@ -704,7 +705,10 @@ pub fn evaluate_policy(
     // A malformed policy is a usage error, not a finding: nothing was
     // evaluated, so there is no result to render and an exception is honest.
     let policy = Policy::from_json(policy).map_err(to_js)?;
-    let options = verify_options(trusted_roots.as_deref())?;
+    let mut options = verify_options(trusted_roots.as_deref())?;
+    if let Some(chain) = &mut options.chain {
+        chain.required_eku = policy.assertions.require_eku.clone().unwrap_or_default();
+    }
 
     let keys = LedgerKeySet::from_cose_key_set(key_set).map_err(to_js)?;
     let keys = match service_cert.as_deref() {

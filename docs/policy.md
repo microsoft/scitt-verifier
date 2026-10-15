@@ -160,7 +160,8 @@ Within a single assertion the story differs, and the difference is deliberate:
 
 * `issuer` and `oneOf` take a list and accept **any** member. They express
   "one of these is fine".
-* Everything else takes one value.
+* `requireEku` requires **every** OID in its list.
+* Other scalar assertions take one value.
 
 A statement policy decision is satisfied only when at least one assertion ran
 and every required assertion passed. Adapter requirements, when present, must
@@ -183,6 +184,7 @@ That first clause is not redundant — see
 | `requireKidBoundToKey` | `boolean` | Every receipt's kid must be the digest of its signing key |
 | `certificateChainValidated` | `boolean` | The signing certificate chain must validate to an anchor |
 | `requireChainToRootSha256` | `string` | Hex SHA-256 of the root the chain must terminate at |
+| `requireEku` | `string[]` | Every listed OID must occur in the leaf EKU on a validated path |
 | `certificateValidAtSigningTime` | `boolean` | Every certificate on the validated path must be within its validity window at every verified receipt's registration time |
 | `statementSubject` | `object` | The CWT `sub` claim the statement makes about itself |
 | `statementIssuer` | `object` | The CWT `iss` claim naming who signed the statement |
@@ -506,6 +508,57 @@ present, or a chain this build cannot check (see
 [limitations](limitations.md): ECDSA-signed certificates and unhandled critical
 extensions). "I did not look" is never evidence of compromise, and the exit code
 says 3 rather than 1 so you can tell the two apart in a pipeline.
+
+### `requireEku`
+
+Require the signing leaf to contain **every** listed Extended Key Usage OID,
+after validating its path. OIDs must be canonical dotted-decimal strings; an
+empty list or an invalid OID is a policy usage error, not a purpose check.
+
+```json
+{
+  "policyId": "synthetic/purpose-gate",
+  "policyVersion": "1",
+  "assertions": {
+    "issuer": ["synthetic-purpose-ledger.example"],
+    "requireChainToRootSha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "requireEku": ["1.3.6.1.4.1.55555.1", "1.3.6.1.4.1.55555.2"],
+    "certificateValidAtSigningTime": true
+  }
+}
+```
+
+These are invented identifiers, not deployable trust material. Choose the root
+fingerprint and purpose OIDs through an independent, authenticated channel.
+An EKU under an attacker-created root is no more an identity guarantee than
+that root's subject name.
+
+This assertion enables processing a **leaf's** critical EKU (`2.5.29.37`).
+Without it, critical EKU remains `CertificateChainUnsupported`, even with a root
+pin, a chain-validation assertion, or a `statementIssuer` string containing
+`::eku:`. Critical EKU on a CA remains unsupported. No implicit did:x509
+resolution is performed; that and intermediate-subject assertions remain #29
+work. This assertion does not apply to `externalSignatures[]`.
+
+The decoder consumes the entire EKU value strictly and rejects duplicate EKU
+extensions. Missing required OIDs,
+an absent EKU, or malformed EKU invalidate the required-purpose path and make
+`requireEku` fail; the CLI reports `untrusted` (exit 1), as for other invalid
+statement paths. `anyExtendedKeyUsage` is not a substitute for an explicitly
+required OID. No examined path (missing chain, unsupported algorithm or
+extension, or validation not run) yields `cannotEvaluate`, never a pass.
+A different pinned root still fails independently of a matching EKU.
+
+Pair with `certificateValidAtSigningTime`, especially for Artifact Signing:
+leaves can expire days after signing. The check uses **verified receipt
+registration time**, not today's clock or the statement's self-asserted `iat`.
+An expired-today leaf can pass if the complete path was live at registration.
+Revocation is not checked.
+
+Library callers pass the same OIDs as `chain::Options::required_eku` when
+verifying, then evaluate the policy against those facts. The CLI and WASM
+`evaluatePolicy` do this automatically. A valid path whose leaf EKU was not
+checked cannot satisfy this assertion.
 
 ### `protectedHeaders`
 

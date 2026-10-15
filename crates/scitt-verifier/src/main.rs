@@ -388,7 +388,7 @@ fn evaluate(args: &VerifyArgs, now: i64, progress: &mut dyn progress::Sink) -> A
     // anchor is one the operator chose or the one the statement brought with
     // it. Making the check itself conditional would mean the common case
     // reports nothing at all about a chain that is sitting right there.
-    let options = match verify_options(args) {
+    let options = match verify_options(args, &policy) {
         Ok(o) => o,
         Err(d) => {
             progress.emit(progress::Event::finding(
@@ -689,8 +689,11 @@ fn resolve_trust(
 /// Errors here are usage errors, not verdicts: a roots file the operator
 /// pointed at and this tool cannot read is a broken invocation, and quietly
 /// continuing without it would run the weaker check under the stronger flag.
-fn verify_options(args: &VerifyArgs) -> Result<VerifyOptions, Diagnostic> {
-    let mut chain = scitt_receipt::chain::Options::default();
+fn verify_options(args: &VerifyArgs, policy: &Policy) -> Result<VerifyOptions, Diagnostic> {
+    let mut chain = scitt_receipt::chain::Options {
+        required_eku: policy.assertions.require_eku.clone().unwrap_or_default(),
+        ..Default::default()
+    };
 
     if let Some(path) = &args.trusted_roots {
         let text = std::fs::read_to_string(path).map_err(|e| {

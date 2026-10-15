@@ -36,9 +36,11 @@
 
 use crate::der::{self, Validity};
 use crate::error::{Error, Result};
-use tav_crypto::{CertificateBackend, CryptoBackend};
+use tav_crypto::{CertificateBackend, CryptoBackend, KeyBackend, SignatureBackend};
 
 type Cert = <tav_crypto::Crypto as CertificateBackend>::Certificate;
+type Backend = tav_crypto::Crypto;
+const EKU_OID: &str = "2.5.29.37";
 
 /// Extensions the RFC 5280 policy refuses to evaluate rather than process,
 /// paired with whether a non-critical occurrence is refused too.
@@ -61,6 +63,11 @@ const SKIPPED_EXTENSION_OIDS: &[(&str, bool)] = &[
 /// Mirrors `HANDLED_CRITICAL_EXTENSIONS` in TAV's `x509_policy`. A certificate
 /// marking anything else critical is refused there, which is correct RFC 5280
 /// behaviour but says nothing about whether the chain is genuine.
+///
+/// Local divergence: a leaf's critical EKU is additionally processed only
+/// with non-empty `Options::required_eku`. TAV has no purpose-policy hook, so
+/// that case uses the local policy mirror below, not a broadened allowlist.
+/// Follow up upstream with conditional EKU processing; keep the pin unchanged.
 const HANDLED_CRITICAL_EXTENSION_OIDS: &[&str] = &[
     "2.5.29.19", // basicConstraints
     "2.5.29.15", // keyUsage
@@ -80,6 +87,10 @@ pub struct Options {
     ///
     /// Opt-in; see the module comment.
     pub require_valid_at: Option<i64>,
+    /// Each OID must occur in the leaf's strictly decoded EKU. Empty means no
+    /// purpose check, so a critical EKU remains unsupported. Critical EKU on
+    /// a CA remains unsupported even with a leaf-purpose requirement.
+    pub required_eku: Vec<String>,
 }
 
 /// What validation established.
@@ -134,6 +145,8 @@ pub struct Details {
     /// silently used the statement's own copy would answer a question about a
     /// path that was never the one validated.
     pub path_not_after: i64,
+    /// Strictly decoded leaf EKUs, only when a purpose requirement was checked.
+    pub leaf_eku_oids: Option<Vec<String>>,
 }
 
 impl Details {
@@ -273,7 +286,8 @@ fn attempt(
         )
         .chain(std::iter::once(chain[0].as_slice()))
         .collect();
-    if let Some(gap) = capability_gap(&path_certs, &path_der)? {
+    let check_purpose = !options.required_eku.is_empty();
+    if let Some(gap) = capability_gap(&path_certs, &path_der, check_purpose)? {
         return Ok(Outcome::Unsupported(gap));
     }
 
@@ -285,24 +299,108 @@ fn attempt(
         ));
     };
 
-    match <tav_crypto::Crypto as CryptoBackend>::verify_chain(
-        anchor,
-        &intermediate_refs,
-        &parsed[0],
-        Some(std::time::Duration::from_secs(seconds)),
-    ) {
-        Ok(()) => Ok(Outcome::Valid(Details {
-            root_sha256: sha256(anchor_der),
-            anchored_externally: selection.root_index.is_some(),
-            validated_at,
-            path_len: intermediate_refs.len() + 2,
-            path_not_before,
-            path_not_after,
-        })),
-        Err(e) => Ok(Outcome::Invalid(format!(
+    let time = std::time::Duration::from_secs(seconds);
+    let critical_leaf_eku = check_purpose
+        && Backend::extension_criticality(&parsed[0], EKU_OID)
+            .map_err(|e| Error::Crypto(format!("could not inspect leaf EKU: {e}")))?
+            == Some(true);
+    let verified = if critical_leaf_eku {
+        verify_path_with_leaf_eku(&path_certs, time)
+    } else {
+        Backend::verify_chain(anchor, &intermediate_refs, &parsed[0], Some(time))
+    };
+    if let Err(e) = verified {
+        return Ok(Outcome::Invalid(format!(
             "certificate path did not verify: {e}"
-        ))),
+        )));
     }
+
+    let leaf_eku_oids = if check_purpose {
+        match check_leaf_eku(&chain[0], &options.required_eku) {
+            Ok(oids) => Some(oids),
+            Err(reason) => return Ok(Outcome::Invalid(reason)),
+        }
+    } else {
+        None
+    };
+
+    Ok(Outcome::Valid(Details {
+        root_sha256: sha256(anchor_der),
+        anchored_externally: selection.root_index.is_some(),
+        validated_at,
+        path_len: intermediate_refs.len() + 2,
+        path_not_before,
+        path_not_after,
+        leaf_eku_oids,
+    }))
+}
+
+fn check_leaf_eku(leaf: &[u8], required: &[String]) -> std::result::Result<Vec<String>, String> {
+    let oids = der::parse_certificate_eku_oids_strict(leaf).map_err(|e| e.to_string())?;
+    for oid in required {
+        if !oids.contains(oid) {
+            return Err(format!(
+                "leaf extendedKeyUsage does not contain required OID {oid}"
+            ));
+        }
+    }
+    Ok(oids)
+}
+
+/// TAV's pinned RFC 5280 subset, used only after `capability_gap` admits the
+/// path and only for a critical leaf EKU that `check_leaf_eku` will process.
+/// Never strip or rewrite the signed extension to get past TAV's policy.
+/// All other paths still use TAV's validator directly.
+fn verify_path_with_leaf_eku(path: &[&Cert], time: std::time::Duration) -> tav_crypto::Result<()> {
+    let Some(anchor) = path.first() else {
+        return Err("certificate path must not be empty".into());
+    };
+    if !Backend::is_self_issued(anchor)? {
+        return Err("first certificate is not self-issued".into());
+    }
+    for cert in path {
+        if !Backend::is_valid_at(cert, time)? {
+            return Err("certificate is not valid at the given time".into());
+        }
+    }
+    let mut max_path_length = path.len();
+    for edge in path.windows(2) {
+        let (issuer, subject) = (edge[0], edge[1]);
+        if !Backend::issuer_name_matches_subject(subject, issuer)? {
+            return Err("issuer name does not match issuing certificate subject".into());
+        }
+        if Backend::version(issuer)? != 2 {
+            return Err("issuer certificate must be v3".into());
+        }
+        let constraints = Backend::basic_constraints(issuer)?
+            .ok_or("issuer certificate is missing basicConstraints")?;
+        if !constraints.critical || !constraints.ca {
+            return Err("issuer basicConstraints must be critical and assert cA".into());
+        }
+        if Backend::key_usage(issuer)?.is_some_and(|usage| !usage.key_cert_sign) {
+            return Err("issuer keyUsage must allow certificate signing".into());
+        }
+        if !Backend::is_self_issued(issuer)? {
+            max_path_length = max_path_length
+                .checked_sub(1)
+                .ok_or("issuer certificate exceeds pathLenConstraint")?;
+        }
+        if let Some(limit) = constraints.path_len_constraint {
+            max_path_length = max_path_length.min(limit);
+        }
+
+        let algorithm = subject.signature_algorithm()?;
+        let key = <Backend as CryptoBackend>::Key::from_spki_der(
+            &Backend::get_public_key(issuer)?,
+            algorithm,
+        )?;
+        let signature = <Backend as CryptoBackend>::Signature::from_bytes(
+            subject.signature_bytes(),
+            algorithm,
+        )?;
+        Backend::verify_signature(&key, &signature, &subject.tbs_certificate_der()?)?;
+    }
+    Ok(())
 }
 
 /// Parse every certificate up front so a malformed one is an error rather
@@ -425,7 +523,11 @@ fn anchor_candidates(
 /// evidence that the chain is invalid.
 ///
 /// `path` and `path_der` are anchor-first and must describe the same path.
-fn capability_gap(path: &[&Cert], path_der: &[&[u8]]) -> Result<Option<String>> {
+fn capability_gap(
+    path: &[&Cert],
+    path_der: &[&[u8]],
+    check_leaf_purpose: bool,
+) -> Result<Option<String>> {
     // Skips index 0. The backend verifies the anchor's signature over its
     // first child and each child signature after that; it never verifies the
     // anchor's own self-signature, so the algorithm that signed the anchor is
@@ -450,7 +552,7 @@ fn capability_gap(path: &[&Cert], path_der: &[&[u8]]) -> Result<Option<String>> 
         }
     }
 
-    for cert in path {
+    for (index, cert) in path.iter().enumerate() {
         for (oid, reject_non_critical) in SKIPPED_EXTENSION_OIDS {
             let criticality =
                 <tav_crypto::Crypto as CertificateBackend>::extension_criticality(cert, oid)
@@ -471,7 +573,10 @@ fn capability_gap(path: &[&Cert], path_der: &[&[u8]]) -> Result<Option<String>> 
         let critical = <tav_crypto::Crypto as CertificateBackend>::critical_extension_oids(cert);
         let unhandled: Vec<String> = critical
             .into_iter()
-            .filter(|oid| !HANDLED_CRITICAL_EXTENSION_OIDS.contains(&oid.as_str()))
+            .filter(|oid| {
+                !HANDLED_CRITICAL_EXTENSION_OIDS.contains(&oid.as_str())
+                    && !(check_leaf_purpose && index == path.len() - 1 && oid == EKU_OID)
+            })
             .collect();
         if !unhandled.is_empty() {
             return Ok(Some(format!(

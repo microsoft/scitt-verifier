@@ -136,9 +136,28 @@ naming the extension OID.
 
 RFC 5280 requires a verifier to refuse a certificate marking an extension
 critical that it does not understand. The path validation here processes
-`basicConstraints` and `keyUsage`; a certificate marking anything else critical —
-extended key usage, for instance — is reported as unsupported rather than
-invalid.
+`basicConstraints` and `keyUsage`. It additionally processes a **leaf's**
+critical Extended Key Usage (`2.5.29.37`) only when the run actually checks
+purpose through a non-empty `requireEku` assertion. Each listed OID must occur
+in the strictly decoded leaf EKU; absent or malformed EKU, or a missing required
+OID, invalidates the required-purpose path, never passes it.
+
+Without that purpose check, critical EKU still reports
+`CertificateChainUnsupported`. A root pin or an issuer string containing
+`::eku:` does not enable it. Critical CA EKU and other unhandled critical
+extensions remain unsupported; statement-level `requireEku` does not enable
+processing on external-signer paths. Pair purpose and root requirements with
+`certificateValidAtSigningTime`, which checks verified receipt registration
+times rather than the current clock; short-lived leaves may have expired since
+registration.
+
+This is a local divergence from the pinned TAV `x509_policy`'s
+`HANDLED_CRITICAL_EXTENSIONS`, which lists only basic constraints and key usage.
+For this conditional leaf-EKU case, a local mirror retains the pinned policy's
+issuer, validity, CA, key-usage and path-length checks, with signatures still
+verified by TAV. Other paths continue through TAV's validator unchanged. The
+TAV pin is not advanced. Follow-up: upstream a purpose-aware policy hook and
+conditional critical-EKU processing, then replace the local mirror.
 
 The same applies to four extensions the policy refuses **even when they are not
 critical**: `policyMappings`, `nameConstraints`, `policyConstraints`, and
@@ -160,6 +179,11 @@ called during verification. The `statementIssuer` assertion compares the CWT
 `iss` claim as a **string**, which is what it has always documented; it is
 covered by the Issuer's signature and by the receipt, and it is not re-derived
 from the certificate chain.
+
+`requireEku` can independently enforce explicit leaf OIDs against a validated
+path, but does not interpret or authenticate predicates inside that DID.
+Automatic resolution, a distinct resolution assertion, and intermediate
+subject checks are deferred to #29.
 
 *Consequence:* a validated chain plus a pinned root establishes that the leaf
 was issued under a CA you accept. It does **not** establish that the leaf

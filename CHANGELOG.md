@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Critical leaf EKU is processed only when purpose is checked
+
+Statement assertions accept `requireEku`, a non-empty list of OIDs that must
+all occur in the strictly decoded leaf EKU on a validated path. This enables
+processing a critical leaf EKU; without a purpose requirement the same chain
+still reports `CertificateChainUnsupported`. Missing required purposes and
+malformed EKUs fail closed. Root pins remain independent requirements.
+
+Pair with `certificateValidAtSigningTime`: short-lived signing leaves are
+judged at verified receipt registration time, not at today's clock or the
+signer's claimed time. JSON path facts add `leafEkuOids`, populated only after
+a purpose check. The CLI and WASM policy entry point both wire the assertion.
+Older binaries refuse policies containing `requireEku` rather than skipping it.
+
+Critical CA EKU, did:x509 resolution and intermediate-subject assertions remain
+outside this change (#29). Conditional leaf handling locally mirrors the
+pinned TAV path policy without changing its pin; a purpose-aware upstream hook
+is the follow-up.
+
 ### External signer chains can be pinned to an independently selected root
 
 `externalSignatures[]` accepts `requireChainToRootSha256` and optional

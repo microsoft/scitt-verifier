@@ -438,6 +438,7 @@ mod tests {
 
     fn details(not_before: i64, not_after: i64) -> chain::Details {
         chain::Details {
+            leaf_eku_oids: None,
             root_sha256: [0; 32],
             anchored_externally: true,
             validated_at: not_before,

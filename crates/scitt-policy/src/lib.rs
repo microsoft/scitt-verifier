@@ -90,6 +90,10 @@ pub struct Assertions {
     /// new certificate with the same name.
     #[serde(default)]
     pub require_chain_to_root_sha256: Option<String>,
+    /// Every listed OID must occur in the leaf EKU on a validated path.
+    /// Pair with an independently selected root and registration-time validity.
+    #[serde(default)]
+    pub require_eku: Option<Vec<String>>,
     /// Require every certificate to have been valid at the statement's `iat`.
     ///
     /// Off by default deliberately. A statement signed legitimately in 2023
@@ -1531,6 +1535,31 @@ impl Policy {
         if let Some(issuer) = &policy.assertions.statement_issuer {
             issuer.validate("statementIssuer")?;
         }
+        if let Some(oids) = &policy.assertions.require_eku {
+            if oids.is_empty() {
+                return Err("requireEku is empty; it would check no purpose".into());
+            }
+            for oid in oids {
+                let arcs: Option<Vec<u64>> = oid
+                    .split('.')
+                    .map(|arc| {
+                        if arc.is_empty()
+                            || !arc.bytes().all(|b| b.is_ascii_digit())
+                            || (arc.len() > 1 && arc.starts_with('0'))
+                        {
+                            None
+                        } else {
+                            arc.parse().ok()
+                        }
+                    })
+                    .collect();
+                if !arcs.is_some_and(|a| a.len() >= 2 && a[0] <= 2 && (a[0] == 2 || a[1] < 40)) {
+                    return Err(format!(
+                        "requireEku contains an invalid dotted-decimal OID: {oid}"
+                    ));
+                }
+            }
+        }
         if let Some(headers) = &policy.assertions.protected_headers {
             if headers.is_empty() {
                 return Err("protectedHeaders is empty; it would assert nothing".into());
@@ -1579,6 +1608,7 @@ impl Policy {
     /// `is_none` checks. The chain had to be extended every time an assertion
     /// was added, and forgetting to do so would reject a policy that used only
     /// the new assertion as though it were empty.
+    /// This also covers `requireEku`; its assertion-only case is tested.
     fn is_empty(&self) -> bool {
         match serde_json::to_value(&self.assertions) {
             Ok(serde_json::Value::Object(fields)) => {
@@ -1894,6 +1924,9 @@ impl Policy {
         if let Some(expected) = &a.require_chain_to_root_sha256 {
             results.push(chain_root_result(facts, expected));
         }
+        if let Some(required) = &a.require_eku {
+            results.push(eku_result(facts, required));
+        }
 
         if let Some(required) = a.certificate_valid_at_signing_time {
             let name = "certificateValidAtSigningTime";
@@ -2175,6 +2208,41 @@ fn chain_root_result(facts: &StatementFacts, expected: &str) -> AssertionResult 
             name,
             Outcome::CannotEvaluate,
             format!("this build cannot check this chain: {reason}"),
+        ),
+    }
+}
+
+fn eku_result(facts: &StatementFacts, required: &[String]) -> AssertionResult {
+    let name = "requireEku";
+    match &facts.chain_outcome {
+        Some(ChainOutcome::Valid(details)) => match &details.leaf_eku_oids {
+            Some(oids) if !required.is_empty() && required.iter().all(|oid| oids.contains(oid)) => {
+                result(
+                    name,
+                    Outcome::Pass,
+                    format!("leaf extendedKeyUsage contains every required OID {required:?}"),
+                )
+            }
+            Some(_) => result(
+                name,
+                Outcome::Fail,
+                format!("leaf extendedKeyUsage does not contain every required OID {required:?}"),
+            ),
+            None => result(
+                name,
+                Outcome::CannotEvaluate,
+                "leaf extendedKeyUsage was not checked on this run",
+            ),
+        },
+        Some(ChainOutcome::Invalid(reason)) => result(
+            name,
+            Outcome::Fail,
+            format!("the chain or its required purpose did not validate: {reason}"),
+        ),
+        _ => result(
+            name,
+            Outcome::CannotEvaluate,
+            "no validated certificate path is available to check leaf extendedKeyUsage",
         ),
     }
 }
@@ -2936,6 +3004,7 @@ mod tests {
             path_len: 2,
             path_not_before: 0,
             path_not_after: i64::MAX,
+            leaf_eku_oids: None,
         })
     }
 
@@ -2956,6 +3025,52 @@ mod tests {
         let policy = chain_policy(r#""certificateChainValidated":true"#);
         let facts = facts_with_chain(Some(valid_chain([0x11; 32], true)));
         assert_eq!(outcome_of(&policy, &facts), Outcome::Pass);
+    }
+
+    #[test]
+    fn require_eku_alone_is_not_empty_and_reports_all_outcomes() {
+        let policy = chain_policy(r#""requireEku":["1.2.3","1.2.4"]"#);
+        let mut facts = facts_with_chain(Some(valid_chain([0x11; 32], true)));
+        if let Some(ChainOutcome::Valid(details)) = &mut facts.chain_outcome {
+            details.leaf_eku_oids = Some(vec!["1.2.3".into(), "1.2.4".into()]);
+        }
+        assert_eq!(outcome_of(&policy, &facts), Outcome::Pass);
+        if let Some(ChainOutcome::Valid(details)) = &mut facts.chain_outcome {
+            details.leaf_eku_oids = Some(vec!["1.2.3".into()]);
+        }
+        assert_eq!(outcome_of(&policy, &facts), Outcome::Fail);
+        for outcome in [
+            None,
+            Some(valid_chain([0x11; 32], true)),
+            Some(ChainOutcome::Insufficient("no chain".into())),
+            Some(ChainOutcome::Unsupported("critical CA EKU".into())),
+        ] {
+            assert_eq!(
+                outcome_of(&policy, &facts_with_chain(outcome)),
+                Outcome::CannotEvaluate
+            );
+        }
+        let invalid = facts_with_chain(Some(ChainOutcome::Invalid("malformed EKU".into())));
+        assert_eq!(outcome_of(&policy, &invalid), Outcome::Fail);
+    }
+
+    #[test]
+    fn require_eku_refuses_empty_lists_and_invalid_oids() {
+        for assertion in [
+            r#""requireEku":[]"#,
+            r#""requireEku":[""]"#,
+            r#""requireEku":["1"]"#,
+            r#""requireEku":["3.1.2"]"#,
+            r#""requireEku":["1.40.2"]"#,
+            r#""requireEku":["1.02.3"]"#,
+            r#""requireEku":["1.2.3."]"#,
+            r#""requireEku":["1.2.+3"]"#,
+            r#""requireEku":["1.2. 3"]"#,
+        ] {
+            let json =
+                format!(r#"{{"policyId":"t","policyVersion":"1","assertions":{{{assertion}}}}}"#);
+            assert!(Policy::from_json(json.as_bytes()).is_err(), "{assertion}");
+        }
     }
 
     #[test]

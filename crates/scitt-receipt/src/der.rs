@@ -223,6 +223,58 @@ pub fn parse_eku_oids_strict(value: &[u8]) -> Result<Vec<String>> {
     Ok(oids)
 }
 
+/// Read the leaf EKU without accepting the first of duplicate extensions.
+///
+/// TAV's raw extension accessor returns the first occurrence. RFC 5280 forbids
+/// duplicates: accepting one would let the purpose check disagree with another
+/// relying party over the same signed certificate.
+pub(crate) fn parse_certificate_eku_oids_strict(certificate: &[u8]) -> Result<Vec<String>> {
+    let malformed = || Error::TrustMaterial("certificate extendedKeyUsage is malformed".into());
+    let Some((0x30, certificate, [])) = read_tlv(certificate) else {
+        return Err(malformed());
+    };
+    let Some((0x30, mut fields, _)) = read_tlv(certificate) else {
+        return Err(malformed());
+    };
+    let mut eku = None;
+    while !fields.is_empty() {
+        let (tag, value, rest) = read_tlv(fields).ok_or_else(malformed)?;
+        fields = rest;
+        if tag != 0xA3 {
+            continue;
+        }
+        let Some((0x30, mut extensions, [])) = read_tlv(value) else {
+            return Err(malformed());
+        };
+        while !extensions.is_empty() {
+            let Some((0x30, extension, rest)) = read_tlv(extensions) else {
+                return Err(malformed());
+            };
+            extensions = rest;
+            let Some((0x06, oid, mut value)) = read_tlv(extension) else {
+                return Err(malformed());
+            };
+            if let Some((0x01, _, rest)) = read_tlv(value) {
+                value = rest;
+            }
+            let Some((0x04, value, [])) = read_tlv(value) else {
+                return Err(malformed());
+            };
+            if oid == [0x55, 0x1D, 0x25] && eku.replace(value).is_some() {
+                return Err(Error::TrustMaterial(
+                    "certificate extendedKeyUsage is malformed: duplicate extensions".into(),
+                ));
+            }
+        }
+    }
+    let eku = eku.ok_or_else(|| {
+        Error::TrustMaterial(
+            "the leaf certificate has no extendedKeyUsage required by the purpose check".into(),
+        )
+    })?;
+    parse_eku_oids_strict(eku)
+}
+
 /// The `notBefore` and `notAfter` of a certificate, as Unix seconds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Validity {

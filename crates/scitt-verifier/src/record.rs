@@ -241,6 +241,7 @@ fn chain_json(facts: &scitt_receipt::StatementFacts) -> Value {
             "pathLength": details.path_len,
             "pathNotBefore": details.path_not_before,
             "pathNotAfter": details.path_not_after,
+            "leafEkuOids": details.leaf_eku_oids,
         }),
         Outcome::Invalid(reason) => json!({
             "status": EVALUATED,

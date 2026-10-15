@@ -2106,6 +2106,234 @@ fn naming_the_wrong_convention_cannot_be_evaluated() {
     );
 }
 
+fn critical_eku_fixture(file: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("critical-eku")
+        .join(file)
+}
+
+fn critical_eku_expected() -> serde_json::Value {
+    serde_json::from_str(include_str!("fixtures/critical-eku/expected.json")).unwrap()
+}
+
+fn critical_eku_assertions() -> serde_json::Value {
+    let expected = critical_eku_expected();
+    serde_json::json!({
+        "requireEku": expected["leafEkuOids"],
+        "requireChainToRootSha256": expected["rootSha256"],
+        "certificateValidAtSigningTime": true,
+    })
+}
+
+fn verify_critical_eku(
+    name: &str,
+    fixture: &str,
+    assertions: serde_json::Value,
+) -> (Run, serde_json::Value) {
+    let dir = std::env::temp_dir().join(format!(
+        "scitt-verifier-critical-eku-{}-{name}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let policy = dir.join("policy.json");
+    std::fs::write(
+        &policy,
+        serde_json::to_vec(&serde_json::json!({
+            "policyId": "synthetic-purpose",
+            "policyVersion": "1",
+            "assertions": assertions,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let r = run(&[
+        "verify",
+        "--statement",
+        critical_eku_fixture(&format!("{fixture}.cose"))
+            .to_str()
+            .unwrap(),
+        "--scitt-keys",
+        critical_eku_fixture("keys.cbor").to_str().unwrap(),
+        "--policy",
+        policy.to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
+    let record = serde_json::from_str(&r.stdout)
+        .unwrap_or_else(|e| panic!("{e}: stdout: {}; stderr: {}", r.stdout, r.stderr));
+    std::fs::remove_dir_all(&dir).unwrap();
+    (r, record)
+}
+
+fn eku_assertion(record: &serde_json::Value) -> &serde_json::Value {
+    record["relyingPartyPolicy"]["assertions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|assertion| assertion["name"] == "requireEku")
+        .unwrap()
+}
+
+fn has_unsupported_chain_gap(record: &serde_json::Value) -> bool {
+    record["appraisal"]["notChecked"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|gap| gap["code"] == "CertificateChainUnsupported")
+}
+
+#[test]
+fn critical_eku_matching_purpose_and_root_pass_at_registration_time() {
+    let (r, record) = verify_critical_eku("matching", "valid", critical_eku_assertions());
+    assert_eq!(r.code, 0, "{}", r.stdout);
+    assert_eq!(record["appraisal"]["verdict"], "statement-transparent");
+    assert_eq!(eku_assertion(&record)["outcome"], "pass");
+    assert!(!has_unsupported_chain_gap(&record), "{}", r.stdout);
+    let path = &record["signedStatement"]["certificateChain"];
+    assert_eq!(path["outcome"], "valid");
+    assert_eq!(path["rootSha256"], critical_eku_expected()["rootSha256"]);
+    assert_eq!(path["leafEkuOids"], critical_eku_expected()["leafEkuOids"]);
+    assert_eq!(
+        record["signedStatement"]["certificatesValidAtRegistration"],
+        true
+    );
+}
+
+#[test]
+fn critical_eku_requires_every_oid_not_just_one_or_any_purpose() {
+    let mut assertions = critical_eku_assertions();
+    assertions["requireEku"]
+        .as_array_mut()
+        .unwrap()
+        .push("1.3.6.1.4.1.55555.3".into());
+    let (r, record) = verify_critical_eku("missing-required", "valid", assertions);
+    assert_eq!(r.code, 1, "{}", r.stdout);
+    assert_eq!(eku_assertion(&record)["outcome"], "fail");
+    assert!(!has_unsupported_chain_gap(&record));
+    for fixture in [
+        "absent-eku",
+        "any-eku",
+        "malformed-eku",
+        "empty-eku",
+        "duplicate-eku",
+    ] {
+        let (r, record) = verify_critical_eku(fixture, fixture, critical_eku_assertions());
+        assert_eq!(r.code, 1, "{fixture}: {}", r.stdout);
+        assert_eq!(eku_assertion(&record)["outcome"], "fail");
+        if fixture == "malformed-eku" || fixture == "empty-eku" || fixture == "duplicate-eku" {
+            assert!(
+                record["signedStatement"]["certificateChain"]["reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("malformed"),
+                "{}",
+                r.stdout
+            );
+        }
+    }
+}
+
+#[test]
+fn critical_eku_without_a_purpose_check_remains_unsupported() {
+    let mut assertions = critical_eku_assertions();
+    assertions.as_object_mut().unwrap().remove("requireEku");
+    let (r, record) = verify_critical_eku("no-purpose", "valid", assertions);
+    assert_eq!(r.code, 3, "{}", r.stdout);
+    assert!(has_unsupported_chain_gap(&record), "{}", r.stdout);
+    assert_eq!(
+        record["signedStatement"]["certificateChain"]["outcome"],
+        "unsupported"
+    );
+    assert!(record["signedStatement"]["certificateChain"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("2.5.29.37"));
+}
+
+#[test]
+fn critical_eku_does_not_accept_a_wrong_root_pin() {
+    let mut assertions = critical_eku_assertions();
+    assertions["requireChainToRootSha256"] = "00".repeat(32).into();
+    let (r, record) = verify_critical_eku("wrong-pin", "valid", assertions);
+    assert_eq!(r.code, 2, "{}", r.stdout);
+    assert_eq!(eku_assertion(&record)["outcome"], "pass");
+    assert!(record["relyingPartyPolicy"]["assertions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|a| a["name"] == "requireChainToRootSha256" && a["outcome"] == "fail"));
+}
+
+#[test]
+fn critical_eku_does_not_bypass_path_signatures_or_ca_constraints() {
+    for fixture in [
+        "tampered-leaf",
+        "tampered-intermediate",
+        "ca-not-ca",
+        "ca-missing-basic",
+        "ca-noncritical-basic",
+        "ca-no-key-cert-sign",
+        "path-length",
+    ] {
+        let (r, record) = verify_critical_eku(fixture, fixture, critical_eku_assertions());
+        assert_eq!(r.code, 1, "{fixture}: {}", r.stdout);
+        assert_eq!(eku_assertion(&record)["outcome"], "fail");
+        assert_eq!(
+            record["signedStatement"]["certificateChain"]["outcome"],
+            "invalid"
+        );
+    }
+}
+
+#[test]
+fn critical_eku_does_not_process_other_critical_or_skipped_extensions() {
+    for fixture in ["ca-critical-eku", "unknown-critical", "skipped-extension"] {
+        let (r, record) = verify_critical_eku(fixture, fixture, critical_eku_assertions());
+        assert_eq!(r.code, 3, "{fixture}: {}", r.stdout);
+        assert_eq!(eku_assertion(&record)["outcome"], "cannotEvaluate");
+        assert!(has_unsupported_chain_gap(&record), "{}", r.stdout);
+    }
+}
+
+#[test]
+fn critical_eku_incomplete_path_cannot_evaluate_and_noncritical_eku_is_checked() {
+    let (r, record) = verify_critical_eku("leaf-only", "leaf-only", critical_eku_assertions());
+    assert_eq!(r.code, 3, "{}", r.stdout);
+    assert_eq!(eku_assertion(&record)["outcome"], "cannotEvaluate");
+    let (r, record) = verify_critical_eku("noncritical", "noncritical", critical_eku_assertions());
+    assert_eq!(r.code, 0, "{}", r.stdout);
+    assert_eq!(eku_assertion(&record)["outcome"], "pass");
+}
+
+#[test]
+fn critical_eku_alone_is_a_nonempty_assertion() {
+    let (r, record) = verify_critical_eku(
+        "only-purpose",
+        "valid",
+        serde_json::json!({"requireEku": critical_eku_expected()["leafEkuOids"]}),
+    );
+    assert_eq!(r.code, 0, "{}", r.stdout);
+    assert_eq!(eku_assertion(&record)["outcome"], "pass");
+}
+
+#[test]
+fn critical_eku_does_not_replace_receipt_registration_time_with_statement_iat() {
+    for (fixture, expected_code, expected_validity) in [
+        ("late-registration", 2, serde_json::json!(false)),
+        ("no-registration-time", 3, serde_json::Value::Null),
+    ] {
+        let (r, record) = verify_critical_eku(fixture, fixture, critical_eku_assertions());
+        assert_eq!(r.code, expected_code, "{fixture}: {}", r.stdout);
+        assert_eq!(eku_assertion(&record)["outcome"], "pass");
+        assert_eq!(
+            record["signedStatement"]["certificatesValidAtRegistration"],
+            expected_validity
+        );
+    }
+}
+
 fn external_chain_fixture(file: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
