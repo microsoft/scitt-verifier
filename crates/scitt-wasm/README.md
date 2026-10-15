@@ -74,8 +74,8 @@ the boundary have to agree for the pinned digests to come out right.
 
 | Export | Returns |
 |---|---|
-| `verifyStatement(statement, keySet, trustedRoots?)` | Facts about the statement and every receipt, including `chainValidation` for the signer's certificate chain |
-| `verifyStatementWithServiceCert(statement, keySet, serviceCertPem, trustedRoots?)` | The same facts, using only the key set entry bound to the service certificate; for a key set fetched over a channel the page cannot authenticate |
+| `verifyStatement(statement, keySet, trustedRoots?, policy?)` | Facts about the statement and every receipt, including `chainValidation` for the signer's certificate chain |
+| `verifyStatementWithServiceCert(statement, keySet, serviceCertPem, trustedRoots?, policy?)` | The same facts, using only the key set entry bound to the service certificate; for a key set fetched over a channel the page cannot authenticate |
 | `evaluatePolicy(statement, keySet, policy, now, trustedRoots?, serviceCertPem?)` | One outcome per assertion in a caller-supplied policy |
 | `bindArtifact(statement, artifact, mode, artifactName)` | Whether the statement is about *this* file |
 | `inspectStatement(statement)` | Structure only, with no trust material and therefore no evidence |
@@ -98,6 +98,15 @@ roots". `chainValidation.outcome` is `valid`, `invalid`, `insufficient` (too
 few certificates to evaluate) or `unsupported` (an algorithm this build does
 not validate, such as an ECDSA-signed chain), and has the same shape as the
 CLI's `certificateChain` record.
+
+The verification functions accept optional UTF-8 policy bytes, using the same
+format as `evaluatePolicy`. This enables `requireEku` during path validation.
+Pass the same policy, roots, and service certificate to verification and policy
+evaluation so the displayed facts describe the path the assertions checked.
+The verification functions still return facts, not policy decisions: a matching
+EKU cannot replace an independently trusted anchor or a separate root pin.
+Without policy bytes, existing behavior is unchanged and a critical leaf EKU
+remains unsupported. Malformed policy bytes throw rather than being ignored.
 
 Passing `serviceCertPem` to `evaluatePolicy` restricts the key set the same way
 `verifyStatementWithServiceCert` does; a key set with no key bound to the

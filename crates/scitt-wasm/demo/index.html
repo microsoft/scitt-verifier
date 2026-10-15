@@ -669,10 +669,12 @@ function run() {
   }
   try {
     const roots = state.roots || undefined;
+    const src = $('policy').value.trim();
+    const policy = src ? new TextEncoder().encode(src) : undefined;
     const factsJson = state.serviceCert
       ? wasm_bindgen.verifyStatementWithServiceCert(
-          state.statement, state.keys, state.serviceCert, roots)
-      : wasm_bindgen.verifyStatement(state.statement, state.keys, roots);
+          state.statement, state.keys, state.serviceCert, roots, policy)
+      : wasm_bindgen.verifyStatement(state.statement, state.keys, roots, policy);
     const facts = JSON.parse(factsJson);
     const inspected = JSON.parse(wasm_bindgen.inspectStatement(state.statement));
     const payload = JSON.parse(wasm_bindgen.statementPayload(state.statement));
@@ -699,12 +701,11 @@ function run() {
     }
 
     let decision = null;
-    const src = $('policy').value.trim();
-    if (src) {
+    if (policy) {
       const r0 = (facts.receipts || [])[0];
       const now = r0 && r0.registeredAt ? r0.registeredAt + 60 : Math.floor(Date.now() / 1000);
       decision = JSON.parse(wasm_bindgen.evaluatePolicy(
-        state.statement, state.keys, new TextEncoder().encode(src), now,
+        state.statement, state.keys, policy, now,
         roots, state.serviceCert || undefined));
     }
 

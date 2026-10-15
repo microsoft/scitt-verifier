@@ -177,21 +177,22 @@ pub fn parse_eku_oids(value: &[u8]) -> Vec<String> {
 /// outer certificate parser never looks at, because the extension value is an
 /// opaque `OCTET STRING` to it. This refuses that input instead of matching on
 /// it.
+///
+/// A backend-supplied OCTET STRING wrapper is accepted once. Callers that have
+/// already removed that wrapper must use `parse_eku_sequence_strict` instead.
 pub fn parse_eku_oids_strict(value: &[u8]) -> Result<Vec<String>> {
+    let value = match read_tlv_strict(value) {
+        Some((0x04, contents, [])) => contents,
+        _ => value,
+    };
+    parse_eku_sequence_strict(value)
+}
+
+fn parse_eku_sequence_strict(value: &[u8]) -> Result<Vec<String>> {
     let malformed =
         |what: &str| Error::TrustMaterial(format!("extendedKeyUsage is malformed: {what}"));
 
-    let inner = match read_tlv(value) {
-        // OCTET STRING wrapper around the real extension value.
-        Some((0x04, contents, remainder)) => {
-            if !remainder.is_empty() {
-                return Err(malformed("trailing bytes after the extension value"));
-            }
-            match read_tlv(contents) {
-                Some((0x30, seq, [])) => seq,
-                _ => return Err(malformed("the value is not a single SEQUENCE")),
-            }
-        }
+    let inner = match read_tlv_strict(value) {
         Some((0x30, seq, remainder)) => {
             if !remainder.is_empty() {
                 return Err(malformed("trailing bytes after the SEQUENCE"));
@@ -204,7 +205,7 @@ pub fn parse_eku_oids_strict(value: &[u8]) -> Result<Vec<String>> {
     let mut oids = Vec::new();
     let mut rest = inner;
     while !rest.is_empty() {
-        let Some((tag, contents, remainder)) = read_tlv(rest) else {
+        let Some((tag, contents, remainder)) = read_tlv_strict(rest) else {
             return Err(malformed("an item is not a well-formed TLV"));
         };
         if tag != 0x06 {
@@ -230,38 +231,39 @@ pub fn parse_eku_oids_strict(value: &[u8]) -> Result<Vec<String>> {
 /// relying party over the same signed certificate.
 pub(crate) fn parse_certificate_eku_oids_strict(certificate: &[u8]) -> Result<Vec<String>> {
     let malformed = || Error::TrustMaterial("certificate extendedKeyUsage is malformed".into());
-    let Some((0x30, certificate, [])) = read_tlv(certificate) else {
+    let Some((0x30, certificate, [])) = read_tlv_strict(certificate) else {
         return Err(malformed());
     };
-    let Some((0x30, mut fields, _)) = read_tlv(certificate) else {
+    let Some((0x30, mut fields, _)) = read_tlv_strict(certificate) else {
         return Err(malformed());
     };
     let mut eku = None;
     while !fields.is_empty() {
-        let (tag, value, rest) = read_tlv(fields).ok_or_else(malformed)?;
+        let (tag, value, rest) = read_tlv_strict(fields).ok_or_else(malformed)?;
         fields = rest;
         if tag != 0xA3 {
             continue;
         }
-        let Some((0x30, mut extensions, [])) = read_tlv(value) else {
+        let Some((0x30, mut extensions, [])) = read_tlv_strict(value) else {
             return Err(malformed());
         };
         while !extensions.is_empty() {
-            let Some((0x30, extension, rest)) = read_tlv(extensions) else {
+            let Some((0x30, extension, rest)) = read_tlv_strict(extensions) else {
                 return Err(malformed());
             };
             extensions = rest;
-            let Some((0x06, oid, mut value)) = read_tlv(extension) else {
+            let Some((0x06, oid, mut value)) = read_tlv_strict(extension) else {
                 return Err(malformed());
             };
-            if let Some((0x01, critical, rest)) = read_tlv(value) {
+            decode_oid(oid).ok_or_else(malformed)?;
+            if let Some((0x01, critical, rest)) = read_tlv_strict(value) {
                 // DER encodes TRUE as FF; DEFAULT FALSE must be omitted.
                 if critical != [0xFF] {
                     return Err(malformed());
                 }
                 value = rest;
             }
-            let Some((0x04, value, [])) = read_tlv(value) else {
+            let Some((0x04, value, [])) = read_tlv_strict(value) else {
                 return Err(malformed());
             };
             if oid == [0x55, 0x1D, 0x25] && eku.replace(value).is_some() {
@@ -276,7 +278,7 @@ pub(crate) fn parse_certificate_eku_oids_strict(certificate: &[u8]) -> Result<Ve
             "the leaf certificate has no extendedKeyUsage required by the purpose check".into(),
         )
     })?;
-    parse_eku_oids_strict(eku)
+    parse_eku_sequence_strict(eku)
 }
 
 /// The `notBefore` and `notAfter` of a certificate, as Unix seconds.
@@ -572,7 +574,9 @@ fn read_tlv(bytes: &[u8]) -> Option<(u8, &[u8], &[u8])> {
         }
         let mut len = 0usize;
         for i in 0..count {
-            len = len.checked_shl(8)? | *bytes.get(2 + i)? as usize;
+            len = len
+                .checked_mul(256)?
+                .checked_add(usize::from(*bytes.get(2 + i)?))?;
         }
         (len, 2 + count)
     };
@@ -582,6 +586,14 @@ fn read_tlv(bytes: &[u8]) -> Option<(u8, &[u8], &[u8])> {
         return None;
     }
     Some((tag, &bytes[header..end], &bytes[end..]))
+}
+
+fn read_tlv_strict(bytes: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+    let (tag, contents, remainder) = read_tlv(bytes)?;
+    if bytes[1] >= 0x80 && (bytes[2] == 0 || contents.len() < 0x80) {
+        return None;
+    }
+    Some((tag, contents, remainder))
 }
 
 /// Decode OBJECT IDENTIFIER contents to dotted-decimal.
@@ -596,9 +608,12 @@ fn decode_oid(contents: &[u8]) -> Option<String> {
     let mut value: u64 = 0;
     let mut in_progress = false;
     for byte in contents {
-        // Guard the shift rather than wrapping: a hostile OID arc must not
-        // silently alias onto a legitimate one.
-        value = value.checked_shl(7)? | u64::from(byte & 0x7F);
+        if !in_progress && *byte == 0x80 {
+            return None;
+        }
+        value = value
+            .checked_mul(128)?
+            .checked_add(u64::from(byte & 0x7F))?;
         in_progress = true;
         if byte & 0x80 == 0 {
             subidentifiers.push(value);
@@ -630,12 +645,14 @@ fn decode_oid(contents: &[u8]) -> Option<String> {
 mod eku_tests {
     use super::*;
 
-    fn certificate_with_eku_critical_flag(flag: Option<&[u8]>) -> Vec<u8> {
+    const VALID_EKU: &[u8] = &[0x30, 0x04, 0x06, 0x02, 0x2A, 0x03];
+
+    fn certificate_with_eku(flag: Option<&[u8]>, value: &[u8]) -> Vec<u8> {
         let mut extension = tlv(0x06, &[0x55, 0x1D, 0x25]);
         if let Some(flag) = flag {
             extension.extend(tlv(0x01, flag));
         }
-        extension.extend(tlv(0x04, &[0x30, 0x04, 0x06, 0x02, 0x2A, 0x03]));
+        extension.extend(tlv(0x04, value));
         let extensions = tlv(0xA3, &tlv(0x30, &tlv(0x30, &extension)));
         tlv(0x30, &tlv(0x30, &extensions))
     }
@@ -644,18 +661,92 @@ mod eku_tests {
     fn certificate_eku_critical_flag_must_be_absent_or_der_true() {
         for flag in [None, Some(&[0xFF][..])] {
             assert_eq!(
-                parse_certificate_eku_oids_strict(&certificate_with_eku_critical_flag(flag))
-                    .unwrap(),
+                parse_certificate_eku_oids_strict(&certificate_with_eku(flag, VALID_EKU)).unwrap(),
                 ["1.2.3"]
             );
         }
         for flag in [&[][..], &[0x00], &[0x01], &[0x7F], &[0xFF, 0xFF]] {
             assert!(
-                parse_certificate_eku_oids_strict(&certificate_with_eku_critical_flag(Some(flag)))
+                parse_certificate_eku_oids_strict(&certificate_with_eku(Some(flag), VALID_EKU))
                     .is_err(),
                 "invalid critical flag {flag:?} must not be ignored"
             );
         }
+    }
+
+    #[test]
+    fn oversized_oid_arcs_cannot_alias_a_required_purpose() {
+        for oid in [
+            // 1.2.(2^64 + 3) must not alias 1.2.3.
+            &[
+                0x2A, 0x82, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x03,
+            ][..],
+            // The combined first two arcs must not wrap either.
+            &[0x82, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x03],
+        ] {
+            let eku = tlv(0x30, &tlv(0x06, oid));
+            assert!(parse_eku_oids_strict(&eku).is_err());
+            assert!(
+                parse_certificate_eku_oids_strict(&certificate_with_eku(Some(&[0xFF]), &eku))
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            decode_oid(&[0x2A, 0x81, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F])
+                .unwrap(),
+            "1.2.18446744073709551615"
+        );
+    }
+
+    #[test]
+    fn strict_eku_refuses_noncanonical_lengths_and_oid_encodings() {
+        for eku in [
+            &[0x30, 0x81, 0x04, 0x06, 0x02, 0x2A, 0x03][..],
+            &[0x30, 0x82, 0x00, 0x04, 0x06, 0x02, 0x2A, 0x03],
+            &[0x30, 0x05, 0x06, 0x81, 0x02, 0x2A, 0x03],
+            &[0x30, 0x05, 0x06, 0x03, 0x80, 0x2A, 0x03],
+            &[0x30, 0x05, 0x06, 0x03, 0x2A, 0x80, 0x03],
+            &[
+                0x30, 0x85, 0x01, 0x00, 0x00, 0x00, 0x04, 0x06, 0x02, 0x2A, 0x03,
+            ],
+        ] {
+            assert!(parse_eku_oids_strict(eku).is_err(), "{eku:02x?}");
+            assert!(
+                parse_certificate_eku_oids_strict(&certificate_with_eku(Some(&[0xFF]), eku))
+                    .is_err(),
+                "{eku:02x?}"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_certificate_eku_refuses_a_second_octet_string_wrapper() {
+        let wrapped = tlv(0x04, VALID_EKU);
+        assert!(
+            parse_certificate_eku_oids_strict(&certificate_with_eku(Some(&[0xFF]), &wrapped))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn certificate_eku_envelope_requires_minimal_lengths() {
+        let certificate = certificate_with_eku(Some(&[0xFF]), VALID_EKU);
+        let mut nonminimal = vec![0x30, 0x81, certificate[1]];
+        nonminimal.extend_from_slice(&certificate[2..]);
+        assert!(parse_certificate_eku_oids_strict(&nonminimal).is_err());
+    }
+
+    #[test]
+    fn strict_eku_accepts_canonical_long_lengths() {
+        let mut oid = vec![0x2A];
+        oid.extend_from_slice(&[0x00; 127]);
+        let eku = tlv(0x30, &tlv(0x06, &oid));
+        let expected = vec![format!("1.2{}", ".0".repeat(127))];
+        assert_eq!(parse_eku_oids_strict(&eku).unwrap(), expected);
+        assert_eq!(
+            parse_certificate_eku_oids_strict(&certificate_with_eku(Some(&[0xFF]), &eku)).unwrap(),
+            expected
+        );
     }
 
     #[test]

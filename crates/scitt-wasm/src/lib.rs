@@ -60,13 +60,24 @@ pub fn version() -> String {
 /// the chain must lead to one of those roots. Roots that cannot be read are an
 /// exception, not a result: running the weaker check under the stronger
 /// request would report something nobody asked for.
+///
+/// `policy` is optional UTF-8 policy JSON. Its `requireEku` enables the same
+/// purpose check as `evaluatePolicy`; pass the same policy to both so the
+/// displayed facts and evaluated assertions describe the same path. This
+/// function still returns facts, not policy outcomes.
 #[wasm_bindgen(js_name = verifyStatement)]
 pub fn verify_statement(
     statement: &[u8],
     key_set: &[u8],
     trusted_roots: Option<String>,
+    policy: Option<Vec<u8>>,
 ) -> Result<String, JsValue> {
-    let options = verify_options(trusted_roots.as_deref())?;
+    let policy = policy
+        .as_deref()
+        .map(Policy::from_json)
+        .transpose()
+        .map_err(to_js)?;
+    let options = verify_options(trusted_roots.as_deref(), policy.as_ref())?;
     let keys = LedgerKeySet::from_cose_key_set(key_set).map_err(to_js)?;
 
     let facts = scitt_receipt::verify_statement_with(statement, &keys, &options).map_err(to_js)?;
@@ -118,14 +129,21 @@ pub fn verify_statement(
 /// `ledgerTlsCertificate` field of the identity service's response.
 /// `trustedRoots` is as for `verifyStatement`, and anchors the *signer's*
 /// chain; it has nothing to do with the service certificate.
+/// `policy` enables purpose checking as for `verifyStatement`.
 #[wasm_bindgen(js_name = verifyStatementWithServiceCert)]
 pub fn verify_statement_with_service_cert(
     statement: &[u8],
     key_set: &[u8],
     service_cert: &str,
     trusted_roots: Option<String>,
+    policy: Option<Vec<u8>>,
 ) -> Result<String, JsValue> {
-    let options = verify_options(trusted_roots.as_deref())?;
+    let policy = policy
+        .as_deref()
+        .map(Policy::from_json)
+        .transpose()
+        .map_err(to_js)?;
+    let options = verify_options(trusted_roots.as_deref(), policy.as_ref())?;
     let (service_key_kid, service_cert_sha256) = service_cert_identity(service_cert)?;
 
     let keys = LedgerKeySet::from_cose_key_set(key_set).map_err(to_js)?;
@@ -297,8 +315,14 @@ fn statement_facts_json(facts: &StatementFacts) -> Value {
 /// roots were supplied would leave a page with nothing to say about the chain,
 /// when "consistent with its own embedded root" is both true and worth saying
 /// next to "not anchored to anything you trust".
-fn verify_options(trusted_roots: Option<&str>) -> Result<VerifyOptions, JsValue> {
+fn verify_options(
+    trusted_roots: Option<&str>,
+    policy: Option<&Policy>,
+) -> Result<VerifyOptions, JsValue> {
     let mut chain = chain::Options::default();
+    if let Some(policy) = policy {
+        chain.required_eku = policy.assertions.require_eku.clone().unwrap_or_default();
+    }
     if let Some(pem) = trusted_roots {
         chain.trusted_roots =
             chain::parse_pem_certificates(pem).map_err(|e| to_js(format!("trustedRoots: {e}")))?;
@@ -676,9 +700,9 @@ pub fn bind_artifact(
 /// value is rejected rather than truncated: `now` decides freshness, and a
 /// clock that is silently wrong is worse than one that refuses.
 ///
-/// `trustedRoots` is as for `verifyStatement`. Pass the same value to both, or
-/// `certificateChainValidated` and `requireChainToRootSha256` will be answered
-/// about a different chain from the one the page displays.
+/// `trustedRoots` is as for `verifyStatement`. Pass the same roots and policy
+/// to both, or chain assertions can be answered about a different path from
+/// the one the page displays.
 ///
 /// `serviceCert` is as for `verifyStatementWithServiceCert`, and restricts the
 /// key set the same way. A page that verified through the service certificate
@@ -705,10 +729,7 @@ pub fn evaluate_policy(
     // A malformed policy is a usage error, not a finding: nothing was
     // evaluated, so there is no result to render and an exception is honest.
     let policy = Policy::from_json(policy).map_err(to_js)?;
-    let mut options = verify_options(trusted_roots.as_deref())?;
-    if let Some(chain) = &mut options.chain {
-        chain.required_eku = policy.assertions.require_eku.clone().unwrap_or_default();
-    }
+    let options = verify_options(trusted_roots.as_deref(), Some(&policy))?;
 
     let keys = LedgerKeySet::from_cose_key_set(key_set).map_err(to_js)?;
     let keys = match service_cert.as_deref() {

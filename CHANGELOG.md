@@ -14,11 +14,17 @@ root pin: the assertion reports `cannotEvaluate` unless the path used supplied
 trusted roots or the policy also requires `requireChainToRootSha256`. A wrong
 configured pin still fails independently of a matching EKU. Strict extension
 decoding rejects non-DER critical flags as well as duplicate EKU extensions.
+Raw certificate EKU must be exactly one canonically encoded SEQUENCE:
+extra wrappers, nonminimal lengths or OID encodings, and overflowing arcs
+are rejected rather than matched to a different purpose.
 
 Pair with `certificateValidAtSigningTime`: short-lived signing leaves are
 judged at verified receipt registration time, not at today's clock or the
 signer's claimed time. JSON path facts add `leafEkuOids`, populated only after
 a purpose check. The CLI and WASM policy entry point both wire the assertion.
+WASM verification functions also accept optional policy bytes so the browser
+demo displays and decides from the same purpose-checked path as policy
+evaluation, including when the receipt key is bound to a service certificate.
 Older binaries refuse policies containing `requireEku` rather than skipping it.
 
 Critical CA EKU, did:x509 resolution and intermediate-subject assertions remain

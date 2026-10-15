@@ -13,7 +13,7 @@
 //   node demo/verify.mjs
 
 import { readFileSync } from 'node:fs';
-import { createHash } from 'node:crypto';
+import { createHash, X509Certificate } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import vm from 'node:vm';
@@ -335,6 +335,84 @@ vm.runInContext('decodeClaimNow()', ctx);
 check('a missing claim is an error, not an empty result', el('decode-error').textContent.length > 0, true);
 check('and leaves no stale result behind', el('decode-meta').innerHTML, '');
 check('nor a stale download', el('decode-save').style.display, 'none');
+
+console.log('\n--- critical EKU uses consistent policy and displayed facts ---');
+const ekuDir = join(here, '..', '..', 'scitt-verifier', 'tests', 'fixtures', 'critical-eku');
+const ekuStatement = readFileSync(join(ekuDir, 'valid.cose'));
+const ekuExpected = JSON.parse(readFileSync(join(ekuDir, 'expected.json'), 'utf8'));
+let ekuRoot;
+for (let i = 0; i + 4 < ekuStatement.length; i++) {
+  if (ekuStatement[i] !== 0x30 || ekuStatement[i + 1] !== 0x82) continue;
+  const der = ekuStatement.subarray(i, i + 4 + ((ekuStatement[i + 2] << 8) | ekuStatement[i + 3]));
+  let cert;
+  try { cert = new X509Certificate(der); } catch { continue; }
+  if (cert.subject === 'CN=Synthetic Purpose Root') {
+    ekuRoot = cert.toString();
+    break;
+  }
+}
+if (!ekuRoot) throw new Error('the synthetic purpose root was not found');
+sandbox.ekuStatement = new Uint8Array(ekuStatement);
+sandbox.ekuKeys = new Uint8Array(readFileSync(join(ekuDir, 'keys.cbor')));
+sandbox.ekuRoot = ekuRoot;
+load(0);
+vm.runInContext(`
+  state.statement = ekuStatement;
+  state.keys = ekuKeys;
+  state.roots = ekuRoot;
+  state.serviceCert = null;
+  state.artifact = null;
+`, ctx);
+const ekuPolicy = (assertions) => JSON.stringify({
+  policyId: 'demo/synthetic-purpose', policyVersion: '1', assertions,
+});
+const ekuAssertions = {
+  requireEku: ekuExpected.leafEkuOids,
+  requireChainToRootSha256: ekuExpected.rootSha256,
+  certificateValidAtSigningTime: true,
+};
+el('policy').value = ekuPolicy(ekuAssertions);
+vm.runInContext('run()', ctx);
+check('purpose-checked demo renders without error', el('error').style.display, 'none');
+check('matching critical EKU and roots verify', el('banner-headline').textContent, 'Verified');
+check('displayed facts are the purpose-checked path',
+  JSON.parse(el('raw-facts').textContent).chainValidation.outcome, 'valid');
+contains('the evidence reports an anchored path', el('evidence').innerHTML, 'Anchored');
+check('no unsupported-chain gap remains', el('gap-chain').style.display, 'none');
+
+el('policy').value = ekuPolicy({
+  ...ekuAssertions, requireEku: ['1.2.3'],
+});
+vm.runInContext('run()', ctx);
+check('a missing purpose fails in both facts and verdict', el('banner-headline').textContent, 'Failed');
+check('displayed facts report the failed purpose path',
+  JSON.parse(el('raw-facts').textContent).chainValidation.outcome, 'invalid');
+
+el('policy').value = ekuPolicy({
+  requireChainToRootSha256: ekuExpected.rootSha256,
+  certificateValidAtSigningTime: true,
+});
+vm.runInContext('run()', ctx);
+check('removing purpose restores unsupported behavior', el('banner-headline').textContent, 'Unavailable');
+check('and the displayed facts are unsupported too',
+  JSON.parse(el('raw-facts').textContent).chainValidation.outcome, 'unsupported');
+
+vm.runInContext('state.roots = null', ctx);
+el('policy').value = ekuPolicy({ requireEku: ekuExpected.leafEkuOids });
+vm.runInContext('run()', ctx);
+check('matching purpose without independent trust remains unavailable',
+  el('banner-headline').textContent, 'Unavailable');
+contains('the assertion explains the missing anchor', el('assertions').innerHTML,
+  'requireChainToRootSha256');
+
+load(12);
+const servicePolicy = JSON.parse(el('policy').value);
+servicePolicy.assertions.requireEku = ['1.2.3'];
+el('policy').value = JSON.stringify(servicePolicy);
+vm.runInContext('run()', ctx);
+check('service-bound verification also applies purpose to its facts',
+  JSON.parse(el('raw-facts').textContent).chainValidation.outcome, 'invalid');
+check('and renders the same failed verdict', el('banner-headline').textContent, 'Failed');
 
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`);
 process.exit(failures === 0 ? 0 : 1);

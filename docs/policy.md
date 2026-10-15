@@ -546,8 +546,9 @@ resolution is performed; that and intermediate-subject assertions remain #29
 work. This assertion does not apply to `externalSignatures[]`.
 
 The decoder consumes the entire EKU value strictly and rejects duplicate EKU
-extensions. Present extension critical flags must be DER TRUE (`FF`); default
-FALSE must be omitted. Missing required OIDs,
+extensions, extra OCTET STRING wrappers, nonminimal DER lengths or base-128 OID
+encodings, and overflowing OID arcs. Present extension critical flags must be
+DER TRUE (`FF`); default FALSE must be omitted. Missing required OIDs,
 an absent EKU, or malformed EKU invalidate the required-purpose path and make
 `requireEku` fail; the CLI reports `untrusted` (exit 1), as for other invalid
 statement paths. `anyExtendedKeyUsage` is not a substitute for an explicitly
@@ -564,7 +565,9 @@ Revocation is not checked.
 Library callers pass the same OIDs as `chain::Options::required_eku` when
 verifying, then evaluate the policy against those facts. The CLI and WASM
 `evaluatePolicy` do this automatically. A valid path whose leaf EKU was not
-checked cannot satisfy this assertion.
+checked cannot satisfy this assertion. WASM `verifyStatement` and
+`verifyStatementWithServiceCert` accept the same policy bytes as an optional
+last argument; pass them when displaying facts alongside `evaluatePolicy`.
 
 ### `protectedHeaders`
 

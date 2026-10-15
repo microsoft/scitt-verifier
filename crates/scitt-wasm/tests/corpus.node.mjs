@@ -604,6 +604,39 @@ const externallyAnchoredPurpose = JSON.parse(evaluatePolicy(
 ));
 check('a supplied trusted anchor satisfies EKU without a root pin',
   externallyAnchoredPurpose.satisfied, true);
+const purposeFacts = JSON.parse(verifyStatement(
+  ekuRead('valid.cose'), ekuKeys, pem(ekuRoot.der), ekuPolicy(ekuAssertions),
+));
+check('verification uses the same purpose as policy evaluation',
+  purposeFacts.chainValidation.outcome, 'valid');
+check('purpose-checked facts retain independent anchoring',
+  purposeFacts.chainValidation.anchoredExternally, true);
+check('the displayed purpose evidence matches the policy',
+  purposeFacts.chainValidation.leafEkuOids, ekuExpected.leafEkuOids);
+check('registration-time validity uses the purpose-checked path',
+  purposeFacts.certificatesValidAtRegistration, true);
+const wrongPurposeFacts = JSON.parse(verifyStatement(
+  ekuRead('valid.cose'), ekuKeys, pem(ekuRoot.der), ekuPolicy({
+    ...ekuAssertions, requireEku: ['1.2.3'],
+  }),
+));
+check('verification does not ignore a missing required purpose',
+  wrongPurposeFacts.chainValidation.outcome, 'invalid');
+const servicePurposeFacts = JSON.parse(verifyStatementWithServiceCert(
+  genuine, keys, serviceCert, rootPem, ekuPolicy({ requireEku: ['1.2.3'] }),
+));
+check('service-certificate verification also checks the supplied purpose',
+  servicePurposeFacts.chainValidation.outcome, 'invalid');
+check('purpose options do not bypass service-key binding',
+  servicePurposeFacts.serviceKey.bound, true);
+for (const verify of [
+  (policy) => verifyStatement(genuine, keys, rootPem, policy),
+  (policy) => verifyStatementWithServiceCert(genuine, keys, serviceCert, rootPem, policy),
+]) {
+  let refused = false;
+  try { verify(new TextEncoder().encode('{ not json')); } catch { refused = true; }
+  check('a malformed verification policy is refused, not ignored', refused, true);
+}
 for (const fixture of ['absent-eku', 'any-eku', 'malformed-eku', 'duplicate-eku']) {
   check(`${fixture} cannot satisfy the purpose requirement`,
     ekuEvaluate(fixture).assertions.find((a) => a.name === 'requireEku').outcome, 'fail');
