@@ -96,6 +96,7 @@ pub fn compact(
         Verdict::StatementTransparent => "Statement signature and receipt inclusion verified; relying-party policy satisfied.",
         Verdict::ArtifactTransparent => "Supplied artifact matches the verified statement; relying-party policy satisfied.",
         Verdict::ResourceTransparent if args.adapter == Some(crate::cli::Adapter::ImageReproduction) => "Verified statement's reproduction record matches the supplied rebuild; relying-party policy satisfied.",
+        Verdict::ResourceTransparent if args.adapter == Some(crate::cli::Adapter::AmdSnpDevice) => "Verified statement's device produced the supplied fresh SNP report; relying-party policy satisfied.",
         Verdict::ResourceTransparent => "Verified statement and assessed node evidence satisfy the scoped resource requirements.",
         Verdict::CannotEvaluate => "This is not a pass. The tool could not answer the requested question.",
         _ => "The requested acceptance requirements were not met.",
@@ -108,6 +109,11 @@ pub fn compact(
         writeln!(
             out,
             "Scope: The rebuild is operator-supplied; not an independent rebuild, and not proof that a published image or deployment has these layers."
+        )?;
+    } else if args.adapter == Some(crate::cli::Adapter::AmdSnpDevice) {
+        writeln!(
+            out,
+            "Scope: Identifies the chip that answered; the guest's software is not appraised, and the BOM serial is taken to be the chip's hardware ID."
         )?;
     } else if args.adapter.is_some() {
         let scope = if a.adapter_findings.is_empty() {

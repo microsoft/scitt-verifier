@@ -29,6 +29,10 @@ acl = { package = "scitt-adapter-azure-confidential-ledger", path = "../../adapt
 # The image-reproduction adapter. Always built: it adds no dependency the CLI
 # does not already carry, and it runs no build — it compares records.
 repro = { package = "scitt-adapter-image-reproduction", path = "../../adapters/image-reproduction", default-features = false }
+# Optional: binds a fresh AMD SEV-SNP report to the device a hardware BOM
+# statement describes. Optional for the same reason as the ledger adapter: it
+# carries the AMD verification stack.
+snpdev = { package = "scitt-adapter-amd-snp-device", path = "../../adapters/amd-snp-device", default-features = false, optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
@@ -38,14 +42,20 @@ crypto_pure_rust = [
     "scitt-receipt/crypto_pure_rust",
     "scitt-policy/crypto_pure_rust",
     "acl?/crypto_pure_rust",
+    "snpdev?/crypto_pure_rust",
     "repro/crypto_pure_rust",
 ]
 crypto_openssl = [
     "scitt-receipt/crypto_openssl",
     "scitt-policy/crypto_openssl",
     "acl?/crypto_openssl",
+    "snpdev?/crypto_openssl",
     "repro/crypto_openssl",
 ]
 # The Azure Confidential Ledger adapter: appraise saved or explicitly acquired
 # ledger evidence against the execution policy an accepted statement embeds.
 adapter-azure-confidential-ledger = ["dep:acl", "acl/azure-confidential-ledger"]
+# The AMD SEV-SNP device adapter: appraise a supplied SNP report, its AMD
+# certificates and the nonce it was requested with against the device an
+# accepted hardware BOM statement names.
+adapter-amd-snp-device = ["dep:snpdev"]

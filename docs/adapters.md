@@ -5,7 +5,7 @@ resource adapter. An adapter adds a domain-specific comparison between an
 accepted statement and evidence about its subject. It cannot turn an
 unaccepted statement into a success.
 
-Two adapters are implemented:
+Three adapters are implemented:
 
 - `azure-confidential-ledger` appraises evidence that ledger nodes enforce the
   execution policy embedded in a transparent statement. It is behind a build
@@ -14,9 +14,12 @@ Two adapters are implemented:
 - `image-reproduction` compares a rebuild you supply with the reproduction
   record a statement commits to. Every build has it; see
   [image reproduction](#image-reproduction).
+- `amd-snp-device` binds a fresh SEV-SNP report to the device a hardware BOM
+  statement names. It is behind a build feature; see
+  [AMD SNP device](#amd-snp-device).
 
-Hardware and MAA adapters are architectural possibilities, not supported
-commands or evidence formats.
+MAA adapters are an architectural possibility, not a supported command or
+evidence format.
 
 A policy configures at most one adapter, and a run selects at most one. A
 policy naming two is refused as a usage error: split it into one policy per
@@ -374,3 +377,114 @@ A failed check yields `resource-failed` (exit 2). A missing or unreadable
 file, or a record in a schema this profile does not read, yields
 `cannot-evaluate` (exit 3). Only an accepted statement whose five checks all
 pass is `resource-transparent` (exit 0).
+
+## AMD SNP device
+
+The `amd-snp-device` adapter answers one question: *is the chip that signed
+this fresh SEV-SNP report the device whose serial number this hardware BOM
+statement records?*
+
+It is useful when a manufacturer registers a hardware bill of materials for
+each processor, and you want evidence, on the machine itself, that you are
+running on the part the statement describes. It turns "this is the chip we
+bought" into a verdict tied to a statement the manufacturer signed and a
+transparency service recorded.
+
+Build it explicitly:
+
+```console
+cargo build --release --features adapter-amd-snp-device
+```
+
+### What it does not establish
+
+- **What software the guest runs.** The launch measurement is reported as a
+  note and not compared with any endorsed value, so a pass says which chip
+  answered, not which guest image asked it to. `appraisal.notChecked` lists
+  `GuestMeasurementNotAppraised`.
+- **That the BOM is true.** The statement's issuer and registration are
+  verified; whether the manufacturer recorded the right parts is the
+  manufacturer's claim.
+- **That serial and hardware ID are one identifier by definition.** The
+  profile compares them byte for byte. That they are meant to agree is the
+  manufacturer's convention, not something a report or certificate proves.
+- **Revocation.** The AMD chain is validated to the pinned root for the
+  report's generation; no revocation list is consulted
+  (`AmdCertificateRevocationNotChecked`).
+
+### Policy
+
+```json
+{
+  "policyId": "amd-snp-device-example",
+  "policyVersion": "1",
+  "assertions": {
+    "issuer": ["example.confidential-ledger.azure.com"],
+    "statementIssuer": { "equals": "did:x509:0:sha256:...::eku:..." }
+  },
+  "adapters": {
+    "amd-snp-device": {
+      "profile": "spdx3-hbom",
+      "category": "packaged soc",
+      "minimumTcb": [
+        { "generation": "turin", "reportedTcb": "0x5100000004010101" }
+      ]
+    }
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `profile` | How the statement payload is read. This build understands only `spdx3-hbom`: an SPDX 3 JSON-LD document whose `@graph` holds `hardware_PhysicalHardware` nodes. Any other value makes every check `cannot-evaluate`. |
+| `category` | The `hardware_category` `typeFromSource` of the one device the statement must describe, compared exactly. A BOM lists several parts, some sharing a serial, so the category says which one is the chip. |
+| `minimumTcb` | One floor per generation (`milan`, `genoa` or `turin`), each a 64-bit `0x` hex value in the report's byte order, read little-endian. A report must meet the floor for its own generation in every component. |
+
+All are required, `minimumTcb` may not be empty, and a generation may appear
+once. Pin `statementIssuer` as well: the adapter trusts the serial only
+because an accepted statement records it.
+
+### Evidence
+
+Collect it on the device. `tools/collect-snp-evidence.ps1` generates a
+32-byte random nonce, asks the guest for a report bound to it, and fetches the
+matching VCEK and AMD chain from AMD's Key Distribution Service (cached, so
+`-Offline` can reuse them):
+
+```console
+.\tools\collect-snp-evidence.ps1 -ContainerId <id> -OutDir DIR
+scitt-verifier verify --statement hbom.cose --scitt-keys keys.cbor \
+  --policy policy.json \
+  --binding-mode saved-evidence --adapter amd-snp-device --evidence DIR
+```
+
+`DIR` holds four files with fixed names:
+
+| File | What it is |
+|---|---|
+| `report.bin` | The raw SNP report as the guest returned it (at most 4 KiB). |
+| `vcek.der` | The VCEK for the reporting chip and TCB, DER or PEM (16 KiB). |
+| `cert_chain.pem` | AMD's `cert_chain` as KDS serves it: ASK then ARK (32 KiB). |
+| `nonce.hex` | The nonce the guest was asked to place in `REPORT_DATA`, 16 to 64 bytes as hex (1 KiB). |
+
+A path that resolves outside `DIR` is refused. `--binding-mode
+live-evidence` is refused: the evidence has to be collected on the device,
+which the verifier may not be.
+
+### Checks
+
+All five are required, in this order:
+
+| Name | Passes when |
+|---|---|
+| `device-claim` | The statement payload is embedded JSON and names exactly one device of the policy's `category`, with a hexadecimal `hardware_serialNumber`. |
+| `snp-report` | The report's signature verifies under the VCEK, the VCEK chains to the pinned AMD root for the report's generation, and the VCEK certifies the report's TCB. |
+| `tcb-floor` | The authenticated reported TCB meets the configured floor for its generation. |
+| `freshness` | The authenticated `REPORT_DATA` begins with the supplied nonce. |
+| `device-binding` | The VCEK carries a hardware ID (Turin 8 bytes, Milan and Genoa 64), the report's `CHIP_ID` is that ID, and it equals the statement's serial. |
+
+A failed check yields `resource-failed` (exit 2). Missing evidence, a nonce
+that is all zeros or too short, or a generation with no configured floor
+yields `cannot-evaluate` (exit 3). A report that fails authentication leaves
+the checks that depend on it `cannot-evaluate`. Only an accepted statement
+whose five checks all pass is `resource-transparent` (exit 0).

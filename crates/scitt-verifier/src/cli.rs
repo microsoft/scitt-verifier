@@ -212,6 +212,37 @@ when it observed the nodes; a saved one reports when someone else did.
 #[cfg(not(feature = "adapter-azure-confidential-ledger"))]
 pub const ADAPTER_USAGE: &str = "";
 
+/// Help for the SNP device adapter, when this build has it.
+#[cfg(feature = "adapter-amd-snp-device")]
+pub const SNP_DEVICE_USAGE: &str = r#"
+DEVICE ATTESTATION (amd-snp-device adapter):
+    --binding-mode saved-evidence --adapter amd-snp-device --evidence <DIR>
+                             DIR holds report.bin, the raw SNP report the guest
+                             produced; vcek.der, its VCEK from AMD's KDS (PEM
+                             or DER); cert_chain.pem, AMD's ASK and ARK; and
+                             nonce.hex, the nonce the report was requested with.
+
+Answers one question: is the chip that signed this fresh SNP report the device
+whose serial number this hardware BOM statement records?
+
+The report must verify under a VCEK that chains to AMD's pinned root for its
+generation, meet the policy's TCB floor, and carry the nonce in REPORT_DATA.
+Choose the nonce yourself, immediately before collection; a report carrying a
+nonce someone else chose proves nothing about when it was made.
+
+A pass says which chip answered. It does not appraise the guest's software, and
+it relies on the manufacturer's convention that the BOM serial is the chip's
+hardware ID. The profile, device category and TCB floor come from
+`adapters.amd-snp-device` in the policy — never from the command line.
+
+    resource-transparent   the statement is transparent, and a fresh report
+                           from the device it names verified
+"#;
+
+/// Nothing to add: this build has no SNP device adapter.
+#[cfg(not(feature = "adapter-amd-snp-device"))]
+pub const SNP_DEVICE_USAGE: &str = "";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BindingMode {
     /// No claim is made about which artifact the statement describes.
@@ -259,6 +290,9 @@ pub enum Adapter {
     /// A supplied image rebuild compared with a statement-committed
     /// reproduction record.
     ImageReproduction,
+    /// A supplied AMD SEV-SNP report bound to the device a hardware BOM
+    /// statement names.
+    AmdSnpDevice,
 }
 
 impl Adapter {
@@ -266,6 +300,7 @@ impl Adapter {
         match self {
             Adapter::AzureConfidentialLedger => "azure-confidential-ledger",
             Adapter::ImageReproduction => "image-reproduction",
+            Adapter::AmdSnpDevice => "amd-snp-device",
         }
     }
 }
@@ -443,10 +478,11 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 adapter = Some(match raw.as_str() {
                     "azure-confidential-ledger" => Adapter::AzureConfidentialLedger,
                     "image-reproduction" => Adapter::ImageReproduction,
+                    "amd-snp-device" => Adapter::AmdSnpDevice,
                     other => {
                         return Err(format!(
-                            "unknown adapter '{other}'; expected 'azure-confidential-ledger' \
-                             or 'image-reproduction'"
+                            "unknown adapter '{other}'; expected 'azure-confidential-ledger', \
+                             'image-reproduction' or 'amd-snp-device'"
                         ))
                     }
                 });
@@ -586,6 +622,16 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         return Err(
             "--adapter image-reproduction compares supplied records and has no live evidence; \
              use --binding-mode saved-evidence --evidence <DIR>"
+                .into(),
+        );
+    }
+
+    // Likewise: the report must be requested inside the guest, with a nonce
+    // the verifier chose, so there is nothing this tool could collect itself.
+    if adapter == Some(Adapter::AmdSnpDevice) && binding_mode == BindingMode::LiveEvidence {
+        return Err(
+            "--adapter amd-snp-device appraises evidence collected on the device; use \
+             --binding-mode saved-evidence --evidence <DIR>"
                 .into(),
         );
     }

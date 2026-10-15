@@ -12,15 +12,18 @@ not a prerequisite for verifying a transparent statement.
 | `crates/scitt-network` | Acquire receipt keys and live resource evidence; no policy decisions |
 | `adapters/azure-confidential-ledger` (`scitt-adapter-azure-confidential-ledger`) | Pure appraisal of supplied MST ledger evidence against typed requirements |
 | `adapters/image-reproduction` (`scitt-adapter-image-reproduction`) | Pure comparison of a supplied rebuild record with the reproduction record a statement commits to; runs no build |
+| `adapters/amd-snp-device` (`scitt-adapter-amd-snp-device`) | Pure appraisal of a supplied SEV-SNP report, VCEK and AMD chain against the device a hardware BOM statement names; collects nothing |
 | `crates/scitt-verifier` | Load inputs, select acquisition and adapter paths, combine checks, report verdicts and exit codes |
 
-`scitt-policy/src/adapters/{mod.rs,acl.rs,image_reproduction.rs}` owns the
+`scitt-policy/src/adapters/{mod.rs,acl.rs,image_reproduction.rs,amd_snp_device.rs}` owns the
 policy namespace and each adapter's requirements. CLI
 `scitt-verifier/src/adapters/mod.rs` provides dispatch and the shared appraisal
 result; `acl.rs` translates MST requirements and findings, and `load.rs`
 handles local evidence bundles. `reproduction.rs` reads the two records from
 the evidence directory within fixed bounds and hands their bytes, with the
-accepted statement's payload, to the pure image-reproduction crate. `live.rs` calls
+accepted statement's payload, to the pure image-reproduction crate.
+`snp_device.rs` does the same for the SNP report, VCEK, AMD chain and nonce,
+and is a stub returning `cannot-evaluate` when the feature is off. `live.rs` calls
 `scitt_network::acl::collect`, then decodes and joins the returned node
 views into a pure evidence bundle. TLS bootstrap, pinned connections, and
 bounded HTTP collection belong to `collect`, not the CLI or pure adapter.
@@ -42,11 +45,13 @@ failed, or unevaluated required checks block success. Other checks still report
 scope limitations; they cannot stand in for a required check.
 
 There is no generic `scitt-attest` crate, plugin loader, or universal SNP
-evidence model. SNP and UVM concepts belong to the Azure Confidential Ledger
-adapter. The image-reproduction adapter shares only the dispatch seam and the
-check vocabulary; it has no SNP concepts. A future hardware or MAA adapter
-could use the same separation, but none is implemented
-by the existence of the dispatch seam.
+evidence model. Both the Azure Confidential Ledger and the amd-snp-device
+adapters verify SNP reports through the same pinned `tav-caci`, but neither
+depends on the other: the ledger adapter appraises UVM endorsements on ledger
+nodes, the device adapter binds one report to a hardware BOM. The
+image-reproduction adapter shares only the dispatch seam and the check
+vocabulary; it has no SNP concepts. An MAA adapter could use the same
+separation, but none is implemented by the existence of the dispatch seam.
 
 ## Where the network is, and is not
 
