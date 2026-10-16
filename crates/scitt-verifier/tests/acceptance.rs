@@ -2200,6 +2200,64 @@ fn has_unsupported_chain_gap(record: &serde_json::Value) -> bool {
 }
 
 #[test]
+fn statement_https_root_authorization_is_required_offline_even_with_a_matching_pin() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let url = format!(
+        "https://localhost:{}/root.crt",
+        listener.local_addr().unwrap().port()
+    );
+    let mut assertions = critical_eku_assertions();
+    assertions["requireChainToRootFromHttps"] = url.clone().into();
+    let (r, record) = verify_critical_eku("offline-https-root", "valid", assertions);
+    assert_eq!(r.code, 3, "{}", r.stdout);
+    let source = record["relyingPartyPolicy"]["assertions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "requireChainToRootFromHttps")
+        .unwrap();
+    assert_eq!(source["outcome"], "cannotEvaluate");
+    assert_eq!(source["rootSource"]["url"], url);
+    assert!(source["rootSource"]["material"].is_null());
+    assert!(source["rootSource"]["failure"]
+        .as_str()
+        .unwrap()
+        .contains("--online"));
+    assert!(source.get("rootSourceMatched").is_none());
+    assert_eq!(
+        record["signedStatement"]["rootSource"],
+        source["rootSource"]
+    );
+    assert!(record["signedStatement"]["rootSourceMatched"].is_null());
+    assert!(record.get("acquisition").is_none());
+    assert_eq!(eku_assertion(&record)["outcome"], "pass");
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}
+
+#[test]
+fn statement_https_root_source_destinations_are_refused_before_acquisition() {
+    for (name, url) in [
+        ("http-root", "http://publisher.example/root.crt"),
+        ("credential-root", "https://user@publisher.example/root.crt"),
+        (
+            "query-root",
+            "https://publisher.example/root.crt?token=secret",
+        ),
+        ("port-root", "https://publisher.example:65536/root.crt"),
+    ] {
+        let mut assertions = critical_eku_assertions();
+        assertions["requireChainToRootFromHttps"] = url.into();
+        let (r, record) = verify_critical_eku(name, "valid", assertions);
+        assert_eq!(r.code, 4, "{}", r.stdout);
+        assert!(record.get("acquisition").is_none());
+    }
+}
+
+#[test]
 fn critical_eku_matching_purpose_and_root_pass_at_registration_time() {
     let (r, record) = verify_critical_eku("matching", "valid", critical_eku_assertions());
     assert_eq!(r.code, 0, "{}", r.stdout);
@@ -2510,6 +2568,61 @@ fn external_chain_correct_pin_passes_and_exposes_the_validated_path() {
             facts["signedStatement"]["externalSignatures"],
             record["signedStatement"]["externalSignatures"]
         );
+    }
+}
+
+#[test]
+fn external_chain_https_source_is_unevaluable_offline_even_with_a_correct_pin() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let url = format!(
+        "https://localhost:{}/roots.pem",
+        listener.local_addr().unwrap().port()
+    );
+    for pin in [false, true] {
+        let mut rule = external_chain_rule();
+        if !pin {
+            rule.as_object_mut()
+                .unwrap()
+                .remove("requireChainToRootSha256");
+        }
+        rule["requireChainToRootFromHttps"] = url.clone().into();
+        let (r, record, facts) =
+            verify_external_chain(&format!("offline-https-{pin}"), "valid", &[rule]);
+        assert_eq!(r.code, 3, "{}", r.stdout);
+        let assertion = external_assertion(&record, 0);
+        assert_eq!(assertion["outcome"], "cannotEvaluate");
+        let evidence = &assertion["externalSignature"];
+        assert_eq!(evidence["signatureVerified"], true);
+        assert_eq!(evidence["certificateChain"]["pathLength"], 3);
+        assert_eq!(evidence["rootSource"]["url"], url);
+        assert!(evidence["rootSource"]["material"].is_null());
+        assert!(evidence["rootSource"]["failure"]
+            .as_str()
+            .unwrap()
+            .contains("--online"));
+        assert!(record.get("acquisition").is_none());
+        assert_eq!(facts["signedStatement"]["externalSignatures"][0], *evidence);
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+        );
+    }
+}
+
+#[test]
+fn external_chain_invalid_root_url_is_refused_before_any_acquisition() {
+    for (name, url) in [
+        ("plain-http", "http://supplier.example/roots.pem"),
+        ("userinfo", "https://user@supplier.example/roots.pem"),
+        ("query", "https://supplier.example/roots.pem?key=value"),
+        ("bad-port", "https://supplier.example:65536/roots.pem"),
+    ] {
+        let mut rule = external_chain_rule();
+        rule["requireChainToRootFromHttps"] = url.into();
+        let (r, record, _) = verify_external_chain(name, "valid", &[rule]);
+        assert_eq!(r.code, 4, "{}", r.stdout);
+        assert!(record.get("acquisition").is_none());
     }
 }
 

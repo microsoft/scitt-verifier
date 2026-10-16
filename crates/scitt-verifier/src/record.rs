@@ -299,6 +299,35 @@ fn acquisition_json(a: &Acquisition) -> Value {
         // `selected` rather than leaving the reader to guess between "nothing
         // was allowlisted" and "nothing was asked".
         "notAttempted": a.not_attempted,
+        "rootSources": a.external_roots.iter().map(|source| {
+            let (status, sha256, roots, bytes, failure) = match &source.outcome {
+                Ok(bundle) => (
+                    "acquired",
+                    json!(bundle.sha256),
+                    json!(bundle.root_sha256),
+                    json!(bundle.bytes.len()),
+                    Value::Null,
+                ),
+                Err(error) => (
+                    "failed",
+                    Value::Null,
+                    Value::Null,
+                    Value::Null,
+                    json!({ "code": error.diagnostic.code(), "detail": error.detail }),
+                ),
+            };
+            json!({
+                "url": source.url,
+                "acquiredAt": source.acquired_at,
+                "authentication": "https-webpki",
+                "status": status,
+                "responseSha256": sha256,
+                "encoding": source.outcome.as_ref().ok().map(|bundle| bundle.encoding.as_str()),
+                "rootSha256": roots,
+                "responseBytes": bytes,
+                "failure": failure,
+            })
+        }).collect::<Vec<_>>(),
     })
 }
 
@@ -437,6 +466,12 @@ fn statement_json(assessment: &Assessment) -> Value {
         "signatureValid": facts.signature_valid,
         "certificateChainLength": facts.certificate_chain_len,
         "certificateChain": chain_json(facts),
+        "rootSource": assessment.decision.as_ref()
+            .and_then(|decision| decision.results.iter().find(|r| r.name == "requireChainToRootFromHttps"))
+            .and_then(|r| r.root_source.as_ref()),
+        "rootSourceMatched": assessment.decision.as_ref()
+            .and_then(|decision| decision.results.iter().find(|r| r.name == "requireChainToRootFromHttps"))
+            .and_then(|r| r.root_source_matched),
         "externalSignatures": assessment.decision.as_ref().map(|decision| {
             decision.results.iter().filter_map(|r| r.external_signature.as_ref()).collect::<Vec<_>>()
         }).unwrap_or_default(),
@@ -851,6 +886,8 @@ mod tests {
                 outcome: Outcome::Pass,
                 detail: "d".into(),
                 external_signature: None,
+                root_source: None,
+                root_source_matched: None,
             }],
         };
 
@@ -908,6 +945,8 @@ mod tests {
                 outcome: Outcome::Pass,
                 detail: "d".into(),
                 external_signature: None,
+                root_source: None,
+                root_source_matched: None,
             }],
         });
         let check = |name: &str, state: CheckState| AdapterCheck {
@@ -1052,6 +1091,7 @@ mod service_configuration_tests {
             acquired: Vec::new(),
             failed: Vec::new(),
             not_attempted: None,
+            external_roots: Vec::new(),
             configurations: vec![
                 Observation::not_attempted("a.example", "key set not acquired", 5),
                 Observation {

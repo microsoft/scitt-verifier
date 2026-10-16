@@ -199,7 +199,10 @@ fn run_limitations(a: &Assessment) -> Vec<&'static str> {
     });
     let pinned_root = a.decision.as_ref().is_some_and(|decision| {
         decision.results.iter().any(|r| {
-            r.name == "requireChainToRootSha256" && r.outcome == scitt_policy::Outcome::Pass
+            matches!(
+                r.name.as_str(),
+                "requireChainToRootSha256" | "requireChainToRootFromHttps"
+            ) && r.outcome == scitt_policy::Outcome::Pass
         })
     });
     if !anchored && !pinned_root {
@@ -1666,6 +1669,7 @@ mod service_configuration_tests {
             failed: Vec::new(),
             not_attempted: None,
             configurations: observations,
+            external_roots: Vec::new(),
         });
         a
     }

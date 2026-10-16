@@ -100,6 +100,7 @@ def main():
     )
     leaf = cert(leaf_key, "Synthetic Supplier Signer", intermediate, intermediate_key)
     chain = [der(leaf), der(intermediate), der(root)]
+    (OUT / "roots.pem").write_bytes(root.public_bytes(serialization.Encoding.PEM))
     unsupported = cert(
         leaf_key, "Synthetic Supplier Signer", intermediate, intermediate_key, salt=32
     )

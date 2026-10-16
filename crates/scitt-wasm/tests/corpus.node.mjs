@@ -586,6 +586,26 @@ check('a critical EKU without purpose is unsupported',
 check('the policy entry point enables matching critical EKU',
   ekuEvaluate('valid').satisfied, true);
 check('noncritical EKU is also checked', ekuEvaluate('noncritical').satisfied, true);
+for (const withPin of [false, true]) {
+  const assertions = {
+    requireChainToRootFromHttps: 'https://publisher.example/trust/root.crt',
+    requireEku: ekuExpected.leafEkuOids,
+    certificateValidAtSigningTime: true,
+    ...(withPin ? { requireChainToRootSha256: ekuExpected.rootSha256 } : {}),
+  };
+  const result = ekuEvaluate('valid', assertions);
+  const rootSource = result.assertions.find((a) => a.name === 'requireChainToRootFromHttps');
+  check(`HTTPS roots with pin=${withPin}: policy cannot silently accept`,
+    result.satisfied, false);
+  check(`HTTPS roots with pin=${withPin}: acquisition is unevaluable in WASM`,
+    rootSource.outcome, 'cannotEvaluate');
+  check(`HTTPS roots with pin=${withPin}: no acquisition is invented`,
+    rootSource.rootSource.material, null);
+  check(`HTTPS roots with pin=${withPin}: no root comparison is invented`,
+    rootSource.rootSourceMatched, undefined);
+  check(`HTTPS roots with pin=${withPin}: purpose was independently checked`,
+    result.assertions.find((a) => a.name === 'requireEku').outcome, 'pass');
+}
 const ekuOnly = { requireEku: ekuExpected.leafEkuOids };
 for (const fixture of ['valid', 'noncritical']) {
   const unpinnedPurpose = ekuEvaluate(fixture, ekuOnly);

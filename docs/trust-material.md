@@ -17,7 +17,14 @@ higher than the cost of a network dependency — most often during rotation,
 where a pinned gate fails closed on every build until someone lands a pull
 request.
 
-This document concerns **receipt-signing keys**. Optional resource adapters
+The procedures below concern **receipt-signing keys**. Signing-root
+authorization is separate: top-level or per-external-rule
+`requireChainToRootFromHttps` makes its exact HTTPS PEM/DER endpoint authoritative
+under `--online`. See [statement roots](policy.md#requirechaintorootfromhttps)
+and [external roots](policy.md#authorize-external-roots-through-an-https-endpoint). The
+receipt issuer allowlist does not authorize manufacturer roots, and
+`--trusted-roots` still applies only to the outer statement chain.
+Optional resource adapters
 have separate targets and trust inputs under `adapters.<name>`. For example,
 `azure-confidential-ledger` obtains live evidence from `adapters.azure-confidential-ledger.target.host`, not
 from the receipt issuer selected by `assertions.issuer` or `--ledger`.
@@ -67,6 +74,12 @@ certificates as served, plus a manifest of digests — so a later run can replay
 the same material offline with `--scitt-keys`. Each service configuration that
 was read is saved beside them as `<issuer>.configuration.json`, byte for byte,
 with its digest in the manifest; it is kept for audit and nothing replays it.
+Acquired roots are saved verbatim as `external-roots-N.pem` or
+`external-roots-N.der`, according to their detected encoding.
+The manifest's `rootSources` entries record each policy URL, acquisition
+time, encoding, exact response hash and DER certificate fingerprints. These are audit copies,
+not signed trust lists: replaying receipt keys with `--scitt-keys` does not
+satisfy an HTTPS root-source requirement offline.
 It refuses to overwrite an
 existing snapshot, and it refuses to let `--result` or `--facts` write over a
 file it produced in the same run: a record is a description of a conclusion,
@@ -85,12 +98,16 @@ A successful fetch establishes who served the keys, over a connection
 authenticated to that service's own certificate, and that the key set contains
 the key that certificate binds to. It does **not** establish that a key is
 unrevoked, that the set is current rather than replayed, or anything about the
-statement's signer. The limitations recorded under `trust.limitations` say so
+statement's signer. Separately configured HTTPS root sources can
+authorize statement and external signing roots, but cannot establish revocation, signed-list
+freshness, rollback resistance, or historical authorization. Receipt-key
+limitations recorded under `trust.limitations` say so
 on every run.
 
 ### The service's current configuration
 
-After the key sets, `--online` asks each acquired ledger for `/configuration`
+After the key sets and any required signing-root publications, `--online` asks
+each acquired ledger for `/configuration`
 over the same connection, pinned to the same service certificate, within the
 same overall time limit. With `--verbose` the document is shown after the
 verdict, in full and escaped; it is always recorded under `serviceConfiguration` (see

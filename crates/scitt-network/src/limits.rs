@@ -73,3 +73,12 @@ pub const MAX_NODES: usize = 128;
 /// handled the file. The allowlist already bounds which of them can be
 /// selected; this bounds the work even when an operator allowlists many.
 pub const MAX_LEDGERS: usize = 8;
+
+/// Most distinct policy-selected signing-root endpoints in one run.
+pub const MAX_ROOT_SOURCES: usize = 8;
+
+/// Largest signing-root PEM/DER response we will read.
+pub const MAX_ROOT_BYTES: usize = 256 * 1024;
+
+/// Most certificates a signing-root endpoint may authorize.
+pub const MAX_ROOT_CERTIFICATES: usize = 32;

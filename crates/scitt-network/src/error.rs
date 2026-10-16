@@ -39,6 +39,10 @@ pub enum Diagnostic {
     AccessDenied,
     /// The service configuration was not a JSON object.
     MalformedConfiguration,
+    /// A policy-selected external root URL is unusable.
+    InvalidRootSource,
+    /// The root endpoint did not supply usable PEM or DER certificates.
+    MalformedRoots,
 }
 
 impl Diagnostic {
@@ -58,6 +62,8 @@ impl Diagnostic {
             Diagnostic::EndpointNotServed => "endpointNotServed",
             Diagnostic::AccessDenied => "accessDenied",
             Diagnostic::MalformedConfiguration => "malformedConfiguration",
+            Diagnostic::InvalidRootSource => "invalidRootSource",
+            Diagnostic::MalformedRoots => "malformedRoots",
         }
     }
 
@@ -70,6 +76,7 @@ impl Diagnostic {
         matches!(
             self,
             Diagnostic::InvalidIssuer
+                | Diagnostic::InvalidRootSource
                 | Diagnostic::UnsupportedProvider
                 | Diagnostic::UnsupportedPlatform
         )
@@ -125,6 +132,14 @@ impl Diagnostic {
             Diagnostic::MalformedConfiguration => {
                 "The service answered with something that is not a JSON object. Report it \
                  to the service operator."
+            }
+            Diagnostic::InvalidRootSource => {
+                "Configure an exact HTTPS root-bundle URL with a lowercase DNS hostname, \
+                 no credentials, query, or fragment, and an optional explicit port."
+            }
+            Diagnostic::MalformedRoots => {
+                "The approved root endpoint must publish a non-empty PEM certificate bundle \
+                 or one DER certificate within this build's size and certificate-count limits."
             }
         }
     }

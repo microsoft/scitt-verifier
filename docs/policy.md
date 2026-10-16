@@ -184,6 +184,7 @@ That first clause is not redundant — see
 | `requireKidBoundToKey` | `boolean` | Every receipt's kid must be the digest of its signing key |
 | `certificateChainValidated` | `boolean` | The signing certificate chain must validate to an anchor |
 | `requireChainToRootSha256` | `string` | Hex SHA-256 of the root the chain must terminate at |
+| `requireChainToRootFromHttps` | `string` | Exact authoritative HTTPS publication whose PEM/DER certificates must include the validated statement root (`--online`) |
 | `requireEku` | `string[]` | Every listed OID must occur in the leaf EKU on a validated path |
 | `certificateValidAtSigningTime` | `boolean` | Every certificate on the validated path must be within its validity window at every verified receipt's registration time |
 | `statementSubject` | `object` | The CWT `sub` claim the statement makes about itself |
@@ -509,6 +510,59 @@ present, or a chain this build cannot check (see
 extensions). "I did not look" is never evidence of compromise, and the exit code
 says 3 rather than 1 so you can tell the two apart in a pipeline.
 
+### `requireChainToRootFromHttps`
+
+Authorize the **outer COSE statement signer's** validated root through an exact,
+independently approved HTTPS publication:
+
+```json
+{
+  "policyId": "synthetic/publisher-gate",
+  "policyVersion": "1",
+  "assertions": {
+    "issuer": ["synthetic-purpose-ledger.example"],
+    "requireChainToRootFromHttps": "https://publisher.example/trust/signing-root.crt",
+    "requireEku": ["1.3.6.1.4.1.55555.1"],
+    "certificateValidAtSigningTime": true
+  }
+}
+```
+
+These are invented identifiers. Obtain the real endpoint and purpose through
+an independent, authenticated publisher channel, not from the statement or its
+certificates. The endpoint must publish either a non-empty PEM `CERTIFICATE`
+bundle or one DER certificate; the filename and HTTP content type do not select
+the parser. Malformed, truncated, or trailing DER material is refused.
+
+The existing statement chain validator must first validate the path. Its actual
+root DER's SHA-256 must occur in the acquired publication. This is root
+authorization, not a second path validator: the endpoint does not supply missing
+certificates, fetch intermediates or follow AIA. Existing `--trusted-roots`, if
+provided, still constrains path validation. A simultaneous
+`requireChainToRootSha256` is another requirement, not an alternative.
+
+A validated root excluded by the publication **fails**. Missing, failed or
+offline acquisition is `cannotEvaluate`, even with a matching fixed pin.
+Invalid paths fail; unsupported or unexamined paths cannot pass. Acquisition
+limits, destination restrictions, deduplication and freshness limitations are
+the same as for [external signatures](#authorize-external-roots-through-an-https-endpoint).
+The two scopes share one acquisition when they select the same URL, but must
+each independently match their own validated root.
+
+This also applies to **Artifact Signing-issued COSE signatures**. It does not
+verify Authenticode signatures in EXE/MSI files. Use a root publication for the
+appropriate signing trust model, retain publisher-specific constraints, require
+the expected leaf EKUs, and check validity at verified receipt registration
+time. A shared CA root alone does not select an expected publisher. This adds
+neither did:x509 resolution nor revocation checking.
+
+JSON exposes the source and comparison under both the assertion and
+`signedStatement.rootSource` / `rootSourceMatched`, including `--facts`. A
+successful authorization removes `CertificateChainNotAnchoredExternally` for
+the outer path; the core's `anchoredExternally` remains a record of whether the
+path validator used supplied `--trusted-roots`, not of this separate policy
+decision.
+
 ### `requireEku`
 
 Require the signing leaf to contain **every** listed Extended Key Usage OID,
@@ -533,10 +587,12 @@ fingerprint and purpose OIDs through an independent, authenticated channel.
 An EKU under an attacker-created root is no more an identity guarantee than
 that root's subject name. `requireEku` therefore reports `cannotEvaluate`
 (exit 3) when the validated path uses only an embedded anchor and the policy
-has no `requireChainToRootSha256`. Supply `--trusted-roots` or require the root
-fingerprint in the same policy. `certificateChainValidated: true` alone does
-not meet this prerequisite. A configured pin is still evaluated independently:
-a wrong pin fails the policy even if the EKU matches.
+has neither `requireChainToRootSha256` nor `requireChainToRootFromHttps`.
+Supply `--trusted-roots`, require the root fingerprint, or require an independent
+HTTPS root publication in the same policy. `certificateChainValidated: true`
+alone does not meet this prerequisite. Root authorization is still evaluated
+independently: a wrong pin, excluded published root or unavailable required
+publication prevents policy acceptance even if the EKU matches.
 
 This assertion enables processing a **leaf's** critical EKU (`2.5.29.37`).
 Without it, critical EKU remains `CertificateChainUnsupported`, even with a root
@@ -1045,10 +1101,75 @@ time means `cannotEvaluate`, even for `false`. This check can be used without
 a root pin, but does not independently authenticate the signer.
 
 A passing pinned rule no longer reports `ExternalSignerChainNotValidated`.
-Another unpinned rule still reports that limitation; pinning one external
+Another rule without independent root authorization still reports that
+limitation; pinning one external
 signer does not authenticate all of them. JSON and `--facts` expose each rule's
 addressed signature, validated certificate path and anchor under
 `signedStatement.externalSignatures`.
+
+#### Authorize external roots through an HTTPS endpoint
+
+Instead of manually distributing a fingerprint, the relying party can approve
+an authoritative root-publication endpoint:
+
+```json
+{
+  "path": ["external-signature", 0],
+  "signedOver": "payload",
+  "requireChainToRootFromHttps": "https://supplier.example/trust/hbom-roots.pem",
+  "certificateValidAtSigningTime": true
+}
+```
+
+With `verify --online`, the CLI fetches this exact URL over HTTPS authenticated
+by the bundled public WebPKI roots. The response must be a non-empty PEM
+`CERTIFICATE` bundle or one DER certificate. The existing validator still checks the complete
+external chain to its embedded self-issued root; that root's DER SHA-256 must
+occur in the published bundle. This does not complete a truncated chain or
+fetch intermediates. It applies to both `signedOver` conventions.
+
+**Approving the endpoint is the trust decision.** Obtain its address
+independently and confirm that its publisher authorizes these roots for the
+intended signing purpose. A general manufacturer certificate site or an
+attestation-root endpoint is not automatically an HBOM-signing authority.
+The statement, certificate issuer names and AIA extensions never select a URL.
+Downloading a root from a URL advertised only by the statement remains circular.
+
+`requireChainToRootSha256` may be combined with the URL. Both must hold:
+publishing a different root cannot override the pin, and a matching pin cannot
+bypass failed acquisition. A valid path excluded by the published bundle
+**fails**. Offline, unavailable, malformed or unauthenticated acquisition is
+`cannotEvaluate`, never a pass. A demonstrably invalid signature, required path
+or configured pin still fails independently. Unsupported path checks remain
+`cannotEvaluate`.
+
+URL syntax is checked before any CLI acquisition. URLs must be ASCII HTTPS
+URLs, at most 2048 bytes, with a lowercase DNS hostname and optional valid port.
+Credentials, queries, fragments, whitespace, controls and backslashes are
+refused, as are redirects. Repeated URLs are fetched once per run; up to eight
+distinct endpoints are allowed, with at most 256 KiB and 32 certificates per
+response. Required root fetches share the 60-second receipt-key acquisition
+deadline and precede informational service-configuration reads.
+
+`--online` still requires an `assertions.issuer` allowlist for receipt keys.
+`--scitt-keys` and `--online` remain mutually exclusive. Without `--online`,
+no request is made and this rule cannot be satisfied, even if its optional pin
+matches. `--save-trust` preserves acquired PEM/DER bytes and digests for audit; an
+unsigned saved file does not silently become an authenticated HTTPS response.
+For reviewed offline operation, explicitly replace the URL requirement with
+independently approved fingerprint pins.
+
+The endpoint controls root authorization **now**, including rotations and
+removals without a local policy update. HTTPS authenticates the publication
+channel, not signed trust-list freshness, rollback resistance, historical
+authorization at registration time, or revocation. These limitations remain
+visible at runtime. A passing HTTPS-authorized rule removes
+`ExternalSignerChainNotValidated` only for that rule.
+
+The core and policy open no connections. Embedders can call
+`Policy::evaluate_statement_with_external_roots` with acquisitions they have
+independently authenticated to the exact policy URL. Ordinary policy entry
+points supply no such evidence and therefore cannot satisfy this requirement.
 
 #### Why this is worth more than matching the header
 
@@ -1063,11 +1184,12 @@ covers is no longer the payload present.
 
 #### What it does not establish
 
-**Without an independent root pin, not whose key it is.** A signer who mints
-their own certificate passes an unpinned rule. `signerSubjectContains` raises
+**Without an independent root pin or approved HTTPS source, not whose key it
+is.** A signer who mints their own certificate passes an unanchored rule.
+`signerSubjectContains` raises
 the bar from "someone" to "someone who wrote this string into a certificate
 they issued themselves" — useful against mistakes, not against forgery. A
-passing unpinned rule says so explicitly under **Not checked**, as
+passing unanchored rule says so explicitly under **Not checked**, as
 `ExternalSignerChainNotValidated`. Even a pinned path does not establish
 certificate revocation status or the truth of the signed payload.
 

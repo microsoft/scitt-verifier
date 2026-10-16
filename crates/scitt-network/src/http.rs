@@ -1,4 +1,4 @@
-//! The two authenticated connections the trust flow needs, and nothing else.
+//! Authenticated connections for independently approved trust sources.
 //!
 //! Both are built the same way and differ in exactly one respect: which roots
 //! they will accept. That difference is the whole security argument, so it is
@@ -94,13 +94,11 @@ fn agent_with(roots: RootCerts, budget: Duration) -> Agent {
         .into()
 }
 
-/// An agent for the identity service, trusting the public web PKI.
+/// An agent for an independently approved authority, trusting public WebPKI.
 ///
-/// This is the one connection in the flow whose authority comes from the
-/// public root store. It is acceptable here precisely because it is not being
-/// asked for the key set: it is asked which certificate the ledger presents,
-/// and that answer is then checked against the key set the ledger itself
-/// serves.
+/// Used for the built-in ledger identity service and policy-selected external
+/// root endpoints. Never use it to fetch ledger keys directly: those require
+/// the service certificate independently supplied by the identity service.
 pub fn public_roots_agent(budget: Duration) -> Agent {
     agent_with(RootCerts::WebPki, budget)
 }

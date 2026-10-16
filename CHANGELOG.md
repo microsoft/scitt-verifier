@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+### Signing roots can be authorized by a policy-selected HTTPS endpoint
+
+Top-level `assertions.requireChainToRootFromHttps` and per-rule
+`externalSignatures[].requireChainToRootFromHttps` name an authoritative PEM
+bundle or single DER certificate. With `--online`, the CLI fetches that exact URL
+over public-WebPKI HTTPS and requires the already validated signing root to
+occur in the bundle. A configured `requireChainToRootSha256` remains an
+additional constraint. Existing complete-chain and supported-algorithm
+requirements are unchanged; no AIA or statement-supplied URL is followed.
+
+Offline or failed acquisition yields `cannotEvaluate`, never a fallback to an
+embedded root or a matching pin. A published bundle that excludes the validated
+root fails policy. Requests are deduplicated, bounded, and share the receipt-key
+acquisition deadline; redirects, credentials, queries and fragments are refused.
+JSON and `--facts` record source provenance and root authorization per assertion;
+`--save-trust` keeps the exact PEM/DER bytes for audit, not implicit offline trust.
+The endpoint controls current root authorization. No signed-metadata freshness,
+rollback, historical authorization, or revocation guarantee is added.
+
+The statement assertion also works for Artifact Signing-issued COSE signatures,
+not Authenticode EXE/MSI verification. Expected publisher, required leaf EKUs,
+and verified-registration-time validity remain independent requirements.
+
+Online verification now refreshes certificate-validity evidence after merging
+issuer-scoped verified receipts. Registration-time checks previously retained
+the preliminary empty-key pass's unavailable result even after receipts verified.
+
+Pure policy callers may supply independently authenticated root acquisitions
+through `evaluate_statement_with_external_roots`; existing entry points,
+including WASM, cannot satisfy an HTTPS-source requirement without acquisition.
+Older binaries refuse the new field rather than skipping it.
+
 ### Critical leaf EKU is processed only when purpose is checked
 
 Statement assertions accept `requireEku`, a non-empty list of OIDs that must
@@ -10,9 +42,10 @@ processing a critical leaf EKU; without a purpose requirement the same chain
 still reports `CertificateChainUnsupported`. Missing required purposes and
 malformed EKUs fail closed. Root pins remain independent requirements.
 An embedded-only anchor cannot satisfy `requireEku` without a separate policy
-root pin: the assertion reports `cannotEvaluate` unless the path used supplied
-trusted roots or the policy also requires `requireChainToRootSha256`. A wrong
-configured pin still fails independently of a matching EKU. Strict extension
+root authorization: the assertion reports `cannotEvaluate` unless the path used supplied
+trusted roots or the policy also requires `requireChainToRootSha256` or
+`requireChainToRootFromHttps`. A wrong pin or failed required publication still
+prevents acceptance independently of a matching EKU. Strict extension
 decoding rejects non-DER critical flags as well as duplicate EKU extensions.
 Raw certificate EKU must be exactly one canonically encoded SEQUENCE:
 extra wrappers, nonminimal lengths or OID encodings, and overflowing arcs

@@ -23,6 +23,7 @@ pub mod error;
 pub mod http;
 pub mod limits;
 pub mod provider;
+pub mod roots;
 
 pub use error::{AcquireError, Diagnostic};
 pub use provider::{route_for, validate_host, Route};

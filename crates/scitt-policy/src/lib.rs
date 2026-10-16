@@ -90,8 +90,14 @@ pub struct Assertions {
     /// new certificate with the same name.
     #[serde(default)]
     pub require_chain_to_root_sha256: Option<String>,
+    /// Authoritative HTTPS root publication for the outer statement signer.
+    ///
+    /// Acquisition is explicit and independent of the statement. A configured
+    /// fingerprint or local trusted-roots bundle remains an additional constraint.
+    #[serde(default)]
+    pub require_chain_to_root_from_https: Option<String>,
     /// Every listed OID must occur in the leaf EKU on a validated path.
-    /// Requires a supplied trusted anchor or `requireChainToRootSha256`.
+    /// Requires a supplied trusted anchor or policy root pin/HTTPS authorization.
     /// Pair with an independently selected root and registration-time validity.
     #[serde(default)]
     pub require_eku: Option<Vec<String>>,
@@ -224,9 +230,10 @@ pub struct Assertions {
     /// the point. A passing check says: the bytes at label `-1` are a valid
     /// signature over this statement's payload by the key in the certificate
     /// at label `33`. It does *not* say that certificate belongs to anyone in
-    /// particular unless the rule also pins the validated chain's root with
-    /// `requireChainToRootSha256`. Without that pin, a signer who mints their
-    /// own certificate passes, and the run says so in `notChecked`.
+    /// particular unless the rule also authorizes the validated chain's root
+    /// with a fingerprint or a policy-selected HTTPS root source. Without
+    /// either, a signer who mints their own certificate passes, and the run
+    /// says so in `notChecked`.
     ///
     /// It is still worth having. It converts a claim that could be fabricated
     /// with a random-number generator into one that requires a private key,
@@ -271,6 +278,12 @@ pub struct ExternalSignature {
     /// The whole external chain must validate before its anchor is compared.
     #[serde(default)]
     pub require_chain_to_root_sha256: Option<String>,
+    /// Authoritative HTTPS root publication, selected by the relying party.
+    ///
+    /// The caller must authenticate acquisition independently of the statement.
+    /// A configured fingerprint remains an additional requirement.
+    #[serde(default)]
+    pub require_chain_to_root_from_https: Option<String>,
     /// Check the validated external path at every verified receipt's `iat`.
     ///
     /// As with the top-level assertion, this witnesses registration, not the
@@ -830,6 +843,10 @@ pub struct AssertionResult {
     pub detail: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_signature: Option<ExternalSignatureEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_source: Option<ExternalRootSourceEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_source_matched: Option<bool>,
 }
 
 /// Evidence for one addressed external signature, kept separate per rule.
@@ -842,7 +859,81 @@ pub struct ExternalSignatureEvidence {
     pub certificate_chain: Option<ExternalCertificatePath>,
     /// `None` means no pin comparison ran, never a successful comparison.
     pub root_pin_matched: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_source: Option<ExternalRootSourceEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_source_matched: Option<bool>,
     pub certificates_valid_at_registration: Option<bool>,
+}
+
+/// Authenticated root acquisition supplied by a caller, never by a statement.
+///
+/// This pure crate cannot authenticate a connection. Callers must only supply
+/// roots acquired from the exact policy URL over authenticated HTTPS.
+#[derive(Debug, Clone)]
+pub struct ExternalRootSource {
+    pub url: String,
+    pub outcome: Result<ExternalRoots, String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalRoots {
+    pub acquired_at: i64,
+    /// SHA-256 of the exact response, not a PEM/DER re-encoding.
+    pub response_sha256: String,
+    pub encoding: String,
+    /// SHA-256 fingerprints of the published certificates' DER.
+    pub root_sha256: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalRootSourceEvidence {
+    pub url: String,
+    pub material: Option<ExternalRoots>,
+    pub failure: Option<String>,
+}
+
+impl ExternalRootSourceEvidence {
+    fn from_sources(url: &str, sources: &[ExternalRootSource]) -> Self {
+        let mut matching = sources.iter().filter(|source| source.url == url);
+        let outcome = match (matching.next(), matching.next()) {
+            (Some(source), None) => source.outcome.clone(),
+            (None, _) => Err(
+                "the policy's HTTPS root source was not acquired; authenticated \
+                 acquisition is required (--online in the CLI)"
+                    .into(),
+            ),
+            _ => Err("more than one acquisition was supplied for this root source".into()),
+        };
+        let (material, failure) = match outcome {
+            Ok(roots) if !roots.root_sha256.is_empty() => (Some(roots), None),
+            Ok(_) => (None, Some("the HTTPS root source supplied no roots".into())),
+            Err(why) => (None, Some(why)),
+        };
+        Self {
+            url: url.into(),
+            material,
+            failure,
+        }
+    }
+
+    fn authorizes(&self, root: &str) -> Result<bool, String> {
+        let Some(material) = &self.material else {
+            return Err(format!(
+                "root authorization from {} could not be checked: {}",
+                self.url,
+                self.failure
+                    .as_deref()
+                    .unwrap_or("no authenticated roots were supplied")
+            ));
+        };
+        Ok(material
+            .root_sha256
+            .iter()
+            .any(|expected| root.eq_ignore_ascii_case(expected)))
+    }
 }
 
 /// The external path actually validated, with certificate hashes leaf first.
@@ -900,6 +991,23 @@ pub const MAX_HEADER_PATH_DEPTH: usize = 8;
 /// ignoring an unknown assertion, one level down.
 const PATH_WILDCARD: &str = "*";
 
+fn validate_root_url(url: &str, field: &str) -> Result<(), String> {
+    if !url.starts_with("https://")
+        || url.len() <= "https://".len()
+        || url.len() > 2048
+        || !url.is_ascii()
+        || url
+            .bytes()
+            .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
+    {
+        return Err(format!(
+            "{field} must be an ASCII HTTPS URL of at most 2048 bytes, \
+             with no whitespace or controls"
+        ));
+    }
+    Ok(())
+}
+
 /// Check a header path before anything tries to walk it.
 ///
 /// Shared by every assertion that addresses the protected header, so a limit
@@ -940,6 +1048,9 @@ impl ExternalSignature {
                 ));
             }
         }
+        if let Some(url) = &self.require_chain_to_root_from_https {
+            validate_root_url(url, &format!("{field}.requireChainToRootFromHttps"))?;
+        }
         Ok(())
     }
 
@@ -976,12 +1087,21 @@ impl ExternalSignature {
         Ok(())
     }
 
-    fn evaluate(&self, facts: &StatementFacts) -> AssertionResult {
+    fn evaluate(
+        &self,
+        facts: &StatementFacts,
+        root_sources: &[ExternalRootSource],
+    ) -> AssertionResult {
         let mut evidence = ExternalSignatureEvidence {
             path: self.path.clone(),
             signature_verified: None,
             certificate_chain: None,
             root_pin_matched: None,
+            root_source: self
+                .require_chain_to_root_from_https
+                .as_ref()
+                .map(|url| ExternalRootSourceEvidence::from_sources(url, root_sources)),
+            root_source_matched: None,
             certificates_valid_at_registration: None,
         };
         let (outcome, detail) = self.evaluate_signature(facts, &mut evidence);
@@ -1072,6 +1192,7 @@ impl ExternalSignature {
         evidence: &mut ExternalSignatureEvidence,
     ) -> Result<String, (Outcome, String)> {
         if self.require_chain_to_root_sha256.is_none()
+            && self.require_chain_to_root_from_https.is_none()
             && self.certificate_valid_at_signing_time.is_none()
         {
             return Ok(String::new());
@@ -1134,6 +1255,21 @@ impl ExternalSignature {
                 return Err((
                     Outcome::Fail,
                     format!("the external chain terminates at root {root}, not {expected}"),
+                ));
+            }
+        }
+        if let Some(source) = &evidence.root_source {
+            let matches = source
+                .authorizes(&root)
+                .map_err(|why| (Outcome::CannotEvaluate, why))?;
+            evidence.root_source_matched = Some(matches);
+            if !matches {
+                return Err((
+                    Outcome::Fail,
+                    format!(
+                        "the validated external root {root} is not authorized by {}",
+                        source.url
+                    ),
                 ));
             }
         }
@@ -1536,6 +1672,9 @@ impl Policy {
         if let Some(issuer) = &policy.assertions.statement_issuer {
             issuer.validate("statementIssuer")?;
         }
+        if let Some(url) = &policy.assertions.require_chain_to_root_from_https {
+            validate_root_url(url, "requireChainToRootFromHttps")?;
+        }
         if let Some(oids) = &policy.assertions.require_eku {
             if oids.is_empty() {
                 return Err("requireEku is empty; it would check no purpose".into());
@@ -1640,6 +1779,18 @@ impl Policy {
     /// evaluate every requested adapter before accepting it. With no statement
     /// assertions, the decision has no results and is not satisfied.
     pub fn evaluate_statement(&self, facts: &StatementFacts, now: i64) -> PolicyDecision {
+        self.evaluate_statement_with_external_roots(facts, now, &[])
+    }
+
+    /// Evaluate statement assertions with independently authenticated root
+    /// sources for outer and external signatures. This neither acquires roots
+    /// nor evaluates adapters.
+    pub fn evaluate_statement_with_external_roots(
+        &self,
+        facts: &StatementFacts,
+        now: i64,
+        root_sources: &[ExternalRootSource],
+    ) -> PolicyDecision {
         let mut results = Vec::new();
         let a = &self.assertions;
 
@@ -1874,7 +2025,7 @@ impl Policy {
 
         if let Some(externals) = &a.external_signatures {
             for external in externals {
-                results.push(external.evaluate(facts));
+                results.push(external.evaluate(facts, root_sources));
             }
         }
 
@@ -1925,11 +2076,15 @@ impl Policy {
         if let Some(expected) = &a.require_chain_to_root_sha256 {
             results.push(chain_root_result(facts, expected));
         }
+        if let Some(url) = &a.require_chain_to_root_from_https {
+            results.push(chain_root_source_result(facts, url, root_sources));
+        }
         if let Some(required) = &a.require_eku {
             results.push(eku_result(
                 facts,
                 required,
-                a.require_chain_to_root_sha256.is_some(),
+                a.require_chain_to_root_sha256.is_some()
+                    || a.require_chain_to_root_from_https.is_some(),
             ));
         }
 
@@ -1939,8 +2094,8 @@ impl Policy {
                 None => result(
                     name,
                     Outcome::CannotEvaluate,
-                    "the chain was not validated, or the statement declares no iat to check \
-                     against",
+                    "the chain was not validated, or no fully verified receipt attests a \
+                     registration time to check against",
                 ),
                 Some(valid) if valid == required => result(
                     name,
@@ -2097,6 +2252,8 @@ fn result(name: &str, outcome: Outcome, detail: impl Into<String>) -> AssertionR
         outcome,
         detail: detail.into(),
         external_signature: None,
+        root_source: None,
+        root_source_matched: None,
     }
 }
 
@@ -2217,21 +2374,73 @@ fn chain_root_result(facts: &StatementFacts, expected: &str) -> AssertionResult 
     }
 }
 
+fn chain_root_source_result(
+    facts: &StatementFacts,
+    url: &str,
+    root_sources: &[ExternalRootSource],
+) -> AssertionResult {
+    let source = ExternalRootSourceEvidence::from_sources(url, root_sources);
+    let mut matched = None;
+    let name = "requireChainToRootFromHttps";
+    let mut evaluated = match &facts.chain_outcome {
+        Some(ChainOutcome::Valid(details)) => {
+            let root = hex(&details.root_sha256);
+            match source.authorizes(&root) {
+                Ok(accepted) => {
+                    matched = Some(accepted);
+                    result(
+                        name,
+                        if accepted {
+                            Outcome::Pass
+                        } else {
+                            Outcome::Fail
+                        },
+                        format!(
+                            "the validated statement root {root} is {}authorized by {url}",
+                            if accepted { "" } else { "not " }
+                        ),
+                    )
+                }
+                Err(why) => result(name, Outcome::CannotEvaluate, why),
+            }
+        }
+        Some(ChainOutcome::Invalid(why)) => result(
+            name,
+            Outcome::Fail,
+            format!("the statement chain did not validate: {why}"),
+        ),
+        Some(ChainOutcome::Insufficient(why) | ChainOutcome::Unsupported(why)) => result(
+            name,
+            Outcome::CannotEvaluate,
+            format!("the statement chain could not be checked: {why}"),
+        ),
+        None => result(
+            name,
+            Outcome::CannotEvaluate,
+            "statement chain validation was not performed",
+        ),
+    };
+    evaluated.root_source = Some(source);
+    evaluated.root_source_matched = matched;
+    evaluated
+}
+
 fn eku_result(
     facts: &StatementFacts,
     required: &[String],
-    root_pin_configured: bool,
+    root_authorization_configured: bool,
 ) -> AssertionResult {
     let name = "requireEku";
     match &facts.chain_outcome {
         Some(ChainOutcome::Valid(details))
-            if !details.anchored_externally && !root_pin_configured =>
+            if !details.anchored_externally && !root_authorization_configured =>
         {
             result(
                 name,
                 Outcome::CannotEvaluate,
                 "the path uses only the statement's embedded anchor; supply --trusted-roots or \
-                 configure requireChainToRootSha256 before relying on its leaf EKU",
+                 configure requireChainToRootSha256 or requireChainToRootFromHttps before \
+                 relying on its leaf EKU",
             )
         }
         Some(ChainOutcome::Valid(details)) => match &details.leaf_eku_oids {

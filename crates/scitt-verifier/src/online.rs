@@ -201,6 +201,15 @@ pub fn verify_scoped(
         }
     }
 
+    // The empty-key pass could not attest any times. Recompute only after
+    // issuer scoping has established which receipts actually verified.
+    merged.certificates_valid_at_signing_time = match &merged.chain_outcome {
+        Some(scitt_receipt::chain::Outcome::Valid(details)) => {
+            scitt_receipt::valid_at_registrations(details, &merged.receipts)
+        }
+        _ => None,
+    };
+
     Ok(merged)
 }
 
@@ -449,6 +458,134 @@ mod tests {
             index,
             issuer: Some(issuer.into()),
             ..Default::default()
+        }
+    }
+
+    fn synthetic_acquisition(issuer: &str, keyset: &[u8]) -> Acquired {
+        Acquired {
+            issuer: issuer.into(),
+            keyset_bytes: keyset.to_vec(),
+            keys: LedgerKeySet::from_cose_key_set(keyset).unwrap(),
+            service_cert_der: Vec::new(),
+            provenance: scitt_network::Provenance {
+                issuer: issuer.into(),
+                provider: "synthetic",
+                identity_url: "https://identity.example/ledger".into(),
+                keyset_url: format!("https://{issuer}/keys"),
+                service_cert_sha256: None,
+                keyset_sha256: Some(scitt_receipt::sha256_hex(keyset)),
+                service_key_kid: None,
+                acquired_at: 0,
+                ambiguous_kids: Vec::new(),
+                failure: None,
+            },
+        }
+    }
+
+    #[test]
+    fn scoped_registration_time_validity_uses_the_final_verified_receipts() {
+        let expected: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/critical-eku/expected.json"))
+                .unwrap();
+        let policy = Policy::from_json(
+            &serde_json::to_vec(&serde_json::json!({
+                "policyId": "synthetic-scoped-validity",
+                "policyVersion": "1",
+                "assertions": {
+                    "requireChainToRootFromHttps": "https://publisher.example/root.crt",
+                    "requireEku": expected["leafEkuOids"],
+                    "certificateValidAtSigningTime": true,
+                },
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let options = VerifyOptions {
+            chain: Some(scitt_receipt::chain::Options {
+                required_eku: policy.assertions.require_eku.clone().unwrap(),
+                ..Default::default()
+            }),
+        };
+        let acquired = synthetic_acquisition(
+            "synthetic-purpose-ledger.example",
+            include_bytes!("../tests/fixtures/critical-eku/keys.cbor"),
+        );
+        let sources = [scitt_policy::ExternalRootSource {
+            url: "https://publisher.example/root.crt".into(),
+            outcome: Ok(scitt_policy::ExternalRoots {
+                acquired_at: 0,
+                response_sha256: "ab".repeat(32),
+                encoding: "der".into(),
+                root_sha256: vec![expected["rootSha256"].as_str().unwrap().into()],
+            }),
+        }];
+        for (statement, validity, outcome) in [
+            (
+                include_bytes!("../tests/fixtures/critical-eku/valid.cose").as_slice(),
+                Some(true),
+                scitt_policy::Outcome::Pass,
+            ),
+            (
+                include_bytes!("../tests/fixtures/critical-eku/late-registration.cose").as_slice(),
+                Some(false),
+                scitt_policy::Outcome::Fail,
+            ),
+            (
+                include_bytes!("../tests/fixtures/critical-eku/no-registration-time.cose")
+                    .as_slice(),
+                None,
+                scitt_policy::Outcome::CannotEvaluate,
+            ),
+        ] {
+            let facts =
+                verify_scoped(statement, std::slice::from_ref(&acquired), &options).unwrap();
+            assert_eq!(facts.verified_receipts().count(), 1);
+            assert_eq!(facts.cwt.iat, Some(0));
+            assert_eq!(facts.certificates_valid_at_signing_time, validity);
+            let decision = policy.evaluate_statement_with_external_roots(&facts, 0, &sources);
+            let time = decision
+                .results
+                .iter()
+                .find(|result| result.name == "certificateValidAtSigningTime")
+                .unwrap();
+            assert_eq!(time.outcome, outcome, "{decision:?}");
+            assert_eq!(decision.satisfied(), outcome == scitt_policy::Outcome::Pass);
+        }
+    }
+
+    #[test]
+    fn scoped_registration_time_validity_never_uses_unverified_or_unselected_receipts() {
+        let statement = include_bytes!("../tests/fixtures/critical-eku/noncritical.cose");
+        let keys = include_bytes!("../tests/fixtures/critical-eku/keys.cbor");
+        let options = VerifyOptions {
+            chain: Some(Default::default()),
+        };
+        for acquired in [
+            vec![],
+            vec![synthetic_acquisition("other-ledger.example", keys)],
+            vec![synthetic_acquisition(
+                "synthetic-purpose-ledger.example",
+                include_bytes!("../tests/fixtures/external-chain/keys.cbor"),
+            )],
+        ] {
+            let facts = verify_scoped(statement, &acquired, &options).unwrap();
+            assert_eq!(facts.verified_receipts().count(), 0);
+            assert_eq!(facts.certificates_valid_at_signing_time, None);
+        }
+        let acquired = [synthetic_acquisition(
+            "synthetic-purpose-ledger.example",
+            keys,
+        )];
+        for (statement, options) in [
+            (statement.as_slice(), VerifyOptions::default()),
+            (
+                include_bytes!("../tests/fixtures/critical-eku/valid.cose").as_slice(),
+                options,
+            ),
+        ] {
+            let facts = verify_scoped(statement, &acquired, &options).unwrap();
+            assert_eq!(facts.verified_receipts().count(), 1);
+            assert_eq!(facts.certificates_valid_at_signing_time, None);
         }
     }
 
