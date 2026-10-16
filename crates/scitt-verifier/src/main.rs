@@ -8,6 +8,7 @@ mod adapters;
 mod cli;
 mod decode;
 mod display;
+mod external_roots;
 mod inspect_json;
 mod online;
 mod outcome;
@@ -384,6 +385,20 @@ fn evaluate(args: &VerifyArgs, now: i64, progress: &mut dyn progress::Sink) -> A
         );
     }
 
+    if let Err(reason) = external_roots::validate(&policy) {
+        return Assessment::incomplete(
+            Verdict::UsageError,
+            trust,
+            Diagnostic::error(
+                "ExternalRootSourceInvalid",
+                Category::Input,
+                reason,
+                "Configure an exact HTTPS certificate-publication URL in the signing-root assertion.",
+            ),
+            gaps(args, None, None),
+        );
+    }
+
     // Chain validation always runs; `--trusted-roots` only decides whether the
     // anchor is one the operator chose or the one the statement brought with
     // it. Making the check itself conditional would mean the common case
@@ -510,7 +525,12 @@ fn evaluate(args: &VerifyArgs, now: i64, progress: &mut dyn progress::Sink) -> A
             policy.policy_id, policy.policy_version
         ),
     ));
-    let decision = policy.evaluate_statement(&facts, now);
+    let root_sources = resolved
+        .acquisition
+        .as_ref()
+        .map(|acquisition| external_roots::policy_sources(&acquisition.external_roots))
+        .unwrap_or_default();
+    let decision = policy.evaluate_statement_with_external_roots(&facts, now, &root_sources);
     for result in &decision.results {
         progress.emit(
             progress::Event::finding(
@@ -853,6 +873,7 @@ fn resolve_online(
                     failed: Vec::new(),
                     not_attempted: Some(why),
                     configurations: Vec::new(),
+                    external_roots: Vec::new(),
                 }),
             });
         }
@@ -878,6 +899,9 @@ fn resolve_online(
         scitt_network::acquire_all_before(&selected, wall_clock(), deadline, &mut observer)
     };
     let (acquired, failed) = online::partition(outcomes);
+    // Required trust acquisition precedes informational configuration reads
+    // and shares the same deadline, so optional work cannot consume its budget.
+    let external_roots = external_roots::acquire(policy, deadline, progress);
     let configurations = observe_configurations(&acquired, &failed, deadline, progress);
 
     // The mode describes what this run actually holds, not what it set out to
@@ -930,6 +954,16 @@ fn resolve_online(
                 )
             })
         }))
+        .chain(external_roots.iter().filter_map(|source| {
+            source.outcome.as_ref().err().map(|error| {
+                Diagnostic::error(
+                    acquisition_code(error.diagnostic),
+                    Category::Trust,
+                    format!("external root source {}: {error}", source.url),
+                    error.diagnostic.action(),
+                )
+            })
+        }))
         .collect();
 
     let acquisition = Acquisition {
@@ -938,6 +972,7 @@ fn resolve_online(
         failed,
         not_attempted: None,
         configurations,
+        external_roots,
     };
 
     // Carried onto the failure too. Requests were made and their outcomes are
@@ -1035,6 +1070,8 @@ fn acquisition_code(d: scitt_network::Diagnostic) -> &'static str {
         D::EndpointNotServed => "AcquisitionEndpointNotServed",
         D::AccessDenied => "AcquisitionAccessDenied",
         D::MalformedConfiguration => "AcquisitionMalformedConfiguration",
+        D::InvalidRootSource => "AcquisitionInvalidRootSource",
+        D::MalformedRoots => "AcquisitionMalformedRoots",
     }
 }
 
@@ -1217,6 +1254,33 @@ fn save_trust(dir: &Path, assessment: &Assessment) -> Result<Vec<PathBuf>, Diagn
         }));
     }
 
+    let mut root_manifest = Vec::new();
+    for (index, source) in acquisition.external_roots.iter().enumerate() {
+        let Ok(bundle) = &source.outcome else {
+            continue;
+        };
+        let path = dir.join(format!(
+            "external-roots-{index}.{}",
+            bundle.encoding.as_str()
+        ));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|e| fail(format!("could not create {}: {e}", path.display())))?;
+        std::io::Write::write_all(&mut file, &bundle.bytes)
+            .map_err(|e| fail(format!("could not write {}: {e}", path.display())))?;
+        written.push(path.clone());
+        root_manifest.push(serde_json::json!({
+            "url": source.url,
+            "file": path.file_name().and_then(|n| n.to_str()),
+            "acquiredAt": source.acquired_at,
+            "responseSha256": bundle.sha256,
+            "encoding": bundle.encoding.as_str(),
+            "rootSha256": bundle.root_sha256,
+        }));
+    }
+
     let manifest_path = dir.join("manifest.json");
     if manifest_path.exists() {
         return Err(fail(format!(
@@ -1232,8 +1296,11 @@ fn save_trust(dir: &Path, assessment: &Assessment) -> Result<Vec<PathBuf>, Diagn
         "note": "Bytes as served, for offline replay with --scitt-keys. Replaying reproduces \
                  the keys held at acquisition time; it does not re-check the service. Any \
                  *.configuration.json file is the service's configuration as observed at \
-                 acquisition, kept for audit; it is not trust material and is never replayed.",
+                 acquisition, kept for audit; it is not trust material and is never replayed. \
+                 Acquired PEM/DER roots are audit copies: they carry no publisher signature \
+                 and do not satisfy an HTTPS root-source requirement offline.",
         "ledgers": manifest,
+        "rootSources": root_manifest,
     });
     std::fs::write(&manifest_path, format!("{doc:#}\n"))
         .map_err(|e| fail(format!("could not write {}: {e}", manifest_path.display())))?;
@@ -2195,6 +2262,13 @@ fn gaps(
     decision: Option<&PolicyDecision>,
 ) -> Vec<Gap> {
     let mut gaps = Vec::new();
+    let statement_root_authorized = decision.is_some_and(|decision| {
+        decision.results.iter().any(|result| {
+            result.name == "requireChainToRootFromHttps"
+                && result.outcome == AssertionOutcome::Pass
+                && result.root_source_matched == Some(true)
+        })
+    });
 
     if args.binding_mode == BindingMode::None {
         gaps.push(Gap::new(
@@ -2221,7 +2295,8 @@ fn gaps(
             "the signer's identity rests entirely on policy assertions about CWT claims",
         )),
         // Anchored in a root the operator supplied: nothing left to caveat.
-        (Some(_), Some(ChainOutcome::Valid(details))) if details.anchored_externally => {}
+        (Some(_), Some(ChainOutcome::Valid(details)))
+            if details.anchored_externally || statement_root_authorized => {}
         // Anchored in the chain's own root. The path is internally consistent,
         // which is not the same as trusted, and collapsing the two would invite
         // the reader to believe a self-signed forgery.
@@ -2259,20 +2334,19 @@ fn gaps(
     gaps.push(Gap::new(
         "RevocationNotChecked",
         Category::SignerIdentity,
-        "Certificate revocation was not checked (this tool runs offline).",
+        "Certificate revocation was not checked, including for certificates acquired online.",
         "a revoked signing certificate would still verify here",
     ));
 
     match decision {
         Some(d) => {
-            // One pinned rule must not hide another rule's unanchored signer.
+            // One anchored rule must not hide another rule's unanchored signer.
             if d.results.iter().any(|r| {
                 r.name == "externalSignatures"
                     && r.outcome == AssertionOutcome::Pass
-                    && !r
-                        .external_signature
-                        .as_ref()
-                        .is_some_and(|e| e.root_pin_matched == Some(true))
+                    && !r.external_signature.as_ref().is_some_and(|e| {
+                        e.root_pin_matched == Some(true) || e.root_source_matched == Some(true)
+                    })
             }) {
                 gaps.push(Gap::new(
                     "ExternalSignerChainNotValidated",
@@ -2282,6 +2356,26 @@ fn gaps(
                      validated to a trusted root.",
                     "the external signature proves possession of a key, not the identity of its \
                      holder",
+                ));
+            }
+
+            if d.results.iter().any(|r| {
+                r.root_source
+                    .as_ref()
+                    .or_else(|| {
+                        r.external_signature
+                            .as_ref()
+                            .and_then(|e| e.root_source.as_ref())
+                    })
+                    .is_some_and(|source| source.material.is_some())
+            }) {
+                gaps.push(Gap::new(
+                    "RootSourceFreshnessNotChecked",
+                    Category::Trust,
+                    "The HTTPS root bundle is authenticated by public WebPKI, not signed \
+                     publisher metadata. No freshness or rollback protection was checked.",
+                    "the approved endpoint controls current root authorization; this does not \
+                     prove historical authorization or revocation status",
                 ));
             }
 
@@ -2946,6 +3040,7 @@ mod save_trust_tests {
                 observed_at: 0,
                 outcome,
             }],
+            external_roots: Vec::new(),
         });
         a
     }
@@ -3039,6 +3134,107 @@ mod save_trust_tests {
 
         assert_eq!(err.code, "TrustMaterialNotSaved");
         assert_eq!(std::fs::read(&path).unwrap(), b"original");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn with_external_roots() -> Assessment {
+        let mut assessment = assessment(Outcome::NotAttempted("not requested".into()));
+        let bytes = include_bytes!("../tests/fixtures/external-chain/roots.pem").to_vec();
+        let certificates =
+            scitt_receipt::chain::parse_pem_certificates(std::str::from_utf8(&bytes).unwrap())
+                .unwrap();
+        assessment
+            .acquisition
+            .as_mut()
+            .unwrap()
+            .external_roots
+            .push(scitt_network::roots::Observation {
+                url: "https://supplier.example/roots.pem".into(),
+                acquired_at: 7,
+                outcome: Ok(scitt_network::roots::RootBundle {
+                    sha256: scitt_receipt::sha256_hex(&bytes),
+                    bytes,
+                    root_sha256: certificates
+                        .iter()
+                        .map(|der| scitt_receipt::sha256_hex(der))
+                        .collect(),
+                    encoding: scitt_network::roots::Encoding::Pem,
+                }),
+            });
+        assessment
+    }
+
+    #[test]
+    fn external_root_bundles_are_saved_verbatim_for_audit_not_implicit_offline_trust() {
+        let dir = fresh_dir("external-roots");
+        let assessment = with_external_roots();
+        let written = save_trust(&dir, &assessment).unwrap();
+        let path = dir.join("external-roots-0.pem");
+        assert!(written.contains(&path));
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            include_bytes!("../tests/fixtures/external-chain/roots.pem"),
+        );
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(
+            manifest["rootSources"][0]["url"],
+            "https://supplier.example/roots.pem"
+        );
+        assert_eq!(manifest["rootSources"][0]["file"], "external-roots-0.pem");
+        assert_eq!(manifest["rootSources"][0]["acquiredAt"], 7);
+        assert_eq!(manifest["rootSources"][0]["encoding"], "pem");
+        assert!(manifest["note"]
+            .as_str()
+            .unwrap()
+            .contains("do not satisfy"));
+        assert!(same_file(
+            &dir.join("external-roots-0.pem"),
+            &written[written.len() - 2]
+        ));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn der_root_responses_are_saved_without_reencoding_and_with_format_aware_provenance() {
+        let dir = fresh_dir("external-roots-der");
+        let mut assessment = with_external_roots();
+        let source = &mut assessment.acquisition.as_mut().unwrap().external_roots[0];
+        let bundle = source.outcome.as_mut().unwrap();
+        let der = scitt_receipt::chain::parse_pem_certificates(
+            std::str::from_utf8(&bundle.bytes).unwrap(),
+        )
+        .unwrap()
+        .remove(0);
+        bundle.bytes = der.clone();
+        bundle.sha256 = scitt_receipt::sha256_hex(&der);
+        bundle.encoding = scitt_network::roots::Encoding::Der;
+        let written = save_trust(&dir, &assessment).unwrap();
+        let path = dir.join("external-roots-0.der");
+        assert!(written.contains(&path));
+        assert_eq!(std::fs::read(&path).unwrap(), der);
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("manifest.json")).unwrap()).unwrap();
+        let entry = &manifest["rootSources"][0];
+        assert_eq!(entry["file"], "external-roots-0.der");
+        assert_eq!(entry["encoding"], "der");
+        assert_eq!(entry["responseSha256"], scitt_receipt::sha256_hex(&der));
+        assert_eq!(
+            entry["rootSha256"],
+            serde_json::json!([scitt_receipt::sha256_hex(&der)])
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn saving_external_roots_never_overwrites_an_existing_bundle() {
+        let dir = fresh_dir("external-roots-exists");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("external-roots-0.pem");
+        std::fs::write(&path, b"original").unwrap();
+        let error = save_trust(&dir, &with_external_roots()).unwrap_err();
+        assert_eq!(error.code, "TrustMaterialNotSaved");
+        assert_eq!(std::fs::read(path).unwrap(), b"original");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

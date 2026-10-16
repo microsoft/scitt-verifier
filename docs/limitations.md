@@ -65,8 +65,10 @@ ledger receipt for it without registering with the transparency service — but
 do not read a validated chain as an identity claim unless you supplied the root.
 
 *How to establish an independent anchor:* pass `--trusted-roots` with a PEM
-file of the CAs you accept, or use `requireChainToRootSha256` to require a root
-fingerprint chosen independently of the statement. Registration alone does not
+file of the CAs you accept, use `requireChainToRootSha256` to require a root
+fingerprint chosen independently of the statement, or configure
+`requireChainToRootFromHttps` for an independently approved root publication
+under `--online`. Registration alone does not
 establish signer identity. `certificateChainValidated` alone is insufficient:
 an attacker can create an internally consistent chain.
 
@@ -78,11 +80,11 @@ build signed by the wrong team, or by a legitimate CA you did not intend to
 accept — and worthless as a defence against forgery. Do not treat them as a
 substitute for supplying roots.
 
-### External signer identity without a root pin
+### External signer identity without independent root authorization
 
 *Reported at runtime:* `appraisal.notChecked` code
 `ExternalSignerChainNotValidated` when a passing external-signature rule did
-not validate its path to a pinned root.
+not validate its path to an independently pinned or HTTPS-authorized root.
 
 Per-rule `externalSignatures[].requireChainToRootSha256` validates the external
 path using the same supported RFC 5280 subset as the statement chain, then
@@ -90,11 +92,33 @@ compares its root DER's SHA-256. The fingerprint must come from the manufacturer
 through an independent, authenticated channel. Pinning a root extracted from
 the statement itself is circular and authenticates nobody.
 
-A matching pinned rule removes this limitation only for that rule; another
-passing unpinned rule still reports it. Broken or incomplete required paths fail;
+A matching pinned or HTTPS-authorized rule removes this limitation only for
+that rule; another passing rule without independent root authorization still
+reports it. Broken or incomplete required paths fail;
 unsupported algorithms or extensions yield `cannotEvaluate`, never a pass.
 Revocation is still not checked, and authenticating a signer does not establish
 the truth of its claims.
+
+### Root-publication freshness and historical authorization
+
+*Reported at runtime:* `RootSourceFreshnessNotChecked` whenever a
+configured HTTPS root bundle was acquired and used in policy evaluation.
+
+`assertions.requireChainToRootFromHttps` and the corresponding per-external-rule
+field make their exact policy-selected endpoints authoritative for signing roots. Public WebPKI
+authenticates the connection; the root bundle itself has no required publisher
+signature, expiry or monotonic version. A successful fetch does not prove the
+response is the publisher's latest, prevent rollback, or establish that the
+publisher authorized a root at a statement's historical registration time.
+The approved endpoint can rotate or remove roots without a local policy change.
+An optional fixed root pin constrains that authority, but does not replace a
+required acquisition.
+
+No statement-supplied URL or redirect is followed. Offline runs and failed
+acquisitions cannot satisfy the requirement. Saved PEM/DER responses retain the
+bytes for audit, not authenticated acquisition provenance; they do not satisfy
+the URL requirement offline. Neither this fetch nor certificate-validity checks
+establish revocation status.
 
 ## Not implemented in this release
 
@@ -279,7 +303,8 @@ mechanism here for "this key existed and must no longer be honoured".
 ## Deliberate non-goals
 
 **Fetching statements from a service.** This tool verifies statement bytes you
-already have. `--online` fetches *keys*, never statements or receipts.
+already have. `--online` fetches receipt keys and configured signing-root
+bundles, never statements or receipts.
 The optional `live-evidence` adapter mode separately acquires resource
 evidence, but does not fetch or replace the statement being verified.
 Retrieval of statements belongs in whatever already knows your service topology.

@@ -25,6 +25,9 @@ usable even in unsupported-chain cases. Registration-time fixtures establish
 that validity uses verified receipt times, not the envelope's out-of-window
 `iat`. `expected.json` records generated anchor/path hashes and validity bounds;
 these are synthetic values, not independently authenticated manufacturer pins.
+`roots.pem` contains the same synthetic root for HTTPS bundle parsing and
+acquisition tests. It is extracted from the baseline fixture; the generator
+also writes it on regeneration. It contains no private key.
 
 Review regressions also cover a malformed first chain entry, empty or
 wrong-typed chains, missing chains, rejected nested signatures, and a nested

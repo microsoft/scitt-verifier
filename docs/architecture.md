@@ -56,6 +56,16 @@ from `adapters.azure-confidential-ledger.target.host`; the two destinations need
 same. Live evidence currently requires `--online`, but key acquisition alone
 does not request an appraisal. See [adapters](adapters.md).
 
+The outer statement assertion and external-signature rules can separately configure
+`requireChainToRootFromHttps`. The CLI selects exact URLs from policy, validates
+all destinations before any acquisition, and obtains PEM bundles or single DER certificates through
+`scitt-network` under `--online`. Pure policy evaluation compares the root of
+each already validated chain with those independently authenticated
+fingerprints. Neither the statement nor certificate AIA selects destinations.
+The approved HTTPS publisher controls current root authorization; it is a
+different authority from the receipt issuer. Optional fingerprint pins remain
+additional constraints.
+
 `scitt-network` owns network I/O. It returns acquired material, not a verdict.
 Verification uses the same core whether keys came from `--scitt-keys` or
 `--online`. The pure adapter likewise appraises supplied evidence without
@@ -71,7 +81,7 @@ Check reachability from those roots, not merely whether a networking package
 appears in `Cargo.lock`: an optional or unrelated dependency says nothing about
 what the pure verification path can do.
 
-### What a fetch establishes
+### What a receipt-key fetch establishes
 
 Only that the service serving the keys is the one that authenticated the
 connection, and that the key set it served contains the key that certificate

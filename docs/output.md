@@ -786,6 +786,24 @@ signing moment, which is the closest independently attested time that exists.
 `null` when the chain did not validate, or when no fully verified receipt
 carried a time. As everywhere else in this document, `null` is not a failure.
 
+### `signedStatement.rootSource` and `rootSourceMatched`
+
+When the top-level `requireChainToRootFromHttps` assertion is configured,
+`rootSource` records its exact policy URL, acquired material, and any acquisition
+failure. Material includes `acquiredAt`, `responseSha256` (the exact bytes),
+`encoding` (`pem` or `der`), and `rootSha256` (certificate DER fingerprints).
+`rootSourceMatched` is `true` or `false` only after the statement path validated
+and its anchor was compared with that publication; otherwise it is `null`.
+These fields are also in `--facts`, and are `null` when no source is configured.
+The assertion carries the same evidence; its `rootSourceMatched` is omitted
+when the comparison did not run.
+
+This is independent policy authorization, not a claim that the statement signed
+the acquisition metadata. `certificateChain.anchoredExternally` continues to
+describe path validation against supplied trusted roots; it does not turn
+`true` merely because the root passed this policy assertion. EKU, publisher,
+fixed-pin and registration-time requirements remain separate.
+
 ### `signedStatement.externalSignatures`
 
 One evidence entry per `externalSignatures` policy rule, in rule order. Present
@@ -803,6 +821,27 @@ A nested COSE_Sign1 whose embedded payload differs from the statement fails
 its rule before cryptographic verification. Its `signatureVerified` is `null`,
 not `false`; `false` means a signature check actually ran and rejected it.
 
+Rules using `requireChainToRootFromHttps` also expose `rootSource` with its
+exact policy `url`, acquired `material`, and a `failure` when no authenticated
+bundle was supplied. Material records `acquiredAt` (the real wall clock, never
+`--now`), `responseSha256` (exact response bytes), `encoding` (`pem` or `der`),
+and `rootSha256` (the published
+DER certificate fingerprints). These are acquisition observations, **not
+fields covered by the statement signer's signature**. The optional
+`rootSourceMatched` is `true` or `false` only after a whole external path
+validated and its root was compared with the acquired bundle. It is absent
+when that comparison did not run. A matching source does not override a
+separate failing pin, signature or time check.
+
+Online records additionally carry `acquisition.rootSources[]`, including in
+`--facts`. Each entry has `url`, `acquiredAt`, `authentication: "https-webpki"`
+(the required connection method), `status` (`acquired` or `failed`),
+`responseSha256`, `encoding`, `rootSha256`, `responseBytes`, and structured `failure`
+(`code`, `detail`). A failure leaves the material fields `null`. The method
+label alone does not mean authentication succeeded. One acquisition can serve
+the outer statement assertion and several external rules, but root matching and
+each assertion's outcome remain independent.
+
 `certificateChain` is `null` unless the whole external path validated. When
 present it contains:
 
@@ -816,8 +855,9 @@ present it contains:
 
 Path validation alone does not establish external trust. The root is carried
 by the statement; only a matching pin obtained independently from the
-manufacturer authenticates it. A wrong pin leaves the validated path visible
-but fails the rule. An unsupported algorithm or critical extension yields
+manufacturer or an independently approved HTTPS root source authenticates it.
+A wrong pin or a root excluded by the approved endpoint leaves the validated
+path visible but fails the rule. An unsupported algorithm or critical extension yields
 `cannotEvaluate` with no validated path or pin result, never a pass.
 
 ### `artifactBinding.bound`

@@ -58,6 +58,8 @@ VERIFY OPTIONS:
                              allowlists, over an authenticated connection,
                              and read each ledger's current configuration
                              (shown with --verbose; never affects the verdict).
+                             Also acquire statement/external signing roots from HTTPS
+                             endpoints explicitly configured in policy.
                              One of --scitt-keys or --online is required.
     --ledger <HOST>          Acquire from this ledger only. It must appear in
                              the policy's assertions.issuer allowlist: this
@@ -67,11 +69,13 @@ VERIFY OPTIONS:
                              any service configurations read, and a provenance
                              manifest here, for audit and for replay with
                              --scitt-keys.                           [--online only]
+                             Acquired PEM/DER roots are saved for audit only.
     --policy <FILE>          Relying-party policy document (JSON).         [required]
     --trusted-roots <FILE>   PEM file of CA certificates the signing chain must
                              lead to. Without it the chain is still validated,
                              but only against the root the statement carries —
-                             internally consistent, not externally trusted.
+                             internally consistent, not externally trusted
+                             unless policy independently pins or authorizes it.
     --artifact <FILE>        The artifact the statement should describe.
     --binding-mode <MODE>    none | payload-bytes | payload-digest |
                              saved-evidence (with --adapter; see below). Builds
@@ -100,8 +104,11 @@ no network request, including when a receipt names a key it does not hold.
 statement cannot introduce a ledger: a receipt naming one nobody allowlisted is
 reported as not selected, and no request is made for it.
 
-A live fetch establishes who served the keys. It does not establish that a key
-is unrevoked, that the set is current, or anything about the statement's signer.
+A receipt-key fetch establishes who served the keys. It does not establish that
+a key is unrevoked, that the set is current, or anything about the statement's
+signer. External-signature rules may separately authorize roots through
+requireChainToRootFromHttps. Only the exact policy URL is contacted, using
+public-WebPKI HTTPS; redirects and statement-supplied destinations are refused.
 
 With --online, each acquired ledger is also asked for its current configuration
 over the same authenticated connection; --verbose shows it after the verdict.

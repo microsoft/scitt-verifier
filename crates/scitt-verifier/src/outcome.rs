@@ -464,6 +464,8 @@ pub struct Acquisition {
     /// trust material: nothing reads it to decide anything, and a reader of the
     /// record must not be able to mistake it for something that was.
     pub configurations: Vec<scitt_network::configuration::Observation>,
+    /// Policy-selected external root bundles, acquired over public-WebPKI TLS.
+    pub external_roots: Vec<scitt_network::roots::Observation>,
 }
 
 /// Everything one run of `verify` established, and everything it did not.
