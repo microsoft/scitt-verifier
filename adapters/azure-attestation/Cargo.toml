@@ -1,0 +1,22 @@
+[package]
+name = "scitt-adapter-azure-attestation"
+description = "Pure SNP authenticity and policy HOST_DATA appraisal of Azure Attestation evidence"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+scitt-receipt = { path = "../../crates/scitt-receipt", default-features = false }
+tav-crypto = { workspace = true }
+tav-caci = { workspace = true, optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+default = ["crypto_pure_rust"]
+azure-attestation = ["dep:tav-caci"]
+crypto_pure_rust = ["scitt-receipt/crypto_pure_rust", "tav-crypto/crypto_pure_rust", "tav-caci?/crypto_pure_rust"]
+crypto_openssl = ["scitt-receipt/crypto_openssl", "tav-crypto/crypto_openssl", "tav-caci?/crypto_openssl"]

@@ -96,6 +96,7 @@ pub fn compact(
         Verdict::StatementTransparent => "Statement signature and receipt inclusion verified; relying-party policy satisfied.",
         Verdict::ArtifactTransparent => "Supplied artifact matches the verified statement; relying-party policy satisfied.",
         Verdict::ResourceTransparent if args.adapter == Some(crate::cli::Adapter::ImageReproduction) => "Verified statement's reproduction record matches the supplied rebuild; relying-party policy satisfied.",
+        Verdict::ResourceTransparent if args.adapter == Some(crate::cli::Adapter::AzureAttestation) => "AMD-authenticated SNP report HOST_DATA matches SHA-256 of the accepted statement execution policy.",
         Verdict::ResourceTransparent => "Verified statement and assessed node evidence satisfy the scoped resource requirements.",
         Verdict::CannotEvaluate => "This is not a pass. The tool could not answer the requested question.",
         _ => "The requested acceptance requirements were not met.",
@@ -109,6 +110,22 @@ pub fn compact(
             out,
             "Scope: The rebuild is operator-supplied; not an independent rebuild, and not proof that a published image or deployment has these layers."
         )?;
+    } else if args.adapter == Some(crate::cli::Adapter::AzureAttestation) {
+        if a.adapter_findings.is_empty() {
+            writeln!(out, "No MAA certificate evidence was appraised.")?;
+        }
+        let label = if a.verdict == Verdict::ResourceTransparent {
+            "Scope"
+        } else {
+            "Scope of a pass"
+        };
+        writeln!(out, "{label}: {}.", crate::adapters::MAA_SCOPE)?;
+        if args.binding_mode == BindingMode::SavedEvidence {
+            writeln!(
+                out,
+                "Saved bundle metadata is unsigned and collector-asserted."
+            )?;
+        }
     } else if args.adapter.is_some() {
         let scope = if a.adapter_findings.is_empty() {
             "No node evidence was appraised."
@@ -1385,6 +1402,61 @@ fn describe_lookup(lookup: &KeyLookup) -> &'static str {
 mod tests {
     use super::{path_segment, styled_verdict};
     use scitt_receipt::CborValue;
+
+    #[test]
+    fn maa_success_renders_only_the_scoped_host_data_claim_in_every_format() {
+        use crate::cli::{self, Command};
+        use crate::outcome::{Assessment, Category, Diagnostic, Trust, Verdict};
+
+        let command: Vec<_> = [
+            "verify",
+            "--statement",
+            "statement.cose",
+            "--policy",
+            "policy.json",
+            "--scitt-keys",
+            "keys.cbor",
+            "--adapter",
+            "azure-attestation",
+            "--binding-mode",
+            "saved-evidence",
+            "--evidence",
+            "evidence",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        let Command::Verify(args) = cli::parse(&command).unwrap() else {
+            panic!("verify command expected")
+        };
+        let mut assessment = Assessment::incomplete(
+            Verdict::ResourceTransparent,
+            Trust::acquired_key_set(),
+            Diagnostic::warning(
+                "ResourceAppraisalScoped",
+                Category::Binding,
+                crate::adapters::MAA_SCOPE,
+                "Interpret only within this scope.",
+            ),
+            Vec::new(),
+        );
+        assessment.primary = None;
+        let mut compact = Vec::new();
+        super::compact(&mut compact, &assessment, &args, false).unwrap();
+        let mut verbose = Vec::new();
+        super::verify(&mut verbose, &assessment, true, false).unwrap();
+        let record = crate::record::build(&args, &assessment, 0);
+        assert_eq!(record["appraisal"]["verdict"], "resource-transparent");
+        for rendered in [
+            String::from_utf8(compact).unwrap(),
+            String::from_utf8(verbose).unwrap(),
+            serde_json::to_string(&record).unwrap(),
+        ] {
+            assert!(rendered.contains(crate::adapters::MAA_SCOPE), "{rendered}");
+            assert!(!rendered.contains("MAA enforces policy"), "{rendered}");
+            assert!(!rendered.contains("service enforces policy"), "{rendered}");
+        }
+    }
 
     /// The completed report escapes what the transcript escapes.
     ///

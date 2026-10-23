@@ -10,6 +10,8 @@ cargo test
 The default crypto backend is pure Rust, so it needs no OpenSSL installation.
 Native builds still need the linker required by the chosen Rust toolchain.
 The optional MST ledger adapter is enabled with `--features adapter-azure-confidential-ledger`.
+The MAA adapter uses `--features adapter-azure-attestation`; see
+[its supported scope](docs/adapters.md#microsoft-azure-attestation-maa).
 
 ## The rules that are not negotiable
 
@@ -80,7 +82,15 @@ orchestration, not in a generic attestation model.
 all network I/O belongs in `crates/scitt-network`. Do not add a network client
 to the core, policy, or pure adapter.
 
-Preserve fail-closed behavior both with and without the optional build feature.
+The MAA adapter in `adapters/azure-attestation` follows the same boundaries:
+its policy namespace is `adapters.azure-attestation`, acquisition belongs to
+`scitt-network`, and the pure crate returns findings, not verdicts. Its scoped
+acceptance establishes authenticated SNP `HOST_DATA` comparison only, not
+service identity, guest enforcement, UVM/platform-policy appraisal or
+freshness. Keep those limitations in runtime output; do not promote that
+comparison into a claim that the endpoint runs the policy.
+
+Preserve fail-closed behavior both with and without the optional build features.
 See [architecture](docs/architecture.md) and [adapters](docs/adapters.md).
 
 ## Style

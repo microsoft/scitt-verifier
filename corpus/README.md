@@ -22,6 +22,7 @@ implementing SCITT receipt verification independently.
 | `image-reproduction/statement.cose` | An `mst-tbs` schema-version 2 payload (`application/json`, 1061 bytes) committing to the scitt-ccf-ledger 0.20.1 reproduction record; build and image values are `example.invalid` placeholders. ES256, one CCF receipt, registered at entry 3.871 |
 | `image-reproduction/published-reproduce.json` | scitt-ccf-ledger's published 0.20.1 `reproduce.json`, exact bytes |
 | `image-reproduction/rebuilt-reproduce.json` | The `reproduce.json` scitt-ccf-ledger's own scheduled rebuild of 0.20.1 wrote, exact bytes |
+| `maa-certs.json` | Public MAA `/certs` response with genuine `acisevsnp` certificate evidence |
 
 Every `.cose` file here was registered on a real transparency service, so every
 receipt, inclusion proof and root signature is genuine. The signing identities
@@ -29,7 +30,18 @@ are not: they are throwaway certificates minted by
 `corpus/tools/generate_fixtures.py` for this corpus alone. Nothing here
 corresponds to a real product, part, or signer. The only bytes not produced
 here are the two public scitt-ccf-ledger release records under
-`image-reproduction/`, described below.
+`image-reproduction/` and the public MAA certificate response, described below.
+
+`maa-certs.json` was fetched from
+`https://sharedweu.weu.attest.azure.net/certs` on 2026-10-19. Its SHA-256 is
+`a9da33b4b00055eb912654f9685d8168eb873970a9e729a8a2f1d268c718f160`
+(96,356 bytes). The observed `x-ms-maa-service-version` header was
+`1.11.03547.6366`; that header is unsigned metadata, not part of the fixture's
+cryptographic evidence. The snapshot is solely the public certificate/key
+response, including AMD collateral and UVM endorsements carried by MAA's own
+certificates. It contains no submitted attestation request or tenant workload.
+Its purpose is to exercise actual service evidence, not to supply production
+trust thresholds.
 
 `payload-tampered.cose` is the most instructive of these. Its receipt is
 genuine, its inclusion proof is valid, and its root signature verifies. It is

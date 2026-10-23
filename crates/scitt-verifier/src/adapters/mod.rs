@@ -5,7 +5,9 @@ mod acl;
 mod live;
 #[cfg(feature = "adapter-azure-confidential-ledger")]
 mod load;
+mod maa;
 mod reproduction;
+pub(crate) use maa::SCOPE as MAA_SCOPE;
 
 use scitt_policy::Policy;
 use scitt_receipt::Sign1;
@@ -17,7 +19,11 @@ use crate::outcome::{AdapterCheck, AdapterFinding, CheckState};
 #[cfg_attr(not(feature = "adapter-azure-confidential-ledger"), allow(dead_code))]
 pub enum EvidenceSource<'a> {
     Saved(&'a Path),
-    Live { save_to: Option<&'a Path> },
+    Live {
+        save_to: Option<&'a Path>,
+        #[cfg_attr(not(feature = "adapter-azure-attestation"), allow(dead_code))]
+        maa_endpoint: Option<&'a str>,
+    },
 }
 
 /// Findings and their explicit acceptance contract, independent of domain.
@@ -57,6 +63,9 @@ fn configured(policy: &Policy) -> Vec<Adapter> {
     let mut out = Vec::new();
     if policy.adapters.acl.is_some() {
         out.push(Adapter::AzureConfidentialLedger);
+    }
+    if policy.adapters.maa.is_some() {
+        out.push(Adapter::AzureAttestation);
     }
     if policy.adapters.image_reproduction.is_some() {
         out.push(Adapter::ImageReproduction);
@@ -99,6 +108,7 @@ pub fn validate_request(adapter: Option<Adapter>, policy: &Policy) -> Result<(),
 
 pub fn not_attempted(adapter: Adapter, reason: impl Into<String>) -> AdapterAssessment {
     match adapter {
+        Adapter::AzureAttestation => maa::not_attempted(reason),
         Adapter::AzureConfidentialLedger => acl::not_attempted(reason),
         Adapter::ImageReproduction => reproduction::not_attempted(reason),
     }
@@ -111,6 +121,13 @@ pub fn check_event(
     findings: &[AdapterFinding],
 ) -> crate::progress::Event {
     match adapter {
+        Adapter::AzureAttestation => crate::progress::Event::finding(
+            crate::progress::Stage::Adapter,
+            &check.name,
+            None,
+            crate::progress_state(check.state),
+            detail,
+        ),
         Adapter::AzureConfidentialLedger => acl::check_event(check, detail, findings),
         Adapter::ImageReproduction => reproduction::check_event(check, detail),
     }
@@ -124,6 +141,10 @@ pub fn appraise(
     progress: &mut dyn crate::progress::Sink,
 ) -> AdapterAssessment {
     match adapter {
+        Adapter::AzureAttestation => match &policy.adapters.maa {
+            Some(config) => maa::appraise_evidence(source, statement, config, progress),
+            None => not_attempted(adapter, "policy.adapters.azure-attestation is missing"),
+        },
         Adapter::AzureConfidentialLedger => match &policy.adapters.acl {
             Some(config) => acl::appraise_evidence(source, statement, config, progress),
             None => not_attempted(
@@ -140,6 +161,31 @@ pub fn appraise(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maa_requirements_cannot_be_omitted_or_combined_with_another_adapter() {
+        let mut policy: Policy = serde_json::from_value(serde_json::json!({
+            "policyId": "example", "policyVersion": "1", "assertions": {},
+            "adapters": {"azure-attestation": {
+                "target": {"host": "attestation.example"},
+                "binding": {
+                    "path": ["policy"], "encoding": "base64"
+                }
+            }}
+        }))
+        .unwrap();
+        assert!(validate_request(None, &policy).is_err());
+        assert!(validate_request(Some(Adapter::AzureAttestation), &policy).is_ok());
+        assert!(validate_request(Some(Adapter::AzureConfidentialLedger), &policy).is_err());
+        policy.adapters.image_reproduction = Some(
+            serde_json::from_value(serde_json::json!({
+                "profile": "example/v1", "sourceRepository": "example",
+                "component": {"app": "example", "variant": "example"}
+            }))
+            .unwrap(),
+        );
+        assert!(validate_request(Some(Adapter::AzureAttestation), &policy).is_err());
+    }
 
     fn assessment(state: CheckState) -> AdapterAssessment {
         AdapterAssessment {

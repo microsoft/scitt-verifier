@@ -46,6 +46,23 @@ is reported as *cannot compare*, never approximated with a different hash.
 
 ## Partially implemented
 
+### MAA service identity and build version
+
+The `azure-attestation` adapter authenticates SNP reports in certificate evidence
+and compares `HOST_DATA` with the accepted statement's exact decoded
+execution-policy digest. This scoped comparison can pass. It does not bind
+the report to the certificate's actual public key, its `kid`, or the serving
+endpoint, and it does not establish guest policy enforcement. UVM endorsements,
+relying-party platform-policy thresholds, freshness, revocation, complete
+fleet coverage, and serving-connection binding are not checked; each gap is
+reported at runtime.
+
+`x-ms-maa-service-version` is an unsigned HTTP header. Comparing it with the
+build number authenticated by a statement's receipt would check consistency,
+not which code is executing; this adapter does not make that comparison.
+Saved target and version metadata lose even live
+HTTPS source authentication. See [MAA](adapters.md#microsoft-azure-attestation-maa).
+
 ### Certificate chain validation without `--trusted-roots`
 
 *Reported at runtime:* `appraisal.notChecked` code

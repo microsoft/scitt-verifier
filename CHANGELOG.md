@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### MAA certificate-evidence appraisal
+
+The optional `adapter-azure-attestation` feature adds the `azure-attestation`
+adapter and policy namespace. It authenticates SNP reports in `acisevsnp`
+certificate evidence and compares `HOST_DATA` with SHA-256 of the accepted
+statement's exact decoded execution-policy bytes. Acquisition is explicit;
+saved evidence replays offline. `x-ms-maa-service-version` is preserved as
+unsigned metadata, not a build-acceptance requirement.
+
+The CLI also accepts `--adapter adapter-azure-attestation`. For live evidence,
+`--maa-endpoint` selects an HTTPS MAA service origin and fetches its `/certs`,
+overriding any policy `target.host`. The policy target may be omitted when
+the flag supplies the live target. Saved replay still requires a matching
+policy target; the flag cannot redirect saved evidence. Receipt trust
+acquisition remains independent of this endpoint.
+
+The accepted scope is the authenticated report's policy-digest comparison,
+not MAA service signing-key identity or proof of guest policy enforcement.
+KID/public-key binding, UVM/guest enforcement, platform-policy thresholds,
+freshness, serving-connection binding and the unsigned nature of the version
+header are reported as limitations rather than claimed as verified.
+Older binaries reject the new policy namespace rather than skipping it.
 ### Signing roots can be authorized by a policy-selected HTTPS endpoint
 
 Top-level `assertions.requireChainToRootFromHttps` and per-rule

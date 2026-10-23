@@ -70,6 +70,14 @@ output rather than repeated beneath the node table. Failures, prerequisite
 errors, and unknown checks are not filtered this way. Verbose output and JSON
 retain the full original findings.
 
+MAA findings distinguish signed SNP evidence from collector metadata.
+Its required `snp-validation`, `cce-policy-host-data`, and
+`maa-certificate-coverage` checks cover only authenticated SNP reports and
+their policy commitments. A scoped pass does not establish MAA service
+identity, guest enforcement or freshness. The service version header is
+unsigned metadata, not an acceptance check; missing headers remain absent,
+never guessed.
+
 Compact output ends with the verdict, any diagnostics, and one line naming
 each not-checked gap by code (`Not checked: ArtifactBindingNotRequested, …`).
 The prose limitations — gap explanations, trust-material caveats, and the
@@ -107,7 +115,7 @@ record only, preserving its equivalence with `--result`.
 |---|---|---|
 | `artifact-transparent` | 0 | The artifact you supplied is the one that was registered, the receipt proves inclusion, and your policy is satisfied. |
 | `statement-transparent` | 0 | The statement is transparent and your policy is satisfied — but **no artifact was checked**. |
-| `resource-transparent` | 0 | The statement is transparent, and the appraised ledger nodes enforce the execution policy it embeds. Always scoped to the nodes assessed. |
+| `resource-transparent` | 0 | The statement is transparent, and the selected adapter's explicitly scoped requirements held. Read the reported scope: a matching MAA SNP policy commitment does not establish endpoint identity or guest enforcement. |
 | `untrusted` | 1 | The statement's own signature or the artifact binding did not hold. Do not deploy. |
 | `policy-failed` | 2 | Everything is cryptographically sound; your own rules rejected it. |
 | `resource-failed` | 2 | The statement is sound, but an adapter's requirement about the ledger was not met. |

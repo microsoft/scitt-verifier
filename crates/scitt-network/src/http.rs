@@ -123,6 +123,15 @@ pub fn pinned_agent(service_cert: &Certificate<'static>, budget: Duration) -> Ag
 /// A `Content-Length` is not trusted for this: it is a claim by the same party
 /// sending the body.
 pub fn get_bounded(agent: &Agent, url: &str, max_bytes: usize) -> Result<Vec<u8>, AcquireError> {
+    get_bounded_with_header(agent, url, max_bytes, None).map(|(bytes, _)| bytes)
+}
+
+pub(crate) fn get_bounded_with_header(
+    agent: &Agent,
+    url: &str,
+    max_bytes: usize,
+    header: Option<&str>,
+) -> Result<(Vec<u8>, Option<String>), AcquireError> {
     let response = agent.get(url).call().map_err(|e| classify(url, e))?;
 
     let status = response.status().as_u16();
@@ -133,7 +142,38 @@ pub fn get_bounded(agent: &Agent, url: &str, max_bytes: usize) -> Result<Vec<u8>
         ));
     }
 
-    read_bounded(response, url, max_bytes)
+    let value = header
+        .map(|name| {
+            let all_values = response.headers().get_all(name);
+            let mut values = all_values.iter();
+            let first = values.next();
+            if values.next().is_some() {
+                return Err(AcquireError::new(
+                    Diagnostic::Transport,
+                    format!("{url} returned duplicate {name} headers"),
+                ));
+            }
+            first
+                .map(|v| {
+                    let text = v.to_str().map_err(|e| {
+                        AcquireError::new(
+                            Diagnostic::Transport,
+                            format!("{url} returned an invalid {name} header: {e}"),
+                        )
+                    })?;
+                    if text.len() > 256 {
+                        return Err(AcquireError::new(
+                            Diagnostic::ResponseTooLarge,
+                            format!("{url} returned a {name} header longer than 256 bytes"),
+                        ));
+                    }
+                    Ok(text.to_string())
+                })
+                .transpose()
+        })
+        .transpose()?
+        .flatten();
+    read_bounded(response, url, max_bytes).map(|bytes| (bytes, value))
 }
 
 /// [`get_bounded`] for an endpoint a service may legitimately not offer.

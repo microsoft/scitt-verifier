@@ -2,6 +2,7 @@
 
 pub mod acl;
 pub mod image_reproduction;
+pub mod maa;
 
 use crate::{result, AssertionResult, Outcome};
 use acl::AzureConfidentialLedgerPolicy;
@@ -11,6 +12,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Adapters {
+    #[serde(
+        rename = "azure-attestation",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub maa: Option<maa::MaaPolicy>,
     #[serde(rename = "azure-confidential-ledger")]
     pub acl: Option<AzureConfidentialLedgerPolicy>,
     #[serde(
@@ -23,10 +30,15 @@ pub struct Adapters {
 
 impl Adapters {
     pub fn is_empty(&self) -> bool {
-        self.acl.is_none() && self.image_reproduction.is_none()
+        self.acl.is_none() && self.image_reproduction.is_none() && self.maa.is_none()
     }
 
     pub(crate) fn validate(&self) -> Result<(), String> {
+        if let Some(policy) = &self.maa {
+            policy
+                .validate()
+                .map_err(|e| format!("adapters.azure-attestation: {e}"))?;
+        }
         if let Some(policy) = &self.acl {
             policy
                 .validate()
@@ -42,6 +54,13 @@ impl Adapters {
 
     pub(crate) fn unavailable_results(&self) -> Vec<AssertionResult> {
         let mut results = Vec::new();
+        if self.maa.is_some() {
+            results.push(result(
+                "adapters.azure-attestation",
+                Outcome::CannotEvaluate,
+                "Azure Attestation appraisal requires adapter evidence unavailable through this API",
+            ));
+        }
         if self.acl.is_some() {
             results.push(result(
                 "adapters.azure-confidential-ledger",

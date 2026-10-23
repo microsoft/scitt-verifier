@@ -25,16 +25,16 @@ use scitt_receipt::StatementFacts;
 pub enum Verdict {
     /// The statement is transparent *and* it describes the artifact supplied.
     ArtifactTransparent,
-    /// The statement is transparent, and the appraised ledger nodes enforce
-    /// the execution policy it embeds.
+    /// The statement is transparent and the selected adapter's scoped
+    /// requirements held. The adapter's scope bounds what that establishes.
     ///
     /// A third success rather than a reuse of `ArtifactTransparent` because it
     /// is a different claim about a different subject: one is about a file on
     /// disk, this is about what a service is running. A gate that accepted
     /// either without distinguishing them could be satisfied by the wrong one.
     ///
-    /// Always scoped. It is a statement about the node set that was assessed,
-    /// and — for saved evidence — about a recording, not a live observation.
+    /// Always scoped to the evidence assessed, and — for saved evidence —
+    /// about a recording, not a live observation.
     /// The caller is responsible for saying so; see `report.rs`.
     ResourceTransparent,
     /// The statement is transparent, but no artifact binding was requested,

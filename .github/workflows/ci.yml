@@ -51,6 +51,12 @@ jobs:
       - run: cargo clippy -p scitt-verifier --features adapter-azure-confidential-ledger --all-targets
       - run: cargo test -p scitt-verifier --features adapter-azure-confidential-ledger
 
+      - run: cargo clippy -p scitt-adapter-azure-attestation --features azure-attestation --all-targets
+      - run: cargo test -p scitt-adapter-azure-attestation --features azure-attestation
+      - run: cargo clippy -p scitt-verifier --features adapter-azure-attestation --all-targets
+      - run: cargo test -p scitt-verifier --features adapter-azure-attestation
+      - run: cargo clippy -p scitt-verifier --features adapter-azure-attestation,adapter-azure-confidential-ledger --all-targets
+
   boundary:
     name: Core boundary
     runs-on: ubuntu-latest
@@ -68,7 +74,7 @@ jobs:
           # These crates make the same promise — callers supply bytes, we decide
           # nothing about time, exit status, or the network — so both are held
           # to it here. A crate that claims purity and is never scanned drifts.
-          roots="crates/scitt-receipt/src adapters/azure-confidential-ledger/src adapters/image-reproduction/src"
+          roots="crates/scitt-receipt/src adapters/azure-confidential-ledger/src adapters/image-reproduction/src adapters/azure-attestation/src"
           io_pattern='std::fs|File::open|read_to_string'
 
           # `if grep` cannot tell "found nothing" from "looked at nothing": both
@@ -136,6 +142,8 @@ jobs:
                 'scitt-adapter-azure-confidential-ledger must not depend on the CLI; it reports checks, not verdicts.'
           check adapters/image-reproduction/src 'scitt_verifier|scitt_network|std::process::Command' \
                 'scitt-adapter-image-reproduction must not depend on the CLI or the network, or run a build; it compares records.'
+          check adapters/azure-attestation/src 'scitt_verifier|scitt_network' \
+                'scitt-adapter-azure-attestation must not depend on the CLI or the network.'
           exit $violations
 
       - name: Reject dependency drift in the core manifests
@@ -167,6 +175,9 @@ jobs:
           check_manifest adapters/image-reproduction/Cargo.toml \
             '^(scitt-verifier|scitt-network)' \
             'scitt-adapter-image-reproduction must not depend on scitt-verifier or scitt-network.'
+          check_manifest adapters/azure-attestation/Cargo.toml \
+            '^(scitt-verifier|scitt-network)' \
+            'scitt-adapter-azure-attestation must not depend on scitt-verifier or scitt-network.'
 
   size:
     name: Binary size budget
@@ -207,6 +218,18 @@ jobs:
           printf 'scitt-verifier + azure-confidential-ledger: %s bytes (budget %s)\n' "$actual" "$budget"
           if [ "$actual" -gt "$budget" ]; then
             echo "::error::adapter binary exceeded the size budget"
+            exit 1
+          fi
+
+      - run: cargo build --release -p scitt-verifier --features adapter-azure-attestation
+      - name: Enforce the size budget with MAA
+        run: |
+          set -euo pipefail
+          budget=$((4 * 1024 * 1024))
+          actual=$(stat -c%s target/release/scitt-verifier)
+          printf 'scitt-verifier + azure-attestation: %s bytes (budget %s)\n' "$actual" "$budget"
+          if [ "$actual" -gt "$budget" ]; then
+            echo "::error::MAA binary exceeded the size budget"
             exit 1
           fi
 

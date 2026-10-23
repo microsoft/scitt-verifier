@@ -59,6 +59,7 @@ const CORE: &[&str] = &[
     "scitt-policy",
     "scitt-adapter-azure-confidential-ledger",
     "scitt-adapter-image-reproduction",
+    "scitt-adapter-azure-attestation",
 ];
 const OFFLINE_SOURCE_ROOTS: &[&str] = &[
     "crates/scitt-verifier/src",
@@ -66,6 +67,7 @@ const OFFLINE_SOURCE_ROOTS: &[&str] = &[
     "crates/scitt-policy/src",
     "adapters/azure-confidential-ledger/src",
     "adapters/image-reproduction/src",
+    "adapters/azure-attestation/src",
 ];
 
 const SOCKET_APIS: &[&str] = &["std::net", "TcpStream", "TcpListener", "UdpSocket"];

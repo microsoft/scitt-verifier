@@ -124,7 +124,7 @@ for whoever opens the policy file, so put anything an auditor needs into
 ### Optional adapter requirements
 
 `assertions` contains statement rules only. Resource-specific requirements are
-namespaced under `adapters`. Two keys are supported, and a policy may use at
+namespaced under `adapters`. Three keys are supported, and a policy may use at
 most one of them:
 
 ```text
@@ -132,14 +132,18 @@ adapters.azure-confidential-ledger.target   The ledger being appraised (host).
 adapters.azure-confidential-ledger.trust    UVM endorsement trust inputs.
 adapters.azure-confidential-ledger.binding  Execution-policy claim and node requirements.
 
+adapters.azure-attestation.target           MAA acquisition host; optional with live --maa-endpoint, which overrides it. Required for saved replay.
+adapters.azure-attestation.binding          Encoded execution-policy claim and optional decoded-size bound.
+
 adapters.image-reproduction.profile           How the statement and records are read.
 adapters.image-reproduction.sourceRepository  The only repository the statement may name.
 adapters.image-reproduction.component         The only component (app, variant) it may be about.
 ```
 
 See [adapters](adapters.md#policy-shape) for the complete JSON shape and field
-reference of each, and [image reproduction](adapters.md#image-reproduction)
-for the second. The unpublished top-level `ledger`/`trust` and
+reference of the ledger adapter, [MAA](adapters.md#microsoft-azure-attestation-maa),
+and [image reproduction](adapters.md#image-reproduction).
+The unpublished top-level `ledger`/`trust` and
 `assertions.bindLedgerPolicy` form is removed, not accepted as an alias.
 Unknown adapters and unknown fields are errors.
 

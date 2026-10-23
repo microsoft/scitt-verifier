@@ -44,10 +44,11 @@ fn main() -> ExitCode {
         Err(message) => {
             eprintln!("error: {message}\n");
             eprintln!(
-                "{}{}{}",
+                "{}{}{}{}",
                 cli::USAGE,
                 cli::REPRODUCTION_USAGE,
-                cli::ADAPTER_USAGE
+                cli::ADAPTER_USAGE,
+                cli::MAA_USAGE
             );
             return ExitCode::from(Verdict::UsageError.exit_code());
         }
@@ -56,10 +57,11 @@ fn main() -> ExitCode {
     match command {
         Command::Help => {
             println!(
-                "{}{}{}",
+                "{}{}{}{}",
                 cli::USAGE,
                 cli::REPRODUCTION_USAGE,
-                cli::ADAPTER_USAGE
+                cli::ADAPTER_USAGE,
+                cli::MAA_USAGE
             );
             ExitCode::SUCCESS
         }
@@ -237,6 +239,7 @@ fn progress_plan(args: &VerifyArgs) -> Vec<(progress::Stage, String)> {
             Adapter,
             match args.adapter {
                 Some(cli::Adapter::ImageReproduction) => "Compare rebuild with reproduction record",
+                Some(cli::Adapter::AzureAttestation) => "Compare attested policy reports",
                 _ => "Appraise node evidence",
             }
             .into(),
@@ -357,6 +360,13 @@ fn evaluate(args: &VerifyArgs, now: i64, progress: &mut dyn progress::Sink) -> A
         progress.emit(progress::Event::context("Adapter", adapter.as_str()));
         if let Some(config) = &policy.adapters.acl {
             progress.emit(progress::Event::context("Target", &config.target.host));
+        }
+        if let Some(config) = &policy.adapters.maa {
+            if let Some(endpoint) = &args.maa_endpoint {
+                progress.emit(progress::Event::context("Target (CLI override)", endpoint));
+            } else if let Some(target) = &config.target {
+                progress.emit(progress::Event::context("Target", &target.host));
+            }
         }
         progress.emit(progress::Event::stage(
             progress::Stage::Inputs,
@@ -647,6 +657,17 @@ fn evaluate(args: &VerifyArgs, now: i64, progress: &mut dyn progress::Sink) -> A
     }
     diagnostics.extend(diagnose_resource(verdict, resource.as_ref()));
     let primary = choose_primary(verdict, &diagnostics);
+    let mut not_checked = gaps(args, Some(&facts), Some(&decision));
+    if let (Some(cli::Adapter::AzureAttestation), Some(resource)) = (args.adapter, &resource) {
+        not_checked.extend(resource.notes.iter().map(|note| {
+            Gap::new(
+                "MaaAppraisalLimitation",
+                Category::Binding,
+                note.clone(),
+                "interpret the MAA comparison only within these stated limitations",
+            )
+        }));
+    }
 
     Assessment {
         verdict,
@@ -657,7 +678,7 @@ fn evaluate(args: &VerifyArgs, now: i64, progress: &mut dyn progress::Sink) -> A
             .as_ref()
             .map(|result| result.findings.clone())
             .unwrap_or_default(),
-        not_checked: gaps(args, Some(&facts), Some(&decision)),
+        not_checked,
         trust,
         facts: Some(facts),
         decision: Some(decision),
@@ -2270,6 +2291,59 @@ fn gaps(
         })
     });
 
+    if args.adapter == Some(cli::Adapter::AzureAttestation) {
+        gaps.push(Gap::new(
+            "MaaSigningKeyBindingNotEstablished",
+            Category::Binding,
+            "MAA service, signing-key and serving-node identity are not authenticated; REPORT_DATA KID binding is not checked.",
+            "matching authenticated report HOST_DATA does not establish service or key identity",
+        ));
+        gaps.push(Gap::new(
+            "MaaFreshnessNotEstablished",
+            Category::Binding,
+            "MAA attestation report freshness is not established; no nonce-bound report was requested.",
+            "reports may be replayed; a live /certs fetch is not proof of fresh attestation",
+        ));
+        gaps.push(Gap::new(
+            "MaaCertificateValidityNotChecked",
+            Category::Binding,
+            "MAA evidence certificate validity time and revocation are not checked.",
+            "an expired or revoked evidence certificate is not excluded on that basis",
+        ));
+        gaps.push(Gap::new(
+            "MaaVersionHeaderNotAttested",
+            Category::Binding,
+            "The /certs service-version header is metadata only; it is not compared with the statement or authenticated as an attested build identity.",
+            "version metadata does not establish which build served the evidence",
+        ));
+        gaps.push(Gap::new(
+            "MaaGuestEnforcementNotEstablished",
+            Category::Binding,
+            "UVM endorsements and guest enforcement of the execution policy are not checked.",
+            "an authenticated HOST_DATA commitment does not prove a guest enforces that policy",
+        ));
+        gaps.push(Gap::new(
+            "MaaPlatformPolicyNotAppraised",
+            Category::Binding,
+            "Relying-party platform policy, minimum TCB and UVM SVN requirements are not appraised.",
+            "AMD report authentication is not an appraisal of the platform against relying-party requirements",
+        ));
+        gaps.push(Gap::new(
+            "MaaCertificateScopeLimited",
+            Category::Binding,
+            "Certificates without MAA evidence extensions are outside the attested policy report comparison.",
+            "the comparison is not proof that every published certificate belongs to an attested signing key",
+        ));
+        if args.binding_mode == BindingMode::SavedEvidence {
+            gaps.push(Gap::new(
+                "MaaSavedMetadataUnsigned",
+                Category::Binding,
+                "Saved maa-evidence.json targetHost and serviceVersion are unsigned collector assertions, not authenticated acquisition provenance.",
+                "matching saved metadata does not establish bundle origin",
+            ));
+        }
+    }
+
     if args.binding_mode == BindingMode::None {
         gaps.push(Gap::new(
             "ArtifactBindingNotRequested",
@@ -2487,6 +2561,7 @@ fn run_adapter(
         },
         BindingMode::LiveEvidence => adapters::EvidenceSource::Live {
             save_to: args.save_evidence.as_deref(),
+            maa_endpoint: args.maa_endpoint.as_deref(),
         },
         _ => {
             return Some(adapters::not_attempted(

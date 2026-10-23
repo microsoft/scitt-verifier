@@ -123,6 +123,19 @@ or safety of those bytes.
 An adapter can relate an accepted statement to evidence about its subject.
 Neither is required for ordinary statement or artifact verification.
 
+`azure-attestation` authenticates SNP reports in MAA's `acisevsnp` certificate
+evidence and compares `HOST_DATA` with SHA-256 of the exact decoded execution
+policy in the accepted statement.
+Build with `--features adapter-azure-attestation` and select
+`--adapter adapter-azure-attestation` (`azure-attestation` is also accepted)
+with saved or live evidence. For live acquisition, `--maa-endpoint
+https://example.region.attest.azure.net` overrides the policy target and fetches
+its `/certs`; saved replay uses the host recorded in the bundle and requires a
+matching policy target. A scoped pass does
+not establish service identity, guest policy enforcement or freshness.
+See [MAA](docs/adapters.md#microsoft-azure-attestation-maa)
+for the policy, evidence format and limitations.
+
 `image-reproduction` is in every build. It checks that a rebuild record you
 supply matches the reproduction record the statement commits to — the same
 recorded inputs and the same ordered filesystem layers. It runs no build, so
@@ -156,8 +169,8 @@ Neither mode establishes attestation freshness or binding to the node serving
 your current connection.
 
 See [adapters](docs/adapters.md) for policy shape, commands, trust inputs, and
-the narrower meaning of `resource-transparent`. Image, hardware, and MAA
-adapters are not supported features.
+the narrower meaning of `resource-transparent`. Hardware adapters are not
+supported features.
 
 ## Guarantees and limits
 

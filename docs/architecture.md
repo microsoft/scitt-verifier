@@ -12,6 +12,7 @@ not a prerequisite for verifying a transparent statement.
 | `crates/scitt-network` | Acquire receipt keys and live resource evidence; no policy decisions |
 | `adapters/azure-confidential-ledger` (`scitt-adapter-azure-confidential-ledger`) | Pure appraisal of supplied MST ledger evidence against typed requirements |
 | `adapters/image-reproduction` (`scitt-adapter-image-reproduction`) | Pure comparison of a supplied rebuild record with the reproduction record a statement commits to; runs no build |
+| `adapters/azure-attestation` (`scitt-adapter-azure-attestation`) | Pure SNP signature and HOST_DATA comparison in MAA certificate evidence; no service-identity or enforcement claim |
 | `crates/scitt-verifier` | Load inputs, select acquisition and adapter paths, combine checks, report verdicts and exit codes |
 
 `scitt-policy/src/adapters/{mod.rs,acl.rs,image_reproduction.rs}` owns the
@@ -42,11 +43,16 @@ failed, or unevaluated required checks block success. Other checks still report
 scope limitations; they cannot stand in for a required check.
 
 There is no generic `scitt-attest` crate, plugin loader, or universal SNP
-evidence model. SNP and UVM concepts belong to the Azure Confidential Ledger
-adapter. The image-reproduction adapter shares only the dispatch seam and the
-check vocabulary; it has no SNP concepts. A future hardware or MAA adapter
-could use the same separation, but none is implemented
-by the existence of the dispatch seam.
+evidence model. SNP concepts belong to the specific Azure Confidential Ledger
+and MAA adapters, not the statement core; only the ledger adapter appraises UVM
+endorsements. The image-reproduction adapter
+shares only the dispatch seam and the check vocabulary; it has no SNP concepts.
+MAA's network module reads `/certs` and its build-version response header;
+CLI orchestration loads or saves evidence and derives the execution-policy
+digest from the accepted statement. The pure MAA adapter authenticates the
+embedded SNP reports and compares `HOST_DATA`. Service signing-key identity,
+guest policy enforcement and the unsigned build header are outside that scoped
+acceptance claim and are reported as limitations.
 
 ## Where the network is, and is not
 
