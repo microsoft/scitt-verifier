@@ -5,22 +5,170 @@ resource adapter. An adapter adds a domain-specific comparison between an
 accepted statement and evidence about its subject. It cannot turn an
 unaccepted statement into a success.
 
-Two adapters are implemented:
+Three adapters are implemented:
 
 - `azure-confidential-ledger` appraises evidence that ledger nodes enforce the
   execution policy embedded in a transparent statement. It is behind a build
-  feature; the sections below up to [image reproduction](#image-reproduction)
-  describe it.
+  feature; see [the MST ledger adapter](#build-and-select-the-mst-ledger-adapter).
 - `image-reproduction` compares a rebuild you supply with the reproduction
   record a statement commits to. Every build has it; see
   [image reproduction](#image-reproduction).
+- `azure-attestation` compares MAA certificate evidence with the execution
+  policy in an accepted statement. It is feature-gated and establishes a
+  scoped SNP/HOST_DATA comparison, not MAA service identity or enforcement;
+  see [MAA](#microsoft-azure-attestation-maa).
 
-Hardware and MAA adapters are architectural possibilities, not supported
-commands or evidence formats.
+Hardware adapters remain architectural possibilities, not supported commands
+or evidence formats.
 
 A policy configures at most one adapter, and a run selects at most one. A
 policy naming two is refused as a usage error: split it into one policy per
 adapter.
+
+## Microsoft Azure Attestation (MAA)
+
+Build with `cargo build --release --features adapter-azure-attestation`.
+Select `--adapter azure-attestation`. This is the only CLI selector;
+`adapter-azure-attestation` is the Cargo feature name, not a selector.
+Like the ledger adapter, it runs only
+after the complete statement verdict passes, and only against that accepted
+in-memory statement.
+
+The supported certificate profile is `acisevsnp`. MAA's `/certs` response
+contains large certificates with these extensions:
+
+| OID | Value |
+|---|---|
+| `1.3.6.1.4.1.311.105.1000.1` | DER UTF8String containing JSON evidence: `SnpReport`, `VcekCertChain`, `Endorsements` |
+| `1.3.6.1.4.1.311.105.1000.2` | DER UTF8String `acisevsnp` |
+
+`SnpReport` and `VcekCertChain` use base64url. `VcekCertChain` decodes to the
+AMD PEM chain. The adapter authenticates the SNP report signature and AMD
+collateral with the pinned attestation library. Every evidence-bearing
+certificate must be assessed; ordinary certificates without this evidence
+are outside the attested scope. `Endorsements`, including its UVM
+endorsement, is not interpreted or verified.
+
+The SHA-256 of the exact decoded execution-policy bytes is compared with
+authenticated `HOST_DATA`. This is a digest comparison, not a comparison with
+the base64 text and not a hash of reformatted policy text. The claim lives in
+the signed statement's payload; the receipt authenticates that statement.
+
+Three checks must pass: `snp-validation`, `cce-policy-host-data`, and
+`maa-certificate-coverage`. Success means the AMD-authenticated reports in
+the supplied certificate evidence contain the expected `HOST_DATA`.
+**It does not mean the MAA endpoint runs or enforces this policy.** Neither
+the certificate's actual public key nor its JWK `kid` is bound to the report,
+and no UVM endorsement, guest enforcement, relying-party TCB/SVN threshold,
+freshness or serving-connection binding is established. Those are runtime
+limitations, not implicit requirements of this narrow comparison.
+
+The HTTP header `x-ms-maa-service-version` is preserved as unsigned metadata,
+not compared as an acceptance requirement. It does not authenticate an
+executing build.
+
+### MAA policy and acquisition
+
+```json
+{
+  "policyId": "example/maa-policy",
+  "policyVersion": "1",
+  "assertions": {
+    "issuer": ["example-log.confidential-ledger.azure.com"],
+    "statementSubject": { "equals": "example-attestation-build" },
+    "receiptCount": 1
+  },
+  "adapters": {
+    "azure-attestation": {
+      "target": { "host": "example.region.attest.azure.net" },
+      "binding": {
+        "path": ["security-policy-base64"],
+        "encoding": "base64",
+        "maxDecodedBytes": 1048576
+      }
+    }
+  }
+}
+```
+
+All example identities are placeholders. Choose acceptable statement signer
+and receipt identities independently of the evidence being judged. The adapter
+has no configurable UVM or platform-policy requirements; such fields are
+refused rather than accepted and skipped. An omitted selector cannot drop a
+configured adapter's requirements.
+The same schema example is available as
+[`corpus/policies/azure-attestation.json`](../corpus/policies/azure-attestation.json).
+
+```console
+scitt-verifier verify --statement statement.cose --policy maa-policy.json \
+  --online --adapter azure-attestation --binding-mode live-evidence \
+  --maa-endpoint "https://example.region.attest.azure.net" \
+  --save-trust trust-snapshot --save-evidence maa-snapshot --verbose
+```
+
+`--maa-endpoint` is required for live MAA acquisition and takes precedence over
+`target.host`, even if the policy names a different host. The policy target is
+optional for live acquisition. Omitting the endpoint is a usage error (exit 4);
+the policy host is never a live acquisition fallback.
+The effective target is reported and saved in the bundle's `targetHost`;
+it is an acquisition choice, not authenticated SNP report identity.
+
+Live acquisition makes one bounded HTTPS request to the selected target's
+`/certs`, with public Web PKI, no redirects, and no fallback endpoint.
+The endpoint must be an HTTPS origin with a lowercase DNS host ending
+`.attest.azure.net`, optionally followed by one trailing slash. Credentials,
+explicit ports, paths (including `/certs`), queries and fragments are refused.
+The flag requires MAA live-evidence mode and `--online`; it is not accepted
+for saved replay or another adapter. Receipt-key
+acquisition remains separate and governed by `assertions.issuer`.
+The policy file must configure `adapters.azure-attestation`; an ACL-only
+policy cannot be used for MAA merely by changing the CLI selector.
+
+Saved evidence is a directory containing `maa-evidence.json`: an object with
+`schemaVersion: 1`, `targetHost`, `serviceVersion`, and `certs` (the `/certs`
+JSON object). Replay it without network access:
+
+```console
+scitt-verifier verify --statement statement.cose --policy maa-policy.json \
+  --scitt-keys keys.cbor --adapter azure-attestation \
+  --binding-mode saved-evidence --evidence maa-snapshot
+```
+
+The loader requires a regular file of at most 4 MiB and refuses paths escaping
+the evidence directory. On Unix, opening is nonblocking and the opened file's
+type is checked again, so a FIFO substituted during opening is also refused.
+Saved replay requires policy `target.host` to match the captured `targetHost`.
+If a CLI endpoint overrode the policy target during capture, set the replay
+policy target to that captured host.
+A saved bundle's target and build header are unsigned collector metadata:
+replay checks their consistency, not their origin. Neither live nor saved
+evidence establishes report freshness, revocation, fleet completeness, or
+binding to the serving TLS connection. These gaps are reported at runtime.
+
+### MAA end-to-end success test
+
+The committed MAA snapshot authenticates real SNP reports with matching
+HOST_DATA in pure-adapter tests. The existing registered JSON statement
+fixture does not contain the matching execution policy, so the CLI tests use
+it to exercise missing-claim and HOST_DATA-mismatch outcomes, not a fabricated
+success. No synthetic statement, receipt or key set substitutes for a real
+registered fixture.
+
+An opt-in CLI test exercises the complete offline success path, including
+statement signature, receipt, policy, SNP authentication and HOST_DATA
+comparison. Set `SCITT_MAA_E2E_DIR` to a directory containing a genuine
+`statement.cose`, its independently selected receipt `keys.cbor`, a
+`policy.json` configuring the matching claim and saved target, and an
+`evidence/maa-evidence.json` bundle. Then run:
+
+```console
+cargo test -p scitt-verifier --features adapter-azure-attestation --test maa genuine_matching_statement_and_saved_maa_evidence_exit_zero -- --ignored
+```
+
+The test requires exit 0, `resource-transparent`, passing statement checks
+and all three passing adapter checks; missing inputs fail rather than skip.
+It is ignored by default because no matching registered statement is in the
+corpus. Keep customer or partner inputs outside the repository.
 
 ## Build and select the MST ledger adapter
 

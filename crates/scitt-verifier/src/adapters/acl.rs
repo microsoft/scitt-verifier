@@ -263,7 +263,7 @@ pub fn appraise_evidence(
             ));
             super::load::load(dir).map_err(|e| format!("the evidence bundle is unusable: {e}"))
         }
-        EvidenceSource::Live { save_to } => {
+        EvidenceSource::Live { save_to, .. } => {
             // One deadline for the whole acquisition, started here. Reaching
             // an unreachable ledger is an inability, never a finding: the
             // question was asked and nothing answered it, which is not the

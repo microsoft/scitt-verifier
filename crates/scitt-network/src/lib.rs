@@ -22,6 +22,7 @@ pub mod configuration;
 pub mod error;
 pub mod http;
 pub mod limits;
+pub mod maa;
 pub mod provider;
 pub mod roots;
 

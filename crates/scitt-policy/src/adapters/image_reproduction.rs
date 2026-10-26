@@ -144,6 +144,7 @@ mod tests {
     fn a_policy_with_only_this_section_is_not_empty() {
         let adapters = crate::Adapters {
             acl: None,
+            maa: None,
             image_reproduction: Some(super::ImageReproductionPolicy {
                 profile: "p/v1".into(),
                 source_repository: "r".into(),
