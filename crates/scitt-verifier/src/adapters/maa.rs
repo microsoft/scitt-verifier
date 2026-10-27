@@ -6,7 +6,7 @@ use crate::progress::{Event, Sink, Stage, State};
 use scitt_policy::adapters::maa::MaaPolicy;
 use scitt_receipt::Sign1;
 
-pub const SCOPE: &str = "AMD-authenticated SNP reports in supplied MAA certificate evidence contain HOST_DATA matching SHA-256 of the accepted statement execution policy; this does not authenticate service/signing-key/serving-node identity, guest enforcement or freshness";
+pub const SCOPE: &str = "AMD-authenticated SNP reports in supplied MAA certificate evidence contain HOST_DATA matching SHA-256 of the accepted statement execution policy; this does not authenticate service/signing-key/serving-node identity, guest enforcement or freshness. This result has no computed expiration: reacquire MAA evidence and reverify when the service version changes or the evidence certificates expire or rotate; this build does not detect those changes";
 
 #[cfg(any(feature = "adapter-azure-attestation", test))]
 fn target_host<'a>(policy: &'a MaaPolicy, endpoint: Option<&'a str>) -> Result<&'a str, String> {

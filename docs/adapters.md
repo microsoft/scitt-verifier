@@ -65,7 +65,10 @@ limitations, not implicit requirements of this narrow comparison.
 
 The HTTP header `x-ms-maa-service-version` is preserved as unsigned metadata,
 not compared as an acceptance requirement. It does not authenticate an
-executing build.
+executing build. A `resource-transparent` result has no computed expiration.
+Reacquire MAA evidence and reverify when the service version changes or the
+evidence certificates expire or rotate; the verifier does not detect those
+changes.
 
 ### MAA policy and acquisition
 
