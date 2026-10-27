@@ -19,18 +19,30 @@ implementing SCITT receipt verification independently.
 | `mst-test-service-cert.pem` | The `ledgerTlsCertificate` the identity service publishes for the ledger that issued `mst-test-scitt-keys.cbor` (`CN=CCF Service`, DER sha-256 `b021d809…dc768`). Its public key hashes to the one `kid` in that key set |
 | `cbor-header.cose` | A component manifest carrying a detached supplier signature under a **CBOR-valued text label**, `external-signature`. ES256, a two-certificate chain, one CCF receipt |
 | `nested-sign1.cose` | The same claim in COSE's own shape: a tag-18 COSE_Sign1 with a **detached payload** under the text label `external-statement`. RS256 supplier signature, ES256 envelope, one CCF receipt |
+| `hash-envelope.cose` | A COSE Hash Envelope (RFC 9995) written by CoseSignTool `indirect-sign`: ES256, a single leaf certificate, SHA-256 of `hash-envelope-artifact.spdx.json` as payload. **No receipt** — it is signed, not transparent |
+| `hash-envelope-artifact.spdx.json` | The 57-byte SPDX document the envelope hashes |
+| `hash-envelope-bad-artifact.spdx.json` | A different 44-byte SPDX document, for the negative binding case |
 | `image-reproduction/statement.cose` | An `mst-tbs` schema-version 2 payload (`application/json`, 1061 bytes) committing to the scitt-ccf-ledger 0.20.1 reproduction record; build and image values are `example.invalid` placeholders. ES256, one CCF receipt, registered at entry 3.871 |
 | `image-reproduction/published-reproduce.json` | scitt-ccf-ledger's published 0.20.1 `reproduce.json`, exact bytes |
 | `image-reproduction/rebuilt-reproduce.json` | The `reproduce.json` scitt-ccf-ledger's own scheduled rebuild of 0.20.1 wrote, exact bytes |
 | `maa-certs.json` | Public MAA `/certs` response with genuine `acisevsnp` certificate evidence |
 
-Every `.cose` file here was registered on a real transparency service, so every
-receipt, inclusion proof and root signature is genuine. The signing identities
-are not: they are throwaway certificates minted by
-`corpus/tools/generate_fixtures.py` for this corpus alone. Nothing here
-corresponds to a real product, part, or signer. The only bytes not produced
-here are the two public scitt-ccf-ledger release records under
-`image-reproduction/` and the public MAA certificate response, described below.
+Every `.cose` file here except `hash-envelope.cose` was registered on a real
+transparency service, so every receipt, inclusion proof and root signature is
+genuine. The signing identities are not: they are throwaway certificates
+minted for this corpus alone. Nothing here corresponds to a real product,
+part, or signer. `corpus/tools/generate_fixtures.py` produces everything
+except the hash-envelope fixtures, the two public scitt-ccf-ledger release
+records under `image-reproduction/`, and the public MAA certificate response,
+all described below.
+
+`hash-envelope.cose` is the only statement that was never registered, and
+that is deliberate. It was written by an independent implementation,
+CoseSignTool's `indirect-sign`, so the binding tests fail if this crate's
+reading of RFC 9995 drifts from another's writing of it. Because it carries no
+receipt, a run that binds its artifact still ends in `cannot-evaluate`: an
+artifact bound to a merely-signed statement is not transparent, and the
+acceptance tests assert exactly that.
 
 `maa-certs.json` was fetched from
 `https://sharedweu.weu.attest.azure.net/certs` on 2026-10-19. Its SHA-256 is
@@ -48,9 +60,9 @@ genuine, its inclusion proof is valid, and its root signature verifies. It is
 still not evidence about this payload, because the claims digest no longer
 matches. Any implementation that omits the binding check will accept it.
 
-Every file here is exact bytes as returned by the transparency service, so
-`.gitattributes` marks `*.cose`, `*.cbor`, and `*.bin` as binary. This is not
-cosmetic:
+Every file here is exact bytes as produced or returned, so `.gitattributes`
+marks `*.cose`, `*.cbor`, `*.bin`, the hash-envelope SPDX documents, the
+reproduction records and `maa-certs.json` as binary. This is not cosmetic:
 `artifact.bin` is pure ASCII ending in CRLF, and without that rule git will
 classify it as text and rewrite the line ending on checkout, changing its length
 and breaking the binding check. `fixtures_are_byte_exact` in the acceptance
@@ -154,7 +166,9 @@ affected.
 
 ## Regenerating
 
-`corpus/tools/generate_fixtures.py` rebuilds every fixture from scratch:
+`corpus/tools/generate_fixtures.py` rebuilds every registered fixture from
+scratch. It does not touch the hash-envelope fixtures or `maa-certs.json`,
+and it reads the reproduction records rather than writing them:
 
 ```sh
 python corpus/tools/generate_fixtures.py \
@@ -187,10 +201,14 @@ Fixtures that cannot be regenerated cannot be corrected.
 | `example-release-gate.json` | A starting point for a real deployment gate |
 | `example-dr-pair.json` | A gate for a service running under a primary and a disaster recovery hostname, since `issuer` matching is exact |
 | `image-reproduction.json` | Matches `image-reproduction/statement.cose` and configures the `image-reproduction` adapter. Used by its acceptance tests |
+| `azure-confidential-ledger.json` | Illustrates the `azure-confidential-ledger` adapter schema with invented hosts and an all-zero UVM root. Used by schema and output tests; not a production policy |
+| `azure-attestation.json` | Illustrates the `azure-attestation` (MAA) adapter schema with invented hosts. Used by its policy tests; not a production policy |
+| `online-unsupported-provider.json` | Allowlists a service this build has no key-acquisition provider for, so the suite can prove `--online` refuses before sending anything |
 
-The `example-` policies name invented hosts. They are templates to edit, not
-policies to run: the two `fixture-` entries, `wrong-issuer.json`, and
-`payload-claims.json` are the only ones that describe the committed fixtures.
+The `example-` and `azure-` policies name invented hosts. They are templates
+or schema examples, not policies to run: the two `fixture-` entries,
+`wrong-issuer.json`, `payload-claims.json` and `image-reproduction.json` are
+the only ones that describe the committed fixtures.
 
 `payload-claims.json` is the odd one, because what it pins is a *refusal*.
 Every committed fixture declares `application/cose` or a hash envelope, so none

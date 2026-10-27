@@ -76,14 +76,19 @@ a pass whose record is missing or truncated is demoted, not reported as 0.
 
 ## Fixtures are real bytes
 
-Everything in `corpus/fixtures/` came from a real transparency service. Do not
-synthesise a statement, a receipt, or a key set to make a test convenient — a
-verifier that only works on inputs we generated proves nothing about the ones it
-will meet. Add a real artifact and record its provenance in `corpus/README.md`.
+Every fixture in `corpus/fixtures/` was produced by a real implementation or
+returned by a real service: registered statements from a live transparency
+service, a hash envelope written by CoseSignTool, public release records, and
+a public MAA `/certs` response. Do not synthesise a statement, a receipt, or a
+key set to make a test convenient — a verifier that only works on inputs we
+generated proves nothing about the ones it will meet. Add a real artifact and
+record its provenance in `corpus/README.md`.
 
-`.gitattributes` marks `*.cose`, `*.cbor`, and `*.bin` binary because git will
-otherwise rewrite line endings in `artifact.bin` and break the binding check.
-`fixtures_are_byte_exact` fails if that regresses.
+`.gitattributes` marks `*.cose`, `*.cbor`, `*.bin` and the byte-pinned JSON
+fixtures binary because git will otherwise rewrite line endings, for example in
+`artifact.bin`, and break the binding checks. The `fixtures_are_byte_exact`
+and `hash_envelope_fixtures_keep_their_exact_bytes` tests fail if that
+regresses.
 
 ## Real, but never someone else's
 
@@ -114,21 +119,27 @@ resolve the tension by committing the original.
 | Path | Role |
 |---|---|
 | `crates/scitt-receipt` | Core: parsing, crypto, receipts, binding. Embeddable — no I/O, no clock, no verdicts, no dependency on the other crates. CI's `boundary` job enforces this by grep |
-| `crates/scitt-policy` | Statement assertions and typed requirements in `src/adapters/{mod.rs,acl.rs}`; no I/O |
-| `crates/scitt-network` | Network acquisition of receipt keys and resource evidence; no policy decisions |
+| `crates/scitt-policy` | Statement assertions and typed adapter requirements in `src/adapters/{mod,acl,maa,image_reproduction}.rs`; no I/O |
+| `crates/scitt-network` | Network acquisition of receipt keys and resource evidence (ledger node quotes, MAA `/certs`); no policy decisions |
 | `adapters/azure-confidential-ledger` | `scitt-adapter-azure-confidential-ledger`: pure appraisal of ACL/CCF node evidence; no I/O, no CLI verdicts. Renamed to `acl` inside `scitt-verifier`, because the published name is what a consumer types and `acl` alone means access-control list |
+| `adapters/azure-attestation` | `scitt-adapter-azure-attestation`: pure SNP authenticity and policy HOST_DATA appraisal of MAA evidence. Renamed to `maa` inside `scitt-verifier` |
+| `adapters/image-reproduction` | `scitt-adapter-image-reproduction`: compares a supplied rebuild against a statement-committed reproduction record. Renamed to `repro`; always built |
 | `crates/scitt-verifier` | CLI arguments, reporting, exit codes; `src/adapters/` owns dispatch, adapter orchestration, bundle loading and acquisition orchestration |
 | `crates/scitt-wasm` | Browser bindings and the demo page |
 | `corpus/` | Real fixtures and example policies |
 | `docs/` | `policy.md`, `adapters.md`, `output.md`, `trust-material.md`, `limitations.md`, `architecture.md`, `distribution.md` |
 
-Policy JSON separates `assertions` from
-`adapters.azure-confidential-ledger.{target,trust,binding}`. The old top-level `ledger`/`trust`
-and `assertions.bindLedgerPolicy` shape is not supported.
+Policy JSON separates `assertions` from per-adapter sections under
+`adapters.<name>` (`azure-confidential-ledger`, `azure-attestation`,
+`image-reproduction`), each with its own typed, `deny_unknown_fields` schema.
+The old top-level `ledger`/`trust` and
+`assertions.bindLedgerPolicy` shape is not supported.
 `Policy::evaluate` must not pass when required adapters cannot run; the CLI
-evaluates statement assertions and then adapters explicitly. Keep SNP/UVM
-types specific to the Azure Confidential Ledger adapter. There is no generic
-attestation crate or plugin framework.
+evaluates statement assertions and then adapters explicitly. SNP/UVM appraisal
+currently lives inside each adapter that needs it (`azure-confidential-ledger`
+and `azure-attestation`); there is no generic attestation crate or plugin
+framework yet. Sharing that code is a reasonable future refactor, but do it
+as its own reviewed change, not as a side effect of a feature.
 
 A requirement that does not apply to the evidence is not satisfied by it. A
 minimum TCB configured for one processor generation says nothing about a
@@ -156,13 +167,21 @@ cargo clippy --all-targets      # not --all-features: crypto backends are exclus
 cargo test --workspace
 ```
 
-The adapter is behind a feature and is not built by the commands above. Lint
-and test it explicitly:
+The `azure-confidential-ledger` and `azure-attestation` adapters are behind
+features and are not built by the commands above. Lint and test each, and
+the two together, as CI does:
 
 ```console
-cargo clippy -p scitt-verifier --features adapter-azure-confidential-ledger --all-targets
 cargo clippy -p scitt-adapter-azure-confidential-ledger --features azure-confidential-ledger --all-targets
+cargo clippy -p scitt-verifier --features adapter-azure-confidential-ledger --all-targets
+cargo clippy -p scitt-adapter-azure-attestation --features azure-attestation --all-targets
+cargo clippy -p scitt-verifier --features adapter-azure-attestation --all-targets
+cargo clippy -p scitt-verifier --features adapter-azure-attestation,adapter-azure-confidential-ledger --all-targets
 ```
+
+Run `cargo test` with the same `-p`/`--features` pairs (CI only lints the
+combined feature set). `.github/workflows/ci.yml` is the source of truth if
+this list drifts.
 
 `RUSTFLAGS: -D warnings` in CI, so a warning is a failure. The release binary
 has a 4 MiB budget and the WASM bundle 1 MiB; both are enforced.
@@ -184,3 +203,26 @@ rejected as empty. Test all three outcomes, including `cannotEvaluate`.
 
 `deny_unknown_fields` means older binaries reject policies that use a new
 assertion. That is intended; mention it in release notes.
+
+## Pull requests and issues
+
+Titles for both use `[<component>] <one-liner>`:
+
+* `<component>` is the crate the change or request is mainly about, as it is
+  published: `scitt-verifier` (the CLI and anything it wires in, including
+  adapters), `scitt-wasm`, and so on. Match recent history rather than
+  inventing a new prefix.
+* The one-liner is imperative and states the outcome, not the activity:
+  `[scitt-verifier] Report an unreadable receipt as unevaluable, not absent`,
+  not `Fix receipt bug`. No trailing period; keep it to about 70 characters
+  after the prefix.
+* Dependabot PRs keep their generated titles.
+
+Keep PR descriptions short: what changed and why, with the user-visible
+effect on verdicts or exit codes if there is one. The diff shows how.
+
+Use `Fixes #N` only when the PR resolves everything the issue asks for.
+Otherwise write `Part of #N`, and when closing an issue whose remaining scope
+is still wanted, open a follow-up issue listing exactly what is left and link
+it from the closing comment. An issue closed as done while part of it is not
+is the tracker's version of a `PASS` for something nobody checked.
