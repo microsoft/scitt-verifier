@@ -85,7 +85,9 @@ do not read a validated chain as an identity claim unless you supplied the root.
 file of the CAs you accept, use `requireChainToRootSha256` to require a root
 fingerprint chosen independently of the statement, or configure
 `requireChainToRootFromHttps` for an independently approved root publication
-under `--online`. Registration alone does not
+under `--online`. For a worked example against a Microsoft production root, see
+[trust material](trust-material.md#example-a-microsoft-production-statement).
+Registration alone does not
 establish signer identity. `certificateChainValidated` alone is insufficient:
 an attacker can create an internally consistent chain.
 

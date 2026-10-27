@@ -328,6 +328,82 @@ List authenticated against a pinned publisher key — would remove the need to
 trust the acquisition channel at all. That is planned, and it is why `fetch`
 records provenance in a structured form now.
 
+## Example: a Microsoft production statement
+
+Two kinds of trust material meet in one statement, and they come from
+different places:
+
+| What it verifies | Trust material | Where it comes from |
+|---|---|---|
+| The receipt | The ledger's service key | Acquired by `--online` or pinned with `--scitt-keys`, as above. It is a self-signed `CN=CCF Service` key, not a certificate issued by a public CA. |
+| The signer | The root CA the signing chain ends at | Chosen by you, independently of the statement. |
+
+Statements signed by Microsoft's ESRP signing service and registered in
+Microsoft's Signing Transparency (MST) chain to **Microsoft Supply Chain RSA
+Root CA 2022**, which Microsoft publishes on its PKI repository:
+
+```console
+curl -o msscroot.crt "https://www.microsoft.com/pkiops/certs/Microsoft%20Supply%20Chain%20RSA%20Root%20CA%202022.crt"
+sha256sum msscroot.crt
+# 23ffe2b8bdb9a1711515d4cffda04bc7f793d513c76c243f1020507d8669b7db
+openssl x509 -inform DER -in msscroot.crt -out msscroot.pem
+```
+
+Check that fingerprint against a source you trust before pinning it.
+
+A policy for a statement that MST registered about its own build, on the
+public `esrp-cts-cp` ledger. The EKU and subject are the published
+[Microsoft's Signing Transparency identifiers](https://learn.microsoft.com/azure/confidential-ledger/microsoft-signing-transparency-concepts#eku-and-subject-identifiers);
+substitute those of the service whose statement you are verifying:
+
+```json
+{
+  "policyId": "example/microsoft-esrp-mst",
+  "policyVersion": "1",
+  "assertions": {
+    "issuer": ["esrp-cts-cp.confidential-ledger.azure.com"],
+    "receiptCount": 1,
+    "certificateChainValidated": true,
+    "requireChainToRootSha256": "23ffe2b8bdb9a1711515d4cffda04bc7f793d513c76c243f1020507d8669b7db",
+    "requireEku": ["1.3.6.1.4.1.311.76.59.1.14"],
+    "statementSubject": { "equals": "c0fb4fa3-73f4-415e-b2a1-ecdda435f71b" }
+  }
+}
+```
+
+```console
+scitt-verifier verify \
+  --statement statement.cose \
+  --policy    policy.json \
+  --trusted-roots msscroot.pem \
+  --online
+```
+
+```text
+  PASS Signature valid; chain anchored to supplied trust roots
+  PASS Receipt #1: statement inclusion verified
+  ...
+  PASS requireChainToRootSha256 satisfied
+  PASS requireEku satisfied
+PASS statement-transparent
+```
+
+Each element closes a different gap:
+
+- `--trusted-roots` makes the root you downloaded the only anchor the chain
+  validator accepts.
+- `requireChainToRootSha256` fails the run if the chain ends at any other
+  root, even one with the same subject name.
+- `requireEku` selects the signing purpose. The root is shared by many
+  Microsoft signers, so the root alone does not identify the service.
+- `statementSubject` selects which service's statements you accept.
+
+To follow root publication instead of pinning a fingerprint, replace
+`requireChainToRootSha256` with
+[`requireChainToRootFromHttps`](policy.md#requirechaintorootfromhttps) set to
+the PKI repository URL above. The run then also reports
+`RootSourceFreshnessNotChecked`.
+
 ## Related
 
 * [`limitations.md`](limitations.md) — what the verifier does not check
