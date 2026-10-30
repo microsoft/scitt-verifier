@@ -130,6 +130,10 @@ the `adapter-amd-snp-device` build feature, and
 `tools/collect-snp-evidence.ps1` collects the evidence on the device. See
 [adapters](docs/adapters.md#amd-snp-device).
 
+The corpus gains a registered hardware BOM, `amd-snp-device/statement.cose`,
+naming the chip in the public Turin fixture, and `SCITT_SNPDEV_E2E_DIR` runs
+an opt-in exit-0 test against freshly collected evidence.
+
 Older binaries refuse a policy containing `adapters.amd-snp-device`.
 
 ## 0.5.0

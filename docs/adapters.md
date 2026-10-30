@@ -633,3 +633,27 @@ that is all zeros or too short, or a generation with no configured floor
 yields `cannot-evaluate` (exit 3). A report that fails authentication leaves
 the checks that depend on it `cannot-evaluate`. Only an accepted statement
 whose five checks all pass is `resource-transparent` (exit 0).
+
+### SNP device end-to-end tests
+
+`corpus/fixtures/amd-snp-device/statement.cose` is a registered hardware BOM
+whose serial is the chip ID of TEE-Attestation-Verification's public Turin
+report, so the CLI tests run the whole chain on real bytes: statement
+signature, receipt, policy, and the device claim, report authentication, TCB
+floor and device binding all pass. That public report carries no nonce, so
+`freshness` is `cannot-evaluate` and the run exits 3; supplying a nonce it
+does not carry exits 2. No committed test fabricates a fresh report.
+
+An opt-in test covers exit 0. Collect evidence on the device with
+`tools/collect-snp-evidence.ps1`, register a hardware BOM naming that chip,
+and set `SCITT_SNPDEV_E2E_DIR` to a directory containing `statement.cose`,
+`keys.cbor`, a `policy.json` configuring `amd-snp-device`, and the evidence
+under `evidence/`. Then run:
+
+```console
+cargo test -p scitt-verifier --features adapter-amd-snp-device --test amd_snp_device genuine_device_and_fresh_report_exit_zero -- --ignored
+```
+
+The test requires exit 0, `resource-transparent` and all five checks
+passing; missing inputs fail rather than skip. Keep partner device evidence
+and hardware BOMs outside the repository.

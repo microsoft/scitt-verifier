@@ -1,10 +1,12 @@
 //! The amd-snp-device adapter through the built binary.
 //!
-//! No hardware BOM statement registered on the corpus ledger exists yet, so
-//! these tests cover the paths that must never pass: a verified statement
-//! that names no device, missing evidence, and the command-line refusals. The
-//! SNP evidence is TEE-Attestation-Verification's public Turin fixture; see
-//! `adapters/amd-snp-device/tests/fixtures/README.md`.
+//! The SNP evidence is TEE-Attestation-Verification's public Turin fixture;
+//! see `adapters/amd-snp-device/tests/fixtures/README.md`. The corpus
+//! hardware BOM statement names that chip, so the binding and every other
+//! check pass, but the report carries no nonce: freshness, and with it the
+//! run, cannot be established from public bytes alone. A full exit-0 run
+//! needs a report collected against a fresh nonce; see the ignored test at
+//! the end of this file.
 
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -28,6 +30,20 @@ fn snp_fixture(name: &str) -> Vec<u8> {
 /// A verified statement whose payload is JSON but describes no hardware.
 fn statement() -> PathBuf {
     corpus("fixtures/image-reproduction/statement.cose")
+}
+
+/// A verified hardware BOM naming the chip that signed the fixture report.
+#[cfg(feature = "adapter-amd-snp-device")]
+fn hbom_statement() -> PathBuf {
+    corpus("fixtures/amd-snp-device/statement.cose")
+}
+
+#[cfg(feature = "adapter-amd-snp-device")]
+fn hbom_policy() -> Value {
+    serde_json::from_slice(include_bytes!(
+        "../../../corpus/policies/amd-snp-device.json"
+    ))
+    .unwrap()
 }
 
 fn section() -> Value {
@@ -81,12 +97,22 @@ const ADAPTER: &[&str] = &[
 ];
 
 fn run(name: &str, policy: &Value, evidence: &Path, adapter: &[&str]) -> (i32, Value) {
+    run_on(&statement(), name, policy, evidence, adapter)
+}
+
+fn run_on(
+    statement: &Path,
+    name: &str,
+    policy: &Value,
+    evidence: &Path,
+    adapter: &[&str],
+) -> (i32, Value) {
     let policy_path = scratch(&format!("{name}-policy")).join("policy.json");
     std::fs::write(&policy_path, serde_json::to_vec(policy).unwrap()).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_scitt-verifier"))
         .arg("verify")
         .arg("--statement")
-        .arg(statement())
+        .arg(statement)
         .arg("--scitt-keys")
         .arg(corpus("fixtures/mst-test-scitt-keys.cbor"))
         .arg("--policy")
@@ -135,6 +161,53 @@ fn a_statement_that_names_no_device_fails_even_with_a_genuine_report() {
         gaps.contains("AmdCertificateRevocationNotChecked"),
         "{gaps}"
     );
+}
+
+/// The statement names the chip that signed the report, and the report
+/// authenticates and meets the floor, so the binding holds. Without a nonce
+/// the report could be a replay, so the run still cannot pass.
+#[cfg(feature = "adapter-amd-snp-device")]
+#[test]
+fn a_matching_device_binds_but_without_a_nonce_is_not_fresh() {
+    let (code, record) = run_on(
+        &hbom_statement(),
+        "bound",
+        &hbom_policy(),
+        &evidence("bound"),
+        ADAPTER,
+    );
+    assert_eq!(code, 3, "{record}");
+    for check in ["statementSignature", "receiptInclusion", "policy"] {
+        assert_eq!(record["appraisal"]["checks"][check], "pass", "{record}");
+    }
+    assert_eq!(record["appraisal"]["verdict"], "cannot-evaluate");
+    for name in ["device-claim", "snp-report", "tcb-floor", "device-binding"] {
+        assert_eq!(state_of(&record, name), "pass", "{name}: {record}");
+    }
+    assert_eq!(state_of(&record, "freshness"), "cannot-evaluate");
+}
+
+/// The fixture report was not produced for this nonce, so it is stale.
+#[cfg(feature = "adapter-amd-snp-device")]
+#[test]
+fn a_report_that_does_not_carry_the_nonce_fails() {
+    let evidence = evidence("stale");
+    std::fs::write(
+        evidence.join("nonce.hex"),
+        "1111111111111111111111111111111122222222222222222222222222222222",
+    )
+    .unwrap();
+    let (code, record) = run_on(
+        &hbom_statement(),
+        "stale",
+        &hbom_policy(),
+        &evidence,
+        ADAPTER,
+    );
+    assert_eq!(code, 2, "{record}");
+    assert_eq!(record["appraisal"]["verdict"], "resource-failed");
+    assert_eq!(state_of(&record, "freshness"), "fail");
+    assert_eq!(state_of(&record, "device-binding"), "pass");
 }
 
 /// A build without the adapter answers every check cannot-evaluate.
@@ -231,4 +304,51 @@ fn a_policy_configuring_two_adapters_is_refused() {
     assert!(record
         .to_string()
         .contains("split it into one policy per adapter"));
+}
+
+/// The whole chain on real hardware: a registered BOM naming the chip, and a
+/// report the guest produced for a fresh nonce (see `docs/adapters.md`).
+#[cfg(feature = "adapter-amd-snp-device")]
+#[test]
+#[ignore = "requires a registered BOM and a report collected for a fresh nonce; set SCITT_SNPDEV_E2E_DIR"]
+fn genuine_device_and_fresh_report_exit_zero() {
+    let dir = PathBuf::from(std::env::var_os("SCITT_SNPDEV_E2E_DIR").expect(
+        "set SCITT_SNPDEV_E2E_DIR to a directory with statement.cose, policy.json, keys.cbor \
+         and evidence/ (report.bin, vcek.der, cert_chain.pem, nonce.hex)",
+    ));
+    let output = Command::new(env!("CARGO_BIN_EXE_scitt-verifier"))
+        .arg("verify")
+        .arg("--statement")
+        .arg(dir.join("statement.cose"))
+        .arg("--scitt-keys")
+        .arg(dir.join("keys.cbor"))
+        .arg("--policy")
+        .arg(dir.join("policy.json"))
+        .args(ADAPTER)
+        .arg("--evidence")
+        .arg(dir.join("evidence"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout: {stdout}; stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let record: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(record["appraisal"]["verdict"], "resource-transparent");
+    for name in [
+        "device-claim",
+        "snp-report",
+        "tcb-floor",
+        "freshness",
+        "device-binding",
+    ] {
+        assert_eq!(state_of(&record, name), "pass", "{name}: {record}");
+    }
+    assert!(!record["appraisal"]["notChecked"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 }

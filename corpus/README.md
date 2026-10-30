@@ -25,13 +25,15 @@ implementing SCITT receipt verification independently.
 | `image-reproduction/statement.cose` | An `mst-tbs` schema-version 2 payload (`application/json`, 1061 bytes) committing to the scitt-ccf-ledger 0.20.1 reproduction record; build and image values are `example.invalid` placeholders. ES256, one CCF receipt, registered at entry 3.871 |
 | `image-reproduction/published-reproduce.json` | scitt-ccf-ledger's published 0.20.1 `reproduce.json`, exact bytes |
 | `image-reproduction/rebuilt-reproduce.json` | The `reproduce.json` scitt-ccf-ledger's own scheduled rebuild of 0.20.1 wrote, exact bytes |
+| `amd-snp-device/statement.cose` | An invented SPDX 3 hardware BOM (`application/spdx+json`, 628 bytes) naming one packaged SoC whose serial is the CHIP_ID of the public Turin report under `adapters/amd-snp-device/tests/fixtures/`. ES256, one CCF receipt, registered at entry 5.1720 |
 | `maa-certs.json` | Public MAA `/certs` response with genuine `acisevsnp` certificate evidence |
 
 Every `.cose` file here except `hash-envelope.cose` was registered on a real
 transparency service, so every receipt, inclusion proof and root signature is
 genuine. The signing identities are not: they are throwaway certificates
 minted for this corpus alone. Nothing here corresponds to a real product,
-part, or signer. `corpus/tools/generate_fixtures.py` produces everything
+part, or signer; the one real hardware value, a chip ID already published in
+TEE-Attestation-Verification's test fixtures, is described below. `corpus/tools/generate_fixtures.py` produces everything
 except the hash-envelope fixtures, the two public scitt-ccf-ledger release
 records under `image-reproduction/`, and the public MAA certificate response,
 all described below.
@@ -144,6 +146,16 @@ ending would turn the genuine record into a mismatch.
 --only image-reproduction` re-signs and re-registers only this statement, and
 refuses if the ledger's key set is no longer the committed one.
 
+`amd-snp-device/statement.cose` is minted the same way, with `--only
+amd-snp-device`. Its one real value is the serial: the script reads it from
+TEE-Attestation-Verification's public Turin report, so the statement and that
+report describe the same chip and the adapter's device binding genuinely
+holds. The part number, revision and publisher are placeholders, so the
+statement says nothing about any real device. The report carries no nonce,
+which is why no committed test can reach exit 0 with it; see
+`crates/scitt-verifier/tests/amd_snp_device.rs` for the opt-in test that runs
+against a fresh report.
+
 ## Pinned values
 
 Computed by `pyscitt` and `cbor2` in `corpus/tools/generate_fixtures.py`,
@@ -201,14 +213,15 @@ Fixtures that cannot be regenerated cannot be corrected.
 | `example-release-gate.json` | A starting point for a real deployment gate |
 | `example-dr-pair.json` | A gate for a service running under a primary and a disaster recovery hostname, since `issuer` matching is exact |
 | `image-reproduction.json` | Matches `image-reproduction/statement.cose` and configures the `image-reproduction` adapter. Used by its acceptance tests |
+| `amd-snp-device.json` | Matches `amd-snp-device/statement.cose` and configures the `amd-snp-device` adapter with the public Turin report's TCB as its floor. Used by its CLI tests |
 | `azure-confidential-ledger.json` | Illustrates the `azure-confidential-ledger` adapter schema with invented hosts and an all-zero UVM root. Used by schema and output tests; not a production policy |
 | `azure-attestation.json` | Illustrates the `azure-attestation` (MAA) adapter schema with invented hosts. Used by its policy tests; not a production policy |
 | `online-unsupported-provider.json` | Allowlists a service this build has no key-acquisition provider for, so the suite can prove `--online` refuses before sending anything |
 
 The `example-` and `azure-` policies name invented hosts. They are templates
 or schema examples, not policies to run: the two `fixture-` entries,
-`wrong-issuer.json`, `payload-claims.json` and `image-reproduction.json` are
-the only ones that describe the committed fixtures.
+`wrong-issuer.json`, `payload-claims.json`, `image-reproduction.json` and
+`amd-snp-device.json` are the only ones that describe the committed fixtures.
 
 `payload-claims.json` is the odd one, because what it pins is a *refusal*.
 Every committed fixture declares `application/cose` or a hash envelope, so none
@@ -219,8 +232,8 @@ change that started sniffing bytes instead of trusting the signed `cty` would
 leave every other test green.
 
 It is also an honest record of a hole in this corpus. Only
-`image-reproduction/statement.cose` has a JSON payload, and no committed policy
-applies `payloadJson` to it, so nothing here demonstrates `payloadJson`
+`image-reproduction/statement.cose` and `amd-snp-device/statement.cose` have
+JSON payloads, and no committed policy applies `payloadJson` to either, so nothing here demonstrates `payloadJson`
 *succeeding* end to end — that path is covered by unit tests in `scitt-policy`
 only. Closing it is now a matter of one more policy against that statement; it
 is left open deliberately rather than for want of the bytes.
