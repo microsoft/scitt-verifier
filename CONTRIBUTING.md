@@ -12,6 +12,8 @@ Native builds still need the linker required by the chosen Rust toolchain.
 The optional MST ledger adapter is enabled with `--features adapter-azure-confidential-ledger`.
 The MAA adapter uses `--features adapter-azure-attestation`; see
 [its supported scope](docs/adapters.md#microsoft-azure-attestation-maa).
+The AMD SNP device adapter uses `--features adapter-amd-snp-device`; see
+[AMD SNP device](docs/adapters.md#amd-snp-device).
 
 ## The rules that are not negotiable
 

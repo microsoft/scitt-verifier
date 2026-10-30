@@ -248,6 +248,18 @@ in builder details that are not compared (`docker_version`, `buildx_version`,
 `image_id`) are reported as `ResourceAppraisalNote` warning diagnostics, not
 checks. See [image reproduction](adapters.md#image-reproduction).
 
+#### AMD SNP device checks
+
+The `amd-snp-device` adapter contributes five checks, always in this order:
+`device-claim`, `snp-report`, `tcb-floor`, `freshness` and `device-binding`.
+All five are required. Its evidence is always saved (`saved-evidence`),
+collected on the device by the operator, and the scope statement says so. The
+report's launch measurement is recorded as a note, not compared: guest
+measurement appraisal is listed under `appraisal.notChecked` as
+`GuestMeasurementNotAppraised`, and AMD certificate revocation as
+`AmdCertificateRevocationNotChecked`. See
+[AMD SNP device](adapters.md#amd-snp-device).
+
 ## Diagnostics
 
 Every problem is a structured diagnostic with a stable `code`, a `category`, a

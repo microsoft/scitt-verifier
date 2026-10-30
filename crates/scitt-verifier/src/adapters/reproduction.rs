@@ -206,6 +206,22 @@ fn map_state(state: repro::CheckState) -> CheckState {
 /// is an error, because silently treating it as absent would hide that the
 /// bundle is not what the operator thinks it is.
 fn read_bounded(dir: &Path, name: &str) -> Result<Option<Vec<u8>>, String> {
+    read_bounded_limit(
+        dir,
+        name,
+        MAX_RECORD_BYTES,
+        "a reproduction record is a small JSON document",
+    )
+}
+
+/// [`read_bounded`] with the bound and what the file should be supplied by
+/// the caller, so every adapter reads its evidence directory the same way.
+pub(super) fn read_bounded_limit(
+    dir: &Path,
+    name: &str,
+    max: u64,
+    expected: &str,
+) -> Result<Option<Vec<u8>>, String> {
     let root = dir
         .canonicalize()
         .map_err(|e| format!("could not open evidence directory {}: {e}", dir.display()))?;
@@ -232,13 +248,12 @@ fn read_bounded(dir: &Path, name: &str) -> Result<Option<Vec<u8>>, String> {
     let file = std::fs::File::open(&resolved)
         .map_err(|e| format!("could not read {}: {e}", resolved.display()))?;
     let mut bytes = Vec::new();
-    file.take(MAX_RECORD_BYTES + 1)
+    file.take(max + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| format!("could not read {}: {e}", resolved.display()))?;
-    if bytes.len() as u64 > MAX_RECORD_BYTES {
+    if bytes.len() as u64 > max {
         return Err(format!(
-            "{name} is larger than {MAX_RECORD_BYTES} bytes; a reproduction record is a small \
-             JSON document, so this is not one"
+            "{name} is larger than {max} bytes; {expected}, so this is not one"
         ));
     }
     Ok(Some(bytes))

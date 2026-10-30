@@ -50,12 +50,17 @@ jobs:
       # tests could stop being run without anything turning red.
       - run: cargo clippy -p scitt-verifier --features adapter-azure-confidential-ledger --all-targets
       - run: cargo test -p scitt-verifier --features adapter-azure-confidential-ledger
+      # The SNP device adapter crate is a workspace member and is tested above;
+      # its wiring into the CLI is not compiled without the feature.
+      - run: cargo clippy -p scitt-verifier --features adapter-amd-snp-device --all-targets
+      - run: cargo test -p scitt-verifier --features adapter-amd-snp-device
 
       - run: cargo clippy -p scitt-adapter-azure-attestation --features azure-attestation --all-targets
       - run: cargo test -p scitt-adapter-azure-attestation --features azure-attestation
       - run: cargo clippy -p scitt-verifier --features adapter-azure-attestation --all-targets
       - run: cargo test -p scitt-verifier --features adapter-azure-attestation
       - run: cargo clippy -p scitt-verifier --features adapter-azure-attestation,adapter-azure-confidential-ledger --all-targets
+      - run: cargo clippy -p scitt-verifier --features adapter-amd-snp-device,adapter-azure-attestation --all-targets
 
   boundary:
     name: Core boundary
@@ -74,7 +79,7 @@ jobs:
           # These crates make the same promise — callers supply bytes, we decide
           # nothing about time, exit status, or the network — so both are held
           # to it here. A crate that claims purity and is never scanned drifts.
-          roots="crates/scitt-receipt/src adapters/azure-confidential-ledger/src adapters/image-reproduction/src adapters/azure-attestation/src"
+          roots="crates/scitt-receipt/src adapters/azure-confidential-ledger/src adapters/image-reproduction/src adapters/azure-attestation/src adapters/amd-snp-device/src"
           io_pattern='std::fs|File::open|read_to_string'
 
           # `if grep` cannot tell "found nothing" from "looked at nothing": both
@@ -144,6 +149,8 @@ jobs:
                 'scitt-adapter-image-reproduction must not depend on the CLI or the network, or run a build; it compares records.'
           check adapters/azure-attestation/src 'scitt_verifier|scitt_network' \
                 'scitt-adapter-azure-attestation must not depend on the CLI or the network.'
+          check adapters/amd-snp-device/src 'scitt_verifier|scitt_network|std::process::Command' \
+                'scitt-adapter-amd-snp-device must not depend on the CLI or the network, or run a command; it appraises supplied evidence.'
           exit $violations
 
       - name: Reject dependency drift in the core manifests
@@ -178,6 +185,9 @@ jobs:
           check_manifest adapters/azure-attestation/Cargo.toml \
             '^(scitt-verifier|scitt-network)' \
             'scitt-adapter-azure-attestation must not depend on scitt-verifier or scitt-network.'
+          check_manifest adapters/amd-snp-device/Cargo.toml \
+            '^(scitt-verifier|scitt-network)' \
+            'scitt-adapter-amd-snp-device must not depend on scitt-verifier or scitt-network.'
 
   size:
     name: Binary size budget
@@ -230,6 +240,19 @@ jobs:
           printf 'scitt-verifier + azure-attestation: %s bytes (budget %s)\n' "$actual" "$budget"
           if [ "$actual" -gt "$budget" ]; then
             echo "::error::MAA binary exceeded the size budget"
+            exit 1
+          fi
+
+      - run: cargo build --release -p scitt-verifier --features adapter-amd-snp-device
+
+      - name: Enforce the size budget with the SNP device adapter
+        run: |
+          set -euo pipefail
+          budget=$((4 * 1024 * 1024))
+          actual=$(stat -c%s target/release/scitt-verifier)
+          printf 'scitt-verifier + amd-snp-device: %s bytes (budget %s)\n' "$actual" "$budget"
+          if [ "$actual" -gt "$budget" ]; then
+            echo "::error::SNP device binary exceeded the size budget"
             exit 1
           fi
 

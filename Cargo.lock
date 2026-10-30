@@ -780,6 +780,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "scitt-adapter-amd-snp-device"
+version = "0.5.0"
+dependencies = [
+ "scitt-policy",
+ "serde_json",
+ "tee-attestation-verification-caci",
+ "tee-attestation-verification-crypto",
+]
+
+[[package]]
 name = "scitt-adapter-azure-attestation"
 version = "0.5.0"
 dependencies = [
@@ -844,6 +854,7 @@ name = "scitt-verifier"
 version = "0.5.0"
 dependencies = [
  "libc",
+ "scitt-adapter-amd-snp-device",
  "scitt-adapter-azure-attestation",
  "scitt-adapter-azure-confidential-ledger",
  "scitt-adapter-image-reproduction",

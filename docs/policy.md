@@ -138,11 +138,16 @@ adapters.azure-attestation.binding          Encoded execution-policy claim and o
 adapters.image-reproduction.profile           How the statement and records are read.
 adapters.image-reproduction.sourceRepository  The only repository the statement may name.
 adapters.image-reproduction.component         The only component (app, variant) it may be about.
+
+adapters.amd-snp-device.profile     How the hardware BOM payload is read (spdx3-hbom).
+adapters.amd-snp-device.category    The SPDX package category naming the device.
+adapters.amd-snp-device.minimumTcb  Per-generation floor for the report's reported TCB.
 ```
 
 See [adapters](adapters.md#policy-shape) for the complete JSON shape and field
 reference of the ledger adapter, [MAA](adapters.md#microsoft-azure-attestation-maa),
-and [image reproduction](adapters.md#image-reproduction).
+[image reproduction](adapters.md#image-reproduction) and
+[AMD SNP device](adapters.md#amd-snp-device).
 The unpublished top-level `ledger`/`trust` and
 `assertions.bindLedgerPolicy` form is removed, not accepted as an alias.
 Unknown adapters and unknown fields are errors.

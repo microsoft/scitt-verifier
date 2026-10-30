@@ -13,15 +13,18 @@ not a prerequisite for verifying a transparent statement.
 | `adapters/azure-confidential-ledger` (`scitt-adapter-azure-confidential-ledger`) | Pure appraisal of supplied MST ledger evidence against typed requirements |
 | `adapters/image-reproduction` (`scitt-adapter-image-reproduction`) | Pure comparison of a supplied rebuild record with the reproduction record a statement commits to; runs no build |
 | `adapters/azure-attestation` (`scitt-adapter-azure-attestation`) | Pure SNP signature and HOST_DATA comparison in MAA certificate evidence; no service-identity or enforcement claim |
+| `adapters/amd-snp-device` (`scitt-adapter-amd-snp-device`) | Pure appraisal of a supplied SEV-SNP report, VCEK and AMD chain against the device a hardware BOM statement names; collects nothing |
 | `crates/scitt-verifier` | Load inputs, select acquisition and adapter paths, combine checks, report verdicts and exit codes |
 
-`scitt-policy/src/adapters/{mod.rs,acl.rs,image_reproduction.rs}` owns the
+`scitt-policy/src/adapters/{mod.rs,acl.rs,image_reproduction.rs,amd_snp_device.rs}` owns the
 policy namespace and each adapter's requirements. CLI
 `scitt-verifier/src/adapters/mod.rs` provides dispatch and the shared appraisal
 result; `acl.rs` translates MST requirements and findings, and `load.rs`
 handles local evidence bundles. `reproduction.rs` reads the two records from
 the evidence directory within fixed bounds and hands their bytes, with the
-accepted statement's payload, to the pure image-reproduction crate. `live.rs` calls
+accepted statement's payload, to the pure image-reproduction crate.
+`snp_device.rs` does the same for the SNP report, VCEK, AMD chain and nonce,
+and is a stub returning `cannot-evaluate` when the feature is off. `live.rs` calls
 `scitt_network::acl::collect`, then decodes and joins the returned node
 views into a pure evidence bundle. TLS bootstrap, pinned connections, and
 bounded HTTP collection belong to `collect`, not the CLI or pure adapter.
@@ -43,9 +46,11 @@ failed, or unevaluated required checks block success. Other checks still report
 scope limitations; they cannot stand in for a required check.
 
 There is no generic `scitt-attest` crate, plugin loader, or universal SNP
-evidence model. SNP concepts belong to the specific Azure Confidential Ledger
-and MAA adapters, not the statement core; only the ledger adapter appraises UVM
-endorsements. The image-reproduction adapter
+evidence model. SNP concepts belong to the specific Azure Confidential Ledger,
+MAA and AMD SNP device adapters, not the statement core. Each verifies SNP
+reports through the same pinned `tav-caci`, but none depends on another: only
+the ledger adapter appraises UVM endorsements, and the device adapter binds one
+report to a hardware BOM. The image-reproduction adapter
 shares only the dispatch seam and the check vocabulary; it has no SNP concepts.
 MAA's network module reads `/certs` and its build-version response header;
 CLI orchestration loads or saves evidence and derives the execution-policy
