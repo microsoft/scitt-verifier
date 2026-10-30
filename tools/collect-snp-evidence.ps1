@@ -156,7 +156,9 @@ else {
     $hwid = ConvertTo-Hex $chipId
     $query = 'blSPL={0}&teeSPL={1}&snpSPL={2}&ucodeSPL={3}' -f $tcb[0], $tcb[1], $tcb[6], $tcb[7]
 }
-Write-Host ("Report  version {0}, {1}, chip {2}, reported TCB {3}" -f $version, $product, $hwid, (ConvertTo-Hex $tcb))
+# The TCB is a little-endian u64; print it as the policy's minimumTcb takes it.
+$tcbValue = '0x' + (ConvertTo-Hex $tcb[7..0]).ToUpper()
+Write-Host ("Report  version {0}, {1}, chip {2}, reported TCB {3}" -f $version, $product, $hwid, $tcbValue)
 
 [IO.File]::WriteAllBytes((Join-Path $OutDir 'report.bin'), $report)
 [IO.File]::WriteAllText((Join-Path $OutDir 'nonce.hex'), $nonce, [Text.Encoding]::ASCII)

@@ -412,13 +412,21 @@ fn read_hwid(vcek: &[u8]) -> Result<Option<Vec<u8>>, String> {
         .map_err(|e| format!("the VCEK could not be parsed: {e}"))?;
     let value = tav_crypto::Crypto::get_extension_value_by_oid(&cert, HWID_OID)
         .map_err(|e| format!("the VCEK's hardware-ID extension could not be read: {e}"))?;
-    Ok(value.map(|v| match v.as_slice() {
-        // Some encoders wrap the value in an OCTET STRING. Unwrapped only when
-        // the length byte accounts for exactly the rest, so a raw ID that
-        // happens to begin with 0x04 is left alone.
-        [0x04, len, rest @ ..] if usize::from(*len) == rest.len() => rest.to_vec(),
-        _ => v,
-    }))
+    Ok(value.map(unwrap_hwid))
+}
+
+/// Some encoders wrap the hardware ID in an OCTET STRING. Unwrapped only when
+/// the payload is itself a supported ID length (8 or 64 bytes), so a raw ID
+/// that happens to begin with `04 06` or `04 3e` is left alone.
+fn unwrap_hwid(value: Vec<u8>) -> Vec<u8> {
+    match value.as_slice() {
+        [0x04, len, rest @ ..]
+            if usize::from(*len) == rest.len() && matches!(rest.len(), 8 | 64) =>
+        {
+            rest.to_vec()
+        }
+        _ => value,
+    }
 }
 
 fn check_tcb(auth: &Authenticated, floors: &[TcbFloor<'_>], findings: &mut Vec<Finding>) -> Check {

@@ -594,8 +594,8 @@ Exit code 3 is the right answer here. The statement, receipt and policy pass,
 and the report really was signed by the chip the BOM names, but a public
 report can be replayed by anyone, so the tool will not call it fresh. Add a
 `nonce.hex` the report was not made for (any 32 bytes of hex) and `freshness`
-fails with exit 2. Only evidence collected on the device against a new nonce
-can reach exit 0.
+fails with exit 2. Only evidence collected on a device, with a nonce in
+`nonce.hex` that the report carries, can reach exit 0.
 
 ### Use it on your own hardware
 
@@ -655,7 +655,16 @@ It prints the chip's generation, hardware ID and reported TCB, and writes
 without containers, produce the same four files with any tool that requests
 a report with your nonce as `REPORT_DATA`; the verifier authenticates every
 byte and does not care how they were gathered. Collect again for every run:
-reusing a directory reuses its nonce.
+a directory that passed once passes again, so reusing one proves nothing
+about the machine now.
+
+**Who chooses the nonce matters.** The verifier takes the nonce from
+`nonce.hex`, in the same directory as the report, and checks only that the
+report was made for it. That establishes freshness for whoever chose the
+nonce. If you collect the evidence yourself, or hand the operator the nonce
+and check `nonce.hex` holds it, a pass means the chip answered now. If you
+receive a directory someone else collected, a pass means the chip answered
+that person's nonce at some time; an old directory replays cleanly.
 
 **3. Verifier: write a policy and run.** Start from
 `corpus/policies/amd-snp-device.json` and change three things: `issuer` to
@@ -677,9 +686,9 @@ instead (see [trust material](../README.md#trust-material-local-or-acquired)).
 
 | You see | It means | What to do |
 |---|---|---|
-| Exit 0, `resource-transparent` | The accepted BOM names the chip that signed this fresh report, at or above your firmware floor | Nothing; this is the pass |
+| Exit 0, `resource-transparent` | The accepted BOM names the chip that signed a report made for the nonce in `nonce.hex`, at or above your firmware floor | Nothing, if you chose that nonce; otherwise see "Who chooses the nonce matters" |
 | Exit 3, `freshness` cannot-evaluate, `nonce.hex absent` | The evidence has no nonce, so the report may be old | Collect with the script, which always writes one |
-| Exit 2, `freshness` fail | The report was not produced for this nonce: reused or mismatched evidence | Collect again; do not copy evidence between runs |
+| Exit 2, `freshness` fail | The report was not produced for the nonce in `nonce.hex`: files from different collections were mixed | Collect again into an empty directory |
 | Exit 2, `device-binding` fail | The report came from a different chip than the BOM names | Treat as a finding: wrong machine, or wrong statement |
 | Exit 2, `tcb-floor` fail | The firmware is older than your floor | Update the machine's firmware, or review the floor |
 | Exit 3, `tcb-floor` cannot-evaluate | The policy has no floor for this generation | Add one to `minimumTcb` |
@@ -696,6 +705,10 @@ Add `--format json` for a machine-readable record; each check is in
   note and not compared with any endorsed value, so a pass says which chip
   answered, not which guest image asked it to. `appraisal.notChecked` lists
   `GuestMeasurementNotAppraised`.
+- **Freshness to someone who did not choose the nonce.** The nonce is read
+  from the evidence directory, so `freshness` shows the report was made for
+  that nonce, not that it was made recently. Only the party that chose the
+  nonce learns the report is fresh; a replayed directory passes.
 - **That the BOM is true.** The statement's issuer and registration are
   verified; whether the manufacturer recorded the right parts is the
   manufacturer's claim.

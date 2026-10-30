@@ -410,3 +410,17 @@ fn an_unsupported_profile_evaluates_nothing() {
         .iter()
         .all(|(_, _, c)| c.state == CheckState::CannotEvaluate));
 }
+
+#[test]
+fn hardware_ids_are_unwrapped_only_when_the_payload_is_an_id() {
+    let wrapped_turin = [&[0x04, 8][..], &[0xAB; 8]].concat();
+    assert_eq!(unwrap_hwid(wrapped_turin), vec![0xAB; 8]);
+    let wrapped_genoa = [&[0x04, 64][..], &[0xCD; 64]].concat();
+    assert_eq!(unwrap_hwid(wrapped_genoa), vec![0xCD; 64]);
+    // Raw IDs whose first two bytes happen to look like an OCTET STRING
+    // header for the rest of the ID.
+    let raw_turin = [&[0x04, 6][..], &[0x11; 6]].concat();
+    assert_eq!(unwrap_hwid(raw_turin.clone()), raw_turin);
+    let raw_genoa = [&[0x04, 62][..], &[0x22; 62]].concat();
+    assert_eq!(unwrap_hwid(raw_genoa.clone()), raw_genoa);
+}

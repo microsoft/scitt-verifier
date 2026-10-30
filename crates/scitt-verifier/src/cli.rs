@@ -257,7 +257,8 @@ whose serial number this hardware BOM statement records?
 The report must verify under a VCEK that chains to AMD's pinned root for its
 generation, meet the policy's TCB floor, and carry the nonce in REPORT_DATA.
 Choose the nonce yourself, immediately before collection; a report carrying a
-nonce someone else chose proves nothing about when it was made.
+nonce someone else chose proves nothing about when it was made. The nonce is
+read from DIR, so a directory that passed once passes again.
 
 A pass says which chip answered. It does not appraise the guest's software, and
 it relies on the manufacturer's convention that the BOM serial is the chip's
