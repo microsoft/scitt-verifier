@@ -1453,6 +1453,12 @@ mod tests {
             serde_json::to_string(&record).unwrap(),
         ] {
             assert!(rendered.contains(crate::adapters::MAA_SCOPE), "{rendered}");
+            assert!(rendered.contains("no computed expiration"), "{rendered}");
+            assert!(rendered.contains("service version changes"), "{rendered}");
+            assert!(
+                rendered.contains("certificates expire or rotate"),
+                "{rendered}"
+            );
             assert!(!rendered.contains("MAA enforces policy"), "{rendered}");
             assert!(!rendered.contains("service enforces policy"), "{rendered}");
         }
