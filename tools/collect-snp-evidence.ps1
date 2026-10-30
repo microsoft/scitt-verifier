@@ -42,7 +42,6 @@
     Never contact KDS; fail if a certificate is not already in the cache.
 
 .EXAMPLE
-    . .\common.ps1
     .\collect-snp-evidence.ps1 -ContainerId $id -OutDir C:\evidence\run1
 #>
 [CmdletBinding()]
