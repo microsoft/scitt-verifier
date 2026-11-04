@@ -1,0 +1,18 @@
+{
+  "policyId": "corpus/amd-snp-device",
+  "policyVersion": "1",
+  "description": "Matches the committed amd-snp-device fixture. The hardware BOM is invented and its publisher is a throwaway corpus identity; a real policy pins the manufacturer or integrator it trusts to name devices.",
+  "assertions": {
+    "issuer": ["mst-test-scitt-verifier.confidential-ledger.azure.com"],
+    "statementIssuer": { "equals": "did:x509:0:sha256:zrAUFDLErWa1Rb8sm4NW4_g6dJTocI7PKxqczseV6-k::eku:2.999" },
+    "receiptCount": 1,
+    "requireKidBoundToKey": true
+  },
+  "adapters": {
+    "amd-snp-device": {
+      "profile": "spdx3-hbom",
+      "category": "packaged soc",
+      "minimumTcb": [{ "generation": "turin", "reportedTcb": "0x5100000004010101" }]
+    }
+  }
+}

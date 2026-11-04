@@ -119,11 +119,12 @@ resolve the tension by committing the original.
 | Path | Role |
 |---|---|
 | `crates/scitt-receipt` | Core: parsing, crypto, receipts, binding. Embeddable — no I/O, no clock, no verdicts, no dependency on the other crates. CI's `boundary` job enforces this by grep |
-| `crates/scitt-policy` | Statement assertions and typed adapter requirements in `src/adapters/{mod,acl,maa,image_reproduction}.rs`; no I/O |
+| `crates/scitt-policy` | Statement assertions and typed adapter requirements in `src/adapters/{mod,acl,maa,image_reproduction,amd_snp_device}.rs`; no I/O |
 | `crates/scitt-network` | Network acquisition of receipt keys and resource evidence (ledger node quotes, MAA `/certs`); no policy decisions |
 | `adapters/azure-confidential-ledger` | `scitt-adapter-azure-confidential-ledger`: pure appraisal of ACL/CCF node evidence; no I/O, no CLI verdicts. Renamed to `acl` inside `scitt-verifier`, because the published name is what a consumer types and `acl` alone means access-control list |
 | `adapters/azure-attestation` | `scitt-adapter-azure-attestation`: pure SNP authenticity and policy HOST_DATA appraisal of MAA evidence. Renamed to `maa` inside `scitt-verifier` |
 | `adapters/image-reproduction` | `scitt-adapter-image-reproduction`: compares a supplied rebuild against a statement-committed reproduction record. Renamed to `repro`; always built |
+| `adapters/amd-snp-device` | `scitt-adapter-amd-snp-device`: pure appraisal of a supplied SEV-SNP report, VCEK and AMD chain against the device a hardware BOM statement names; collects nothing, runs no command. Renamed to `snpdev` inside `scitt-verifier` |
 | `crates/scitt-verifier` | CLI arguments, reporting, exit codes; `src/adapters/` owns dispatch, adapter orchestration, bundle loading and acquisition orchestration |
 | `crates/scitt-wasm` | Browser bindings and the demo page |
 | `corpus/` | Real fixtures and example policies |
@@ -131,13 +132,13 @@ resolve the tension by committing the original.
 
 Policy JSON separates `assertions` from per-adapter sections under
 `adapters.<name>` (`azure-confidential-ledger`, `azure-attestation`,
-`image-reproduction`), each with its own typed, `deny_unknown_fields` schema.
+`image-reproduction`, `amd-snp-device`), each with its own typed, `deny_unknown_fields` schema.
 The old top-level `ledger`/`trust` and
 `assertions.bindLedgerPolicy` shape is not supported.
 `Policy::evaluate` must not pass when required adapters cannot run; the CLI
 evaluates statement assertions and then adapters explicitly. SNP/UVM appraisal
-currently lives inside each adapter that needs it (`azure-confidential-ledger`
-and `azure-attestation`); there is no generic attestation crate or plugin
+currently lives inside each adapter that needs it (`azure-confidential-ledger`,
+`azure-attestation` and `amd-snp-device`); there is no generic attestation crate or plugin
 framework yet. Sharing that code is a reasonable future refactor, but do it
 as its own reviewed change, not as a side effect of a feature.
 
@@ -167,9 +168,9 @@ cargo clippy --all-targets      # not --all-features: crypto backends are exclus
 cargo test --workspace
 ```
 
-The `azure-confidential-ledger` and `azure-attestation` adapters are behind
-features and are not built by the commands above. Lint and test each, and
-the two together, as CI does:
+The `azure-confidential-ledger`, `azure-attestation` and `amd-snp-device`
+adapters are wired into the CLI behind features that the commands above do not
+enable. Lint and test each, and the combinations, as CI does:
 
 ```console
 cargo clippy -p scitt-adapter-azure-confidential-ledger --features azure-confidential-ledger --all-targets
@@ -177,6 +178,8 @@ cargo clippy -p scitt-verifier --features adapter-azure-confidential-ledger --al
 cargo clippy -p scitt-adapter-azure-attestation --features azure-attestation --all-targets
 cargo clippy -p scitt-verifier --features adapter-azure-attestation --all-targets
 cargo clippy -p scitt-verifier --features adapter-azure-attestation,adapter-azure-confidential-ledger --all-targets
+cargo clippy -p scitt-verifier --features adapter-amd-snp-device --all-targets
+cargo clippy -p scitt-verifier --features adapter-amd-snp-device,adapter-azure-attestation --all-targets
 ```
 
 Run `cargo test` with the same `-p`/`--features` pairs (CI only lints the

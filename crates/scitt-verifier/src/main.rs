@@ -44,11 +44,12 @@ fn main() -> ExitCode {
         Err(message) => {
             eprintln!("error: {message}\n");
             eprintln!(
-                "{}{}{}{}",
+                "{}{}{}{}{}",
                 cli::USAGE,
                 cli::REPRODUCTION_USAGE,
                 cli::ADAPTER_USAGE,
-                cli::MAA_USAGE
+                cli::MAA_USAGE,
+                cli::SNP_DEVICE_USAGE
             );
             return ExitCode::from(Verdict::UsageError.exit_code());
         }
@@ -57,11 +58,12 @@ fn main() -> ExitCode {
     match command {
         Command::Help => {
             println!(
-                "{}{}{}{}",
+                "{}{}{}{}{}",
                 cli::USAGE,
                 cli::REPRODUCTION_USAGE,
                 cli::ADAPTER_USAGE,
-                cli::MAA_USAGE
+                cli::MAA_USAGE,
+                cli::SNP_DEVICE_USAGE
             );
             ExitCode::SUCCESS
         }
@@ -240,6 +242,7 @@ fn progress_plan(args: &VerifyArgs) -> Vec<(progress::Stage, String)> {
             match args.adapter {
                 Some(cli::Adapter::ImageReproduction) => "Compare rebuild with reproduction record",
                 Some(cli::Adapter::AzureAttestation) => "Compare attested policy reports",
+                Some(cli::Adapter::AmdSnpDevice) => "Bind SNP report to the statement's device",
                 _ => "Appraise node evidence",
             }
             .into(),
@@ -2403,6 +2406,22 @@ fn gaps(
             "signature validity does not establish CA trust",
         )),
         (None, _) => {}
+    }
+
+    if args.adapter == Some(cli::Adapter::AmdSnpDevice) {
+        gaps.push(Gap::new(
+            "GuestMeasurementNotAppraised",
+            Category::Binding,
+            "The SNP report's launch measurement and the guest's UVM endorsement were not \
+             compared with any endorsed value.",
+            "a pass identifies the chip that answered, not the software that asked it to",
+        ));
+        gaps.push(Gap::new(
+            "AmdCertificateRevocationNotChecked",
+            Category::Binding,
+            "AMD's certificate revocation list was not consulted for the VCEK or ASK.",
+            "a revoked AMD key would still verify here",
+        ));
     }
 
     gaps.push(Gap::new(

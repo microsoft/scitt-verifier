@@ -97,6 +97,7 @@ pub fn compact(
         Verdict::ArtifactTransparent => "Supplied artifact matches the verified statement; relying-party policy satisfied.",
         Verdict::ResourceTransparent if args.adapter == Some(crate::cli::Adapter::ImageReproduction) => "Verified statement's reproduction record matches the supplied rebuild; relying-party policy satisfied.",
         Verdict::ResourceTransparent if args.adapter == Some(crate::cli::Adapter::AzureAttestation) => "AMD-authenticated SNP report HOST_DATA matches SHA-256 of the accepted statement execution policy.",
+        Verdict::ResourceTransparent if args.adapter == Some(crate::cli::Adapter::AmdSnpDevice) => "Verified statement's device produced the supplied fresh SNP report; relying-party policy satisfied.",
         Verdict::ResourceTransparent => "Verified statement and assessed node evidence satisfy the scoped resource requirements.",
         Verdict::CannotEvaluate => "This is not a pass. The tool could not answer the requested question.",
         _ => "The requested acceptance requirements were not met.",
@@ -126,6 +127,11 @@ pub fn compact(
                 "Saved bundle metadata is unsigned and collector-asserted."
             )?;
         }
+    } else if args.adapter == Some(crate::cli::Adapter::AmdSnpDevice) {
+        writeln!(
+            out,
+            "Scope: Identifies the chip that answered; the guest's software is not appraised, and the BOM serial is taken to be the chip's hardware ID."
+        )?;
     } else if args.adapter.is_some() {
         let scope = if a.adapter_findings.is_empty() {
             "No node evidence was appraised."
