@@ -470,6 +470,57 @@ def reproduction_statement(record: bytes) -> bytes:
     )
 
 
+# The statement payload the amd-snp-device adapter reads (profile
+# "spdx3-hbom"): an SPDX 3 hardware BOM naming one packaged SoC by serial.
+SNP_DEVICE_DIR = "amd-snp-device"
+SNP_REPORT = (
+    Path(__file__).resolve().parents[2]
+    / "adapters/amd-snp-device/tests/fixtures/turin_attestation_report.bin"
+)
+
+
+def hbom_statement() -> bytes:
+    """An invented hardware BOM naming the chip that signed the public report.
+
+    The SNP evidence is TEE-Attestation-Verification's public Turin fixture.
+    The serial is that report's CHIP_ID, read from the report so that this
+    script names no device of its own; Turin uses the first eight bytes. Every
+    other value is a placeholder, and the issuer is a throwaway corpus
+    identity, so the statement vouches for nothing a real BOM would.
+    """
+    serial = SNP_REPORT.read_bytes()[0x1A0:0x1A8].hex().upper()
+    bom = {
+        "@context": "https://spdx.org/rdf/3.0.1/spdx-context.jsonld",
+        "@graph": [
+            {"type": "CreationInfo", "@id": "_:creation", "specVersion": "3.0.1"},
+            {
+                "type": "hardware_PhysicalHardware",
+                "spdxId": "urn:example.invalid:part",
+                "creationInfo": "_:creation",
+                "name": "Example packaged SoC",
+                "hardware_partNumber": "EXAMPLE-PART-1",
+                "hardware_hardwareVersion": "A0",
+                "hardware_serialNumber": serial,
+                "hardware_category": [{"type": "DefinedType", "typeFromSource": "packaged soc"}],
+            },
+        ],
+    }
+    leaf_key, chain = envelope_identity()
+    signer = crypto.Signer(
+        private_key=key_pem(leaf_key),
+        issuer=did_x509(chain[1], SUPPLIER_EKU),
+        algorithm="ES256",
+        x5c=[pem(c) for c in chain],
+    )
+    return crypto.sign_statement(
+        signer,
+        json.dumps(bom, indent=2).encode("ascii"),
+        content_type="application/spdx+json",
+        feed="example-hbom",
+        cwt=True,
+    )
+
+
 def receipts_of(statement: bytes) -> list[bytes]:
     tag = cbor2.loads(statement)
     return list(tag.value[1][RECEIPTS])
@@ -594,7 +645,7 @@ def main() -> int:
     ap.add_argument("--out", required=True, type=Path, help="fixture directory")
     ap.add_argument(
         "--only",
-        choices=["image-reproduction"],
+        choices=["image-reproduction", "amd-snp-device"],
         help="register only this fixture, leaving the rest of the corpus untouched",
     )
     args = ap.parse_args()
@@ -612,19 +663,25 @@ def main() -> int:
 
     print(f"registering on {args.ledger}", file=sys.stderr)
 
-    # The reproduction statement verifies against the corpus key set, so it
-    # can be added without regenerating everything else only while the
-    # service still signs with that key. Refused otherwise, rather than
+    # The reproduction and HBOM statements verify against the corpus key set,
+    # so either can be added without regenerating everything else only while
+    # the service still signs with that key. Refused otherwise, rather than
     # committing a statement no committed key set can verify.
     record = (out / REPRODUCTION_DIR / "published-reproduce.json").read_bytes()
-    if args.only == "image-reproduction":
+    if args.only:
         keys = client.get("/.well-known/scitt-keys").read()
         if keys != (out / KEY_SET_NAME).read_bytes():
             print("the service's key set changed; regenerate the whole corpus", file=sys.stderr)
             return 1
-        emit(f"{REPRODUCTION_DIR}/statement.cose", register(client, reproduction_statement(record)))
-        print("\nissuer for corpus/policies/image-reproduction.json:", file=sys.stderr)
-        statement = cbor2.loads((out / REPRODUCTION_DIR / "statement.cose").read_bytes())
+        if args.only == "image-reproduction":
+            name, policy = f"{REPRODUCTION_DIR}/statement.cose", "image-reproduction.json"
+            emit(name, register(client, reproduction_statement(record)))
+        else:
+            (out / SNP_DEVICE_DIR).mkdir(exist_ok=True)
+            name, policy = f"{SNP_DEVICE_DIR}/statement.cose", "amd-snp-device.json"
+            emit(name, register(client, hbom_statement()))
+        print(f"\nissuer for corpus/policies/{policy}:", file=sys.stderr)
+        statement = cbor2.loads((out / name).read_bytes())
         print(f"  {cbor2.loads(statement.value[0])[CWT][CWT_ISS]}", file=sys.stderr)
         return 0
 
@@ -638,6 +695,8 @@ def main() -> int:
     emit("cbor-header.cose", register(client, cbor_header_statement()))
     emit("nested-sign1.cose", register(client, nested_sign1_statement()))
     emit(f"{REPRODUCTION_DIR}/statement.cose", register(client, reproduction_statement(record)))
+    (out / SNP_DEVICE_DIR).mkdir(exist_ok=True)
+    emit(f"{SNP_DEVICE_DIR}/statement.cose", register(client, hbom_statement()))
 
     keys = client.get("/.well-known/scitt-keys").read()
     emit(KEY_SET_NAME, keys)

@@ -1,0 +1,34 @@
+[package]
+name = "scitt-adapter-amd-snp-device"
+description = "Appraisal of an AMD SEV-SNP report against the device a hardware BOM statement describes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# Like the other adapters, this crate appraises bytes someone else gathered and
+# hands back typed findings. It performs no file I/O, opens no sockets and
+# reads no clock — the CI `boundary` job enforces all three.
+#
+# It must never depend on `scitt-verifier`, so that it has no way to construct
+# a verdict, nor on `scitt-network`, which is where networking lives.
+[dependencies]
+# The strict JSON parser that refuses duplicate keys. A BOM with two serial
+# numbers for one part has two answers, and this crate must read the same one
+# the policy engine reads.
+scitt-policy = { path = "../../crates/scitt-policy", default-features = false }
+# SEV-SNP report verification against the pinned AMD roots. Not optional: the
+# CLI decides whether this crate is built at all, and a build of this crate
+# that could not verify a report would have nothing to appraise.
+tav-caci = { workspace = true }
+# Reads the VCEK's hardware-ID extension. The attestation library compares it
+# with the report only when present; this crate requires it, so it reads it.
+tav-crypto = { workspace = true }
+serde_json = "1"
+
+[features]
+default = ["crypto_pure_rust"]
+crypto_pure_rust = ["scitt-policy/crypto_pure_rust", "tav-caci/crypto_pure_rust", "tav-crypto/crypto_pure_rust"]
+crypto_openssl = ["scitt-policy/crypto_openssl", "tav-caci/crypto_openssl", "tav-crypto/crypto_openssl"]
