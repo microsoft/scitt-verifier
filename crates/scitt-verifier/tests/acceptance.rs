@@ -2611,6 +2611,51 @@ fn external_chain_https_source_is_unevaluable_offline_even_with_a_correct_pin() 
 }
 
 #[test]
+fn external_chain_offline_https_source_preserves_registration_time_failures() {
+    for (fixture, required, code, outcome, valid) in [
+        ("valid", true, 3, "cannotEvaluate", Some(true)),
+        ("valid", false, 2, "fail", Some(true)),
+        ("late-registration", true, 2, "fail", Some(false)),
+        ("late-registration", false, 3, "cannotEvaluate", Some(false)),
+        ("no-registration-time", true, 3, "cannotEvaluate", None),
+        ("no-registration-time", false, 3, "cannotEvaluate", None),
+    ] {
+        let mut rule = external_chain_rule();
+        rule["requireChainToRootFromHttps"] = "https://supplier.example/trust/roots.pem".into();
+        rule["certificateValidAtSigningTime"] = required.into();
+        let (r, record, facts) = verify_external_chain(
+            &format!("offline-https-time-{fixture}-{required}"),
+            fixture,
+            &[rule],
+        );
+        assert_eq!(r.code, code, "{}", r.stdout);
+        assert_eq!(record["signedStatement"]["signatureValid"], true);
+        assert_eq!(record["receipts"]["entries"][0]["rootSignatureValid"], true);
+        let assertion = external_assertion(&record, 0);
+        assert_eq!(assertion["outcome"], outcome);
+        let evidence = &assertion["externalSignature"];
+        assert_eq!(evidence["signatureVerified"], true);
+        assert_eq!(evidence["rootPinMatched"], true);
+        assert!(evidence["rootSourceMatched"].is_null());
+        assert!(evidence["rootSource"]["failure"]
+            .as_str()
+            .unwrap()
+            .contains("--online"));
+        assert_eq!(
+            evidence["certificatesValidAtRegistration"],
+            serde_json::json!(valid)
+        );
+        assert_eq!(record["relyingPartyPolicy"]["satisfied"], false);
+        assert!(record.get("acquisition").is_none());
+        assert_eq!(
+            record["signedStatement"]["externalSignatures"][0],
+            *evidence
+        );
+        assert_eq!(facts["signedStatement"]["externalSignatures"][0], *evidence);
+    }
+}
+
+#[test]
 fn external_chain_invalid_root_url_is_refused_before_any_acquisition() {
     for (name, url) in [
         ("plain-http", "http://supplier.example/roots.pem"),

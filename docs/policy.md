@@ -1148,9 +1148,11 @@ Downloading a root from a URL advertised only by the statement remains circular.
 publishing a different root cannot override the pin, and a matching pin cannot
 bypass failed acquisition. A valid path excluded by the published bundle
 **fails**. Offline, unavailable, malformed or unauthenticated acquisition is
-`cannotEvaluate`, never a pass. A demonstrably invalid signature, required path
-or configured pin still fails independently. Unsupported path checks remain
-`cannotEvaluate`.
+`cannotEvaluate`, never a pass. An invalid signature, required path, configured
+pin or registration-time requirement still fails independently: known failures
+take precedence over unavailable evidence. A root excluded by the publication
+still fails when no verified registration time is available. Unsupported path
+checks remain `cannotEvaluate`.
 
 URL syntax is checked before any CLI acquisition. URLs must be ASCII HTTPS
 URLs, at most 2048 bytes, with a lowercase DNS hostname and optional valid port.

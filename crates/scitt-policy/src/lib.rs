@@ -1258,30 +1258,35 @@ impl ExternalSignature {
                 ));
             }
         }
+        // Missing authorization must not hide a known registration-time failure.
+        let mut unavailable = None;
         if let Some(source) = &evidence.root_source {
-            let matches = source
-                .authorizes(&root)
-                .map_err(|why| (Outcome::CannotEvaluate, why))?;
-            evidence.root_source_matched = Some(matches);
-            if !matches {
-                return Err((
-                    Outcome::Fail,
-                    format!(
-                        "the validated external root {root} is not authorized by {}",
-                        source.url
-                    ),
-                ));
+            match source.authorizes(&root) {
+                Ok(matches) => {
+                    evidence.root_source_matched = Some(matches);
+                    if !matches {
+                        return Err((
+                            Outcome::Fail,
+                            format!(
+                                "the validated external root {root} is not authorized by {}",
+                                source.url
+                            ),
+                        ));
+                    }
+                }
+                Err(why) => unavailable = Some(why),
             }
         }
         if let Some(required) = self.certificate_valid_at_signing_time {
             let valid = scitt_receipt::valid_at_registrations(&details, &facts.receipts);
             evidence.certificates_valid_at_registration = valid;
             match valid {
-                None => return Err((
-                    Outcome::CannotEvaluate,
-                    "no fully verified receipt carried an iat to check the external path against"
-                        .into(),
-                )),
+                None => {
+                    unavailable.get_or_insert_with(|| {
+                        "no fully verified receipt carried an iat to check the external path against"
+                            .into()
+                    });
+                }
                 Some(valid) if valid != required => {
                     return Err((
                         Outcome::Fail,
@@ -1293,6 +1298,9 @@ impl ExternalSignature {
                 }
                 Some(_) => {}
             }
+        }
+        if let Some(why) = unavailable {
+            return Err((Outcome::CannotEvaluate, why));
         }
         Ok(format!("; external chain validated to root {root}"))
     }

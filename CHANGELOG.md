@@ -42,10 +42,12 @@ occur in the bundle. A configured `requireChainToRootSha256` remains an
 additional constraint. Existing complete-chain and supported-algorithm
 requirements are unchanged; no AIA or statement-supplied URL is followed.
 
-Offline or failed acquisition yields `cannotEvaluate`, never a fallback to an
-embedded root or a matching pin. A published bundle that excludes the validated
-root fails policy. Requests are deduplicated, bounded, and share the receipt-key
-acquisition deadline; redirects, credentials, queries and fragments are refused.
+Offline or failed acquisition is unevaluable, never a fallback to an embedded
+root or a matching pin. It does not mask known policy failures, including a
+failed external certificate registration-time requirement. A published bundle
+that excludes the validated root fails policy. Requests are deduplicated,
+bounded, and share the receipt-key acquisition deadline; redirects, credentials,
+queries and fragments are refused.
 JSON and `--facts` record source provenance and root authorization per assertion;
 `--save-trust` keeps the exact PEM/DER bytes for audit, not implicit offline trust.
 The endpoint controls current root authorization. No signed-metadata freshness,
