@@ -141,6 +141,80 @@ fn missing_failed_empty_duplicate_or_wrongly_scoped_acquisition_never_passes() {
 }
 
 #[test]
+fn unavailable_acquisition_preserves_validity_evidence_and_failure_precedence() {
+    let late =
+        include_bytes!("../../scitt-verifier/tests/fixtures/external-chain/late-registration.cose");
+    let untimed = include_bytes!(
+        "../../scitt-verifier/tests/fixtures/external-chain/no-registration-time.cose"
+    );
+    for (bytes, required, validity, expected) in [
+        (VALID, true, Some(true), Outcome::CannotEvaluate),
+        (VALID, false, Some(true), Outcome::Fail),
+        (late.as_slice(), true, Some(false), Outcome::Fail),
+        (late.as_slice(), false, Some(false), Outcome::CannotEvaluate),
+        (untimed.as_slice(), true, None, Outcome::CannotEvaluate),
+        (untimed.as_slice(), false, None, Outcome::CannotEvaluate),
+    ] {
+        let mut policy = policy("payload", Some(&root()));
+        policy.assertions.external_signatures.as_mut().unwrap()[0]
+            .certificate_valid_at_signing_time = Some(required);
+        for sources in [
+            vec![],
+            vec![ExternalRootSource {
+                url: URL.into(),
+                outcome: Err("TLS authentication failed".into()),
+            }],
+        ] {
+            let decision =
+                policy.evaluate_statement_with_external_roots(&facts(bytes), 0, &sources);
+            assert_eq!(decision.results[0].outcome, expected, "{decision:?}");
+            assert_eq!(decision.failed(), expected == Outcome::Fail);
+            assert!(!decision.satisfied());
+            let evidence = decision.results[0].external_signature.as_ref().unwrap();
+            assert_eq!(evidence.signature_verified, Some(true));
+            assert_eq!(
+                evidence.certificate_chain.as_ref().unwrap().root_sha256,
+                root()
+            );
+            assert_eq!(evidence.root_pin_matched, Some(true));
+            assert_eq!(evidence.root_source_matched, None);
+            assert!(evidence.root_source.as_ref().unwrap().failure.is_some());
+            assert_eq!(evidence.certificates_valid_at_registration, validity);
+        }
+    }
+}
+
+#[test]
+fn an_excluded_root_still_fails_when_registration_time_is_unavailable() {
+    let untimed = include_bytes!(
+        "../../scitt-verifier/tests/fixtures/external-chain/no-registration-time.cose"
+    );
+    for required in [true, false] {
+        let mut policy = policy("payload", Some(&root()));
+        policy.assertions.external_signatures.as_mut().unwrap()[0]
+            .certificate_valid_at_signing_time = Some(required);
+        let decision = policy.evaluate_statement_with_external_roots(
+            &facts(untimed),
+            0,
+            &[source(vec!["00".repeat(32)])],
+        );
+        assert_eq!(decision.results[0].outcome, Outcome::Fail, "{decision:?}");
+        assert!(decision.failed());
+        assert!(!decision.unevaluable());
+        let evidence = decision.results[0].external_signature.as_ref().unwrap();
+        assert_eq!(evidence.signature_verified, Some(true));
+        assert_eq!(
+            evidence.certificate_chain.as_ref().unwrap().root_sha256,
+            root()
+        );
+        assert_eq!(evidence.root_pin_matched, Some(true));
+        assert_eq!(evidence.root_source_matched, Some(false));
+        assert!(evidence.root_source.as_ref().unwrap().failure.is_none());
+        assert_eq!(evidence.certificates_valid_at_registration, None);
+    }
+}
+
+#[test]
 fn supplied_roots_do_not_hide_bad_signatures_damaged_paths_or_unsupported_checks() {
     for (bytes, expected) in [
         (
