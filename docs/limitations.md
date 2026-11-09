@@ -61,7 +61,10 @@ reported at runtime.
 build number authenticated by a statement's receipt would check consistency,
 not which code is executing; this adapter does not make that comparison.
 Saved target and version metadata lose even live
-HTTPS source authentication. See [MAA](adapters.md#microsoft-azure-attestation-maa).
+HTTPS source authentication. A `resource-transparent` result has no computed
+expiration. Reacquire MAA evidence and reverify when the service version
+changes or evidence certificates expire or rotate; this verifier does not
+detect those changes. See [MAA](adapters.md#microsoft-azure-attestation-maa).
 
 ### Certificate chain validation without `--trusted-roots`
 
