@@ -131,7 +131,7 @@ pub struct StatementFacts {
     /// this is the strongest material a policy can read.
     ///
     /// `None` only when no statement was parsed.
-    pub protected: Option<CborValue>,
+    pub protected: Option<CborValue<'static>>,
     /// Every receipt found in the statement, verified or not.
     ///
     /// Receipts arrive in the statement's *unprotected* header bucket, which

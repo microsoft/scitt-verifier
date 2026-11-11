@@ -47,9 +47,8 @@ tav-crypto = { workspace = true }
 # build fine on its own and then panic in the crypto build script the moment
 # anything enabled the adapter, which is a confusing way to learn that a
 # backend is mandatory.
-default = ["crypto_pure_rust"]
+default = ["crypto_compliant"]
 # Turns on real appraisal. Named for the adapter rather than for the library
 # behind it, so the flag a consumer sets describes what they get.
 azure-confidential-ledger = ["dep:tav-caci"]
-crypto_pure_rust = ["scitt-receipt/crypto_pure_rust", "tav-caci?/crypto_pure_rust", "tav-crypto/crypto_pure_rust"]
-crypto_openssl = ["scitt-receipt/crypto_openssl", "tav-caci?/crypto_openssl", "tav-crypto/crypto_openssl"]
+crypto_compliant = ["scitt-receipt/crypto_compliant", "tav-caci?/crypto_openssl", "tav-caci?/crypto_webcrypto", "tav-caci?/crypto_windows", "tav-crypto/crypto_openssl", "tav-crypto/crypto_webcrypto", "tav-crypto/crypto_windows"]

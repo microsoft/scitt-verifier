@@ -1374,10 +1374,10 @@ impl PayloadAssertion {
 ///
 /// `Ok(None)` means the path led nowhere: the header is absent, which is a
 /// different answer from "present and wrong" and must not read as either.
-fn resolve_path<'a>(
-    root: &'a CborValue,
+fn resolve_path<'a, 'b>(
+    root: &'a CborValue<'b>,
     path: &[PathSegment],
-) -> Result<Option<&'a CborValue>, String> {
+) -> Result<Option<&'a CborValue<'b>>, String> {
     let mut node = root;
 
     for (depth, segment) in path.iter().enumerate() {
@@ -2538,7 +2538,7 @@ fn payload_document(facts: &StatementFacts) -> Result<serde_json::Value, Payload
     }
 
     let content_type = match cbor::opt_int_key(protected, labels::CONTENT_TYPE) {
-        Some(CborValue::TextString(s)) => s.clone(),
+        Some(CborValue::TextString(s)) => s.to_string(),
         Some(CborValue::Int(i)) => format!("coap-content-format({i})"),
         _ => {
             return Err(PayloadProblem::NotJson(
@@ -3203,19 +3203,19 @@ mod tests {
         Policy::from_json(json.as_bytes()).expect("policy should parse")
     }
 
-    fn facts_with_protected(protected: CborValue) -> StatementFacts {
+    fn facts_with_protected(protected: CborValue<'static>) -> StatementFacts {
         StatementFacts {
             protected: Some(protected),
             ..Default::default()
         }
     }
 
-    fn map(entries: Vec<(CborValue, CborValue)>) -> CborValue {
+    fn map(entries: Vec<(CborValue<'static>, CborValue<'static>)>) -> CborValue<'static> {
         CborValue::Map(entries)
     }
 
-    fn text(s: &str) -> CborValue {
-        CborValue::TextString(s.into())
+    fn text(s: &str) -> CborValue<'static> {
+        CborValue::text(s.to_string())
     }
 
     fn chain_policy(assertion: &str) -> Policy {
@@ -3610,7 +3610,7 @@ mod tests {
         let long = "F".repeat(684);
         let facts = facts_with_protected(map(vec![(
             CborValue::TextString("external-signature".into()),
-            CborValue::TextString(long.clone()),
+            CborValue::text(long.clone()),
         )]));
         let prefix = "F".repeat(70);
         let policy = header_policy(&format!(
@@ -3643,12 +3643,12 @@ mod tests {
         a.push(0x01);
         b.push(0x02);
         assert_eq!(
-            scitt_receipt::render_scalar(&CborValue::ByteString(a.clone())),
-            scitt_receipt::render_scalar(&CborValue::ByteString(b)),
+            scitt_receipt::render_scalar(&CborValue::bytes(a.clone())),
+            scitt_receipt::render_scalar(&CborValue::bytes(b)),
             "precondition: the renderings collide"
         );
 
-        let facts = facts_with_protected(map(vec![(CborValue::Int(4), CborValue::ByteString(a))]));
+        let facts = facts_with_protected(map(vec![(CborValue::Int(4), CborValue::bytes(a))]));
         let rendered = "17 bytes: abababababababababababababababab…";
         let policy = header_policy(&format!(
             r#"{{"path":[4],"text":{{"equals":"{rendered}"}}}}"#

@@ -305,7 +305,7 @@ fn attempt(
             .map_err(|e| Error::Crypto(format!("could not inspect leaf EKU: {e}")))?
             == Some(true);
     let verified = if critical_leaf_eku {
-        verify_path_with_leaf_eku(&path_certs, time)
+        verify_path_with_leaf_eku(&path_certs, &path_der, time)
     } else {
         Backend::verify_chain(anchor, &intermediate_refs, &parsed[0], Some(time))
     };
@@ -351,10 +351,15 @@ fn check_leaf_eku(leaf: &[u8], required: &[String]) -> std::result::Result<Vec<S
 /// path and only for a critical leaf EKU that `check_leaf_eku` will process.
 /// Never strip or rewrite the signed extension to get past TAV's policy.
 /// All other paths still use TAV's validator directly.
-/// Re-audit parity when moving the pin/backend: this is the last pure-Rust
-/// TAV revision, and OpenSSL's normal validator could diverge from this copy.
+/// Re-audit parity when moving the pin/backend: OpenSSL's native validator
+/// accepts a critical EKU itself, while CNG and WebCrypto run TAV's
+/// `x509_policy`, which refuses it. This copy is what keeps all three alike.
 /// Upstream the purpose hook or migrate both paths together.
-fn verify_path_with_leaf_eku(path: &[&Cert], time: std::time::Duration) -> tav_crypto::Result<()> {
+fn verify_path_with_leaf_eku(
+    path: &[&Cert],
+    path_der: &[&[u8]],
+    time: std::time::Duration,
+) -> tav_crypto::Result<()> {
     let Some(anchor) = path.first() else {
         return Err("certificate path must not be empty".into());
     };
@@ -367,8 +372,8 @@ fn verify_path_with_leaf_eku(path: &[&Cert], time: std::time::Duration) -> tav_c
         }
     }
     let mut max_path_length = path.len();
-    for edge in path.windows(2) {
-        let (issuer, subject) = (edge[0], edge[1]);
+    for (edge, edge_der) in path.windows(2).zip(path_der.windows(2)) {
+        let (issuer, subject, subject_der) = (edge[0], edge[1], edge_der[1]);
         if !Backend::issuer_name_matches_subject(subject, issuer)? {
             return Err("issuer name does not match issuing certificate subject".into());
         }
@@ -392,16 +397,13 @@ fn verify_path_with_leaf_eku(path: &[&Cert], time: std::time::Duration) -> tav_c
             max_path_length = max_path_length.min(limit);
         }
 
-        let algorithm = subject.signature_algorithm()?;
-        let key = <Backend as CryptoBackend>::Key::from_spki_der(
-            &Backend::get_public_key(issuer)?,
-            algorithm,
-        )?;
-        let signature = <Backend as CryptoBackend>::Signature::from_bytes(
-            subject.signature_bytes(),
-            algorithm,
-        )?;
-        Backend::verify_signature(&key, &signature, &subject.tbs_certificate_der()?)?;
+        let issuer_spki = Backend::get_public_key(issuer)?;
+        let algorithm = der::certificate_signature_key_algorithm(subject_der, &issuer_spki)?
+            .map_err(|reason| format!("unsupported certificate signature: {reason}"))?;
+        let (tbs, signature) = der::tbs_and_signature(subject_der)?;
+        let key = <Backend as CryptoBackend>::Key::from_spki_der(&issuer_spki, algorithm)?;
+        let signature = <Backend as CryptoBackend>::Signature::from_bytes(signature, algorithm)?;
+        Backend::verify_signature(&key, &signature, tbs)?;
     }
     Ok(())
 }
@@ -413,7 +415,7 @@ fn parse_all(chain: &[Vec<u8>]) -> Result<Vec<Cert>> {
         .iter()
         .enumerate()
         .map(|(i, der_bytes)| {
-            <tav_crypto::Crypto as CertificateBackend>::from_der(der_bytes).map_err(|e| {
+            crate::der::parse_certificate(der_bytes).map_err(|e| {
                 Error::TrustMaterial(format!(
                     "certificate at chain index {i} is not valid DER: {e}"
                 ))
@@ -427,7 +429,7 @@ fn parse_roots(roots: &[Vec<u8>]) -> Result<Vec<Cert>> {
         .iter()
         .enumerate()
         .map(|(i, der_bytes)| {
-            <tav_crypto::Crypto as CertificateBackend>::from_der(der_bytes).map_err(|e| {
+            crate::der::parse_certificate(der_bytes).map_err(|e| {
                 Error::TrustMaterial(format!("trusted root {i} is not a valid certificate: {e}"))
             })
         })
@@ -537,20 +539,15 @@ fn capability_gap(
     // never parsed and cannot be a reason this path is uncheckable. Including
     // it would refuse an entirely supported path because the operator's root
     // happens to be self-signed with something older.
-    for (cert, der_bytes) in path.iter().zip(path_der).skip(1) {
-        // Asked of the backend itself rather than compared against a list of
-        // OIDs kept here. An allowlist agrees with the backend on the
-        // algorithm and not on its parameters: RSA-PSS carries its digest,
-        // mask function and salt length inside those parameters, and the
-        // pinned backend refuses salt lengths it did not expect. That refusal
-        // is an inability to check, so it has to be recognised here rather
-        // than reaching the caller disguised as a chain that failed to verify.
-        if let Err(e) = cert.signature_algorithm() {
+    for (index, der_bytes) in path_der.iter().enumerate().skip(1) {
+        let issuer_spki = Backend::get_public_key(path[index - 1])
+            .map_err(|e| Error::Crypto(format!("could not read issuer public key: {e}")))?;
+        if let Err(reason) = der::certificate_signature_key_algorithm(der_bytes, &issuer_spki)? {
             let oid = der::parse_signature_algorithm_oid(der_bytes)?;
             return Ok(Some(format!(
                 "certificate '{}' is signed with algorithm {oid}, which this build cannot verify \
-                 ({e}); the chain was not validated either way",
-                <tav_crypto::Crypto as CertificateBackend>::subject_name(cert)
+                 ({reason}); the chain was not validated either way",
+                <tav_crypto::Crypto as CertificateBackend>::subject_name(path[index])
             )));
         }
     }
@@ -677,7 +674,7 @@ pub fn parse_pem_certificates(pem: &str) -> Result<Vec<Vec<u8>>> {
             // caller can still treat it as a broken invocation. Deferring it
             // leaves a run that was handed roots reporting only "chain not
             // validated" — the weak answer, under the strong flag.
-            <tav_crypto::Crypto as CertificateBackend>::from_der(&der_bytes).map_err(|e| {
+            crate::der::parse_certificate(&der_bytes).map_err(|e| {
                 Error::TrustMaterial(format!(
                     "a CERTIFICATE block did not decode to a valid certificate: {e}"
                 ))

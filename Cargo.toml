@@ -29,8 +29,8 @@ authors = ["Microsoft Corporation"]
 #
 # These are not on crates.io — they depend transitively on EverParse's `cborrs`
 # via git, which crates.io forbids. See docs/distribution.md.
-tav-cose = { package = "tee-attestation-verification-cose", git = "https://github.com/microsoft/TEE-Attestation-Verification.git", rev = "a52c499f64aeb5014c94c1faf5ac33c38a195280", default-features = false }
-tav-crypto = { package = "tee-attestation-verification-crypto", git = "https://github.com/microsoft/TEE-Attestation-Verification.git", rev = "a52c499f64aeb5014c94c1faf5ac33c38a195280", default-features = false }
+tav-cose = { package = "tee-attestation-verification-cose", git = "https://github.com/microsoft/TEE-Attestation-Verification.git", rev = "c2562cb6a2995c18d088b92ab39801e6b444bbf0", default-features = false }
+tav-crypto = { package = "tee-attestation-verification-crypto", git = "https://github.com/microsoft/TEE-Attestation-Verification.git", rev = "c2562cb6a2995c18d088b92ab39801e6b444bbf0", default-features = false }
 # SEV-SNP report verification for the optional adapters, plus UVM endorsement
 # verification for azure-confidential-ledger. Built only when one of their
 # features is on.
@@ -43,7 +43,7 @@ tav-crypto = { package = "tee-attestation-verification-crypto", git = "https://g
 # has since dropped it in favour of openssl/webcrypto/windows backends, so
 # advancing the pin means taking on a C toolchain — a cost to weigh
 # deliberately rather than absorb during a routine bump.
-tav-caci = { package = "tee-attestation-verification-caci", git = "https://github.com/microsoft/TEE-Attestation-Verification.git", rev = "a52c499f64aeb5014c94c1faf5ac33c38a195280", default-features = false }
+tav-caci = { package = "tee-attestation-verification-caci", git = "https://github.com/microsoft/TEE-Attestation-Verification.git", rev = "c2562cb6a2995c18d088b92ab39801e6b444bbf0", default-features = false }
 sha2 = { version = "0.10", default-features = false }
 
 # Size budget: the release binary is a deployment gate that ships in CI images.

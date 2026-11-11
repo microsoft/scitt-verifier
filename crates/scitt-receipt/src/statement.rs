@@ -19,15 +19,16 @@ pub struct Sign1 {
     /// Never re-encoded: the signature is over these bytes, so a canonicalising
     /// round-trip here would be a correctness bug even if it usually round-trips.
     pub protected_raw: Vec<u8>,
-    pub protected: CborValue,
-    pub unprotected: CborValue,
+    pub protected: CborValue<'static>,
+    pub unprotected: CborValue<'static>,
     pub payload: Option<Vec<u8>>,
     pub signature: Vec<u8>,
 }
 
 impl Sign1 {
     pub fn parse(bytes: &[u8]) -> Result<Self> {
-        let value = CborValue::from_bytes(bytes)
+        let value = CborValue::parse_nondet(bytes)
+            .map(CborValue::into_owned)
             .map_err(|e| Error::Malformed(format!("not valid CBOR: {e:?}")))?;
 
         let (was_tagged, inner) = match value {
@@ -58,12 +59,13 @@ impl Sign1 {
         let protected = if protected_raw.is_empty() {
             CborValue::Map(Vec::new())
         } else {
-            CborValue::from_bytes(&protected_raw)
+            CborValue::parse_nondet(&protected_raw)
+                .map(CborValue::into_owned)
                 .map_err(|e| Error::Malformed(format!("protected bucket is not CBOR: {e:?}")))?
         };
 
         let payload = match &items[2] {
-            CborValue::ByteString(b) => Some(b.clone()),
+            CborValue::ByteString(b) => Some(b.to_vec()),
             CborValue::Simple(_) => None, // detached
             other => {
                 return Err(Error::Malformed(format!(
@@ -128,7 +130,7 @@ impl Sign1 {
     /// Content-Format registry, which is why this returns text either way.
     pub fn content_type(&self) -> Option<String> {
         match cbor::opt_int_key(&self.protected, labels::CONTENT_TYPE)? {
-            CborValue::TextString(s) => Some(s.clone()),
+            CborValue::TextString(s) => Some(s.to_string()),
             CborValue::Int(i) => Some(format!("coap-content-format({i})")),
             _ => None,
         }
@@ -161,7 +163,7 @@ impl Sign1 {
     /// which in a hash envelope is a digest; label 259 describes the preimage.
     pub fn payload_preimage_content_type(&self) -> Option<String> {
         match cbor::opt_int_key(&self.protected, labels::PAYLOAD_PREIMAGE_CONTENT_TYPE)? {
-            CborValue::TextString(s) => Some(s.clone()),
+            CborValue::TextString(s) => Some(s.to_string()),
             CborValue::Int(i) => Some(format!("coap-content-format({i})")),
             _ => None,
         }
@@ -172,7 +174,7 @@ impl Sign1 {
     /// A hint for a human. This tool is offline and will never fetch it.
     pub fn payload_location(&self) -> Option<String> {
         match cbor::opt_int_key(&self.protected, labels::PAYLOAD_LOCATION)? {
-            CborValue::TextString(s) => Some(s.clone()),
+            CborValue::TextString(s) => Some(s.to_string()),
             _ => None,
         }
     }
@@ -194,7 +196,7 @@ impl Sign1 {
     /// Reported so that a reader can see headers this build does not interpret.
     /// A field nobody parses is exactly the field an attacker hopes nobody
     /// looks at.
-    pub fn header_labels(bucket: &CborValue) -> Vec<String> {
+    pub fn header_labels(bucket: &CborValue<'_>) -> Vec<String> {
         match bucket {
             CborValue::Map(entries) => entries
                 .iter()
@@ -203,7 +205,7 @@ impl Sign1 {
                         Some(name) => format!("{i} ({name})"),
                         None => format!("{i} (not interpreted)"),
                     },
-                    CborValue::TextString(s) => s.clone(),
+                    CborValue::TextString(s) => s.to_string(),
                     other => cbor::type_name(other).to_string(),
                 })
                 .collect(),
@@ -218,7 +220,7 @@ impl Sign1 {
         };
         match value {
             // A single certificate may be encoded bare rather than in an array.
-            CborValue::ByteString(b) => vec![b.clone()],
+            CborValue::ByteString(b) => vec![b.to_vec()],
             CborValue::Array(items) => items
                 .iter()
                 .filter_map(|i| cbor::as_bytes(i).ok().map(<[u8]>::to_vec))
@@ -242,7 +244,7 @@ impl Sign1 {
                 .iter()
                 .filter_map(|i| cbor::as_bytes(i).ok().map(<[u8]>::to_vec))
                 .collect(),
-            CborValue::ByteString(b) => vec![b.clone()],
+            CborValue::ByteString(b) => vec![b.to_vec()],
             _ => Vec::new(),
         }
     }
@@ -255,13 +257,13 @@ impl Sign1 {
     /// the digest changes the moment a receipt is attached.
     pub fn signed_statement_bytes(&self) -> Result<Vec<u8>> {
         let inner = CborValue::Array(vec![
-            CborValue::ByteString(self.protected_raw.clone()),
+            CborValue::bytes(self.protected_raw.as_slice()),
             CborValue::Map(Vec::new()),
             match &self.payload {
-                Some(p) => CborValue::ByteString(p.clone()),
+                Some(p) => CborValue::bytes(p.as_slice()),
                 None => CborValue::Simple(22), // null
             },
-            CborValue::ByteString(self.signature.clone()),
+            CborValue::bytes(self.signature.as_slice()),
         ]);
 
         let value = if self.was_tagged {
@@ -274,7 +276,7 @@ impl Sign1 {
         };
 
         value
-            .to_bytes()
+            .to_bytes_det()
             .map_err(|e| Error::Structure(format!("could not re-encode statement: {e:?}")))
     }
 
@@ -319,7 +321,7 @@ impl Sign1 {
         let Some(leaf_der) = chain.first() else {
             return Ok(None);
         };
-        let leaf = <tav_crypto::Crypto as CertificateBackend>::from_der(leaf_der)
+        let leaf = crate::der::parse_certificate(leaf_der)
             .map_err(|e| Error::Crypto(format!("leaf certificate is not valid DER: {e}")))?;
         let spki = <tav_crypto::Crypto as CertificateBackend>::get_public_key(&leaf)
             .map_err(|e| Error::Crypto(format!("could not read leaf public key: {e}")))?;
@@ -332,7 +334,7 @@ impl Sign1 {
         let Some(leaf_der) = chain.first() else {
             return Ok(None);
         };
-        let leaf = <tav_crypto::Crypto as CertificateBackend>::from_der(leaf_der)
+        let leaf = crate::der::parse_certificate(leaf_der)
             .map_err(|e| Error::Crypto(format!("leaf certificate is not valid DER: {e}")))?;
         Ok(Some((
             <tav_crypto::Crypto as CertificateBackend>::subject_name(&leaf),
@@ -400,7 +402,7 @@ pub fn describe_certificate(index: usize, der: &[u8]) -> CertificateSummary {
         ..Default::default()
     };
 
-    let cert = match <tav_crypto::Crypto as CertificateBackend>::from_der(der) {
+    let cert = match crate::der::parse_certificate(der) {
         Ok(c) => c,
         Err(e) => {
             summary.problem = Some(format!("not valid DER: {e}"));
@@ -487,7 +489,7 @@ fn other_cwt_claims(claims: &CborValue) -> Vec<(String, String)> {
                     if s == labels::CWT_SVN {
                         return None;
                     }
-                    s.clone()
+                    s.to_string()
                 }
                 other => cbor::type_name(other).to_string(),
             };
@@ -504,7 +506,7 @@ fn other_cwt_claims(claims: &CborValue) -> Vec<(String, String)> {
 pub fn render_scalar(v: &CborValue) -> String {
     match v {
         CborValue::Int(i) => i.to_string(),
-        CborValue::TextString(s) => s.clone(),
+        CborValue::TextString(s) => s.to_string(),
         CborValue::ByteString(b) => format!("{} bytes: {}", b.len(), hex_prefix(b)),
         CborValue::Simple(20) => "false".into(),
         CborValue::Simple(21) => "true".into(),
@@ -554,7 +556,7 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 /// Parsing only: this says nothing about whether the certificate is trusted,
 /// current, or chains anywhere.
 pub fn spki_from_certificate_der(cert_der: &[u8]) -> Result<Vec<u8>> {
-    let cert = <tav_crypto::Crypto as CertificateBackend>::from_der(cert_der)
+    let cert = crate::der::parse_certificate(cert_der)
         .map_err(|e| Error::Crypto(format!("certificate is not valid DER: {e}")))?;
     <tav_crypto::Crypto as CertificateBackend>::get_public_key(&cert)
         .map_err(|e| Error::Crypto(format!("could not read certificate public key: {e}")))

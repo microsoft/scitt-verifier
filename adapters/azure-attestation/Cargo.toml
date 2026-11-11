@@ -16,7 +16,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [features]
-default = ["crypto_pure_rust"]
+default = ["crypto_compliant"]
 azure-attestation = ["dep:tav-caci"]
-crypto_pure_rust = ["scitt-receipt/crypto_pure_rust", "tav-crypto/crypto_pure_rust", "tav-caci?/crypto_pure_rust"]
-crypto_openssl = ["scitt-receipt/crypto_openssl", "tav-crypto/crypto_openssl", "tav-caci?/crypto_openssl"]
+crypto_compliant = ["scitt-receipt/crypto_compliant", "tav-crypto/crypto_openssl", "tav-crypto/crypto_webcrypto", "tav-crypto/crypto_windows", "tav-caci?/crypto_openssl", "tav-caci?/crypto_webcrypto", "tav-caci?/crypto_windows"]

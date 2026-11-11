@@ -150,7 +150,7 @@ pub struct InclusionProof {
 
 /// Decode a CCF inclusion proof from the CBOR byte string that holds it.
 pub fn describe_inclusion_proof(proof_bytes: &[u8]) -> Result<InclusionProof> {
-    let proof = CborValue::from_bytes(proof_bytes)
+    let proof = CborValue::parse_nondet(proof_bytes)
         .map_err(|e| Error::Structure(format!("inclusion proof is not valid CBOR: {e:?}")))?;
 
     let leaf = cbor::req_int_key(&proof, labels::PROOF_LEAF)?;
@@ -352,7 +352,7 @@ pub fn verify_receipt(
     }
 
     let proof_bytes = cbor::as_bytes(&inclusion_proofs[0])?;
-    let proof = CborValue::from_bytes(proof_bytes)
+    let proof = CborValue::parse_nondet(proof_bytes)
         .map_err(|e| Error::Structure(format!("inclusion proof is not valid CBOR: {e:?}")))?;
 
     let (leaf_hash, claims_digest) = compute_leaf_hash(&proof)?;
@@ -532,19 +532,19 @@ mod tests {
             (
                 CborValue::Int(labels::PROOF_LEAF),
                 CborValue::Array(vec![
-                    CborValue::ByteString(vec![0xaa; 32]),
+                    CborValue::bytes(vec![0xaa; 32]),
                     CborValue::TextString("ce:2.1:beef".into()),
-                    CborValue::ByteString(vec![0xbb; 32]),
+                    CborValue::bytes(vec![0xbb; 32]),
                 ]),
             ),
             (CborValue::Int(labels::PROOF_PATH), CborValue::Array(path)),
         ])
-        .to_bytes()
+        .to_bytes_det()
         .expect("test proof encodes")
     }
 
     fn step(direction: CborValue, fill: u8) -> CborValue {
-        CborValue::Array(vec![direction, CborValue::ByteString(vec![fill; 32])])
+        CborValue::Array(vec![direction, CborValue::bytes(vec![fill; 32])])
     }
 
     /// CCF has emitted the direction flag as a bool and as an integer. Reading
@@ -605,11 +605,11 @@ mod tests {
         let bytes = CborValue::Map(vec![
             (
                 CborValue::Int(labels::PROOF_LEAF),
-                CborValue::Array(vec![CborValue::ByteString(vec![0xaa; 32])]),
+                CborValue::Array(vec![CborValue::bytes(vec![0xaa; 32])]),
             ),
             (CborValue::Int(labels::PROOF_PATH), CborValue::Array(vec![])),
         ])
-        .to_bytes()
+        .to_bytes_det()
         .expect("test proof encodes");
 
         assert!(describe_inclusion_proof(&bytes).is_err());
