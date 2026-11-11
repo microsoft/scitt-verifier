@@ -311,15 +311,19 @@ async fn attempt(
             .map_err(|e| Error::Crypto(format!("could not inspect leaf EKU: {e}")))?
             == Some(true);
     let verified = if critical_leaf_eku {
-        verify_path_with_leaf_eku(&path_certs, &path_der, time).await
+        verify_exact_path(&path_certs, &path_der, time, true).await
     } else {
-        <Backend as AsyncCryptoBackend>::verify_chain(
+        match <Backend as AsyncCryptoBackend>::verify_chain(
             anchor,
             &intermediate_refs,
             &parsed[0],
             Some(time),
         )
         .await
+        {
+            Ok(()) => verify_exact_path(&path_certs, &path_der, time, false).await,
+            Err(error) => Err(error),
+        }
     };
     if let Err(e) = verified {
         return Ok(Outcome::Invalid(format!(
@@ -359,23 +363,23 @@ fn check_leaf_eku(leaf: &[u8], required: &[String]) -> std::result::Result<Vec<S
     Ok(oids)
 }
 
-/// TAV's pinned RFC 5280 subset, used only after `capability_gap` admits the
-/// path and only for a critical leaf EKU that `check_leaf_eku` will process.
+/// Verify every certificate in the selected path, even if the backend could
+/// build a shorter path that ignores one of the supplied intermediates.
 /// Never strip or rewrite the signed extension to get past TAV's policy.
-/// All other paths still use TAV's validator directly.
 /// Re-audit parity when moving the pin/backend: OpenSSL's native validator
 /// accepts a critical EKU itself, while CNG and WebCrypto run TAV's
 /// `x509_policy`, which refuses it. This copy is what keeps all three alike.
 /// Upstream the purpose hook or migrate both paths together.
-async fn verify_path_with_leaf_eku(
+async fn verify_exact_path(
     path: &[&Cert],
     path_der: &[&[u8]],
     time: std::time::Duration,
+    require_self_issued_anchor: bool,
 ) -> tav_crypto::Result<()> {
     let Some(anchor) = path.first() else {
         return Err("certificate path must not be empty".into());
     };
-    if !Backend::is_self_issued(anchor)? {
+    if require_self_issued_anchor && !Backend::is_self_issued(anchor)? {
         return Err("first certificate is not self-issued".into());
     }
     for cert in path {
@@ -587,7 +591,8 @@ fn capability_gap(
             }
         }
 
-        let critical = <tav_crypto::Crypto as CertificateBackend>::critical_extension_oids(cert);
+        let critical =
+            der::parse_critical_extension_oids(path_der[index]).map_err(|e| e.to_string())?;
         let unhandled: Vec<String> = critical
             .into_iter()
             .filter(|oid| {

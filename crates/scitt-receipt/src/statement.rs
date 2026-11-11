@@ -344,9 +344,13 @@ impl Sign1 {
         };
         let leaf = crate::der::parse_certificate(leaf_der)
             .map_err(|e| Error::Crypto(format!("leaf certificate is not valid DER: {e}")))?;
+        let subject = <tav_crypto::Crypto as CertificateBackend>::subject_name_der(&leaf)
+            .map_err(|e| Error::Crypto(format!("could not read leaf subject: {e}")))?;
+        let issuer = <tav_crypto::Crypto as CertificateBackend>::issuer_name_der(&leaf)
+            .map_err(|e| Error::Crypto(format!("could not read leaf issuer: {e}")))?;
         Ok(Some((
-            <tav_crypto::Crypto as CertificateBackend>::subject_name(&leaf),
-            <tav_crypto::Crypto as CertificateBackend>::issuer_name(&leaf),
+            crate::der::render_name(&subject),
+            crate::der::render_name(&issuer),
         )))
     }
 
@@ -418,12 +422,12 @@ pub fn describe_certificate(index: usize, der: &[u8]) -> CertificateSummary {
         }
     };
 
-    summary.subject = Some(<tav_crypto::Crypto as CertificateBackend>::subject_name(
-        &cert,
-    ));
-    summary.issuer = Some(<tav_crypto::Crypto as CertificateBackend>::issuer_name(
-        &cert,
-    ));
+    summary.subject = <tav_crypto::Crypto as CertificateBackend>::subject_name_der(&cert)
+        .ok()
+        .map(|name| crate::der::render_name(&name));
+    summary.issuer = <tav_crypto::Crypto as CertificateBackend>::issuer_name_der(&cert)
+        .ok()
+        .map(|name| crate::der::render_name(&name));
     summary.version = <tav_crypto::Crypto as CertificateBackend>::version(&cert).ok();
     summary.basic_constraints =
         <tav_crypto::Crypto as CertificateBackend>::basic_constraints(&cert)
@@ -441,11 +445,16 @@ pub fn describe_certificate(index: usize, der: &[u8]) -> CertificateSummary {
     .ok()
     .flatten();
 
-    summary.unhandled_critical_extensions =
-        <tav_crypto::Crypto as CertificateBackend>::critical_extension_oids(&cert)
+    summary.unhandled_critical_extensions = match crate::der::parse_critical_extension_oids(der) {
+        Ok(oids) => oids
             .into_iter()
             .filter(|oid| !HANDLED_CRITICAL_EXTENSIONS.contains(&oid.as_str()))
-            .collect();
+            .collect(),
+        Err(e) => {
+            summary.problem = Some(format!("critical extensions could not be read: {e}"));
+            Vec::new()
+        }
+    };
 
     if let Ok(Some(raw)) = <tav_crypto::Crypto as CertificateBackend>::get_extension_value_by_oid(
         &cert,

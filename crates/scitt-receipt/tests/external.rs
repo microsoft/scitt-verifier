@@ -5,6 +5,7 @@
 //! and one that does not — cannot be reached without real key material. The
 //! unit tests next to the module cover the shapes that need no crypto.
 
+use scitt_receipt::chain::{validate, Options, Outcome};
 use scitt_receipt::external::{verify_cose_sign1, verify_detached, Detached};
 use scitt_receipt::statement::Sign1;
 use scitt_receipt::{labels, CborValue};
@@ -33,6 +34,25 @@ fn descriptor_and_payload() -> (CborValue<'static>, Vec<u8>) {
         panic!("external-signature is not an array");
     };
     (items[0].clone(), payload)
+}
+
+fn external_leaf_der() -> Vec<u8> {
+    let (descriptor, _) = descriptor_and_payload();
+    let CborValue::Map(entries) = descriptor else {
+        panic!("descriptor is not a map");
+    };
+    match entries
+        .iter()
+        .find(|(key, _)| matches!(key, CborValue::Int(i) if *i == labels::X5CHAIN))
+        .map(|(_, value)| value)
+    {
+        Some(CborValue::ByteString(der)) => der.to_vec(),
+        Some(CborValue::Array(items)) => match items.first() {
+            Some(CborValue::ByteString(der)) => der.to_vec(),
+            _ => panic!("external signer chain has no leaf"),
+        },
+        _ => panic!("external signer chain is missing"),
+    }
 }
 
 fn replace(
@@ -256,4 +276,23 @@ fn the_two_conventions_do_not_silently_read_each_other() {
         Detached::Unusable(_) => {}
         other => panic!("expected unusable, got {other:?}"),
     }
+}
+
+#[test]
+fn an_unrelated_intermediate_cannot_be_ignored_when_the_leaf_reaches_the_root() {
+    let leaf = external_leaf_der();
+    let statement = Sign1::parse(&fixture("transparent-statement.cose")).unwrap();
+    let unrelated = statement.x5chain()[1].clone();
+    let chain = vec![leaf.clone(), unrelated, leaf.clone()];
+
+    let outcome = validate(
+        &chain,
+        &Options {
+            trusted_roots: vec![leaf],
+            ..Options::default()
+        },
+    )
+    .unwrap();
+
+    assert!(matches!(outcome, Outcome::Invalid(_)), "{outcome:?}");
 }

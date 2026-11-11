@@ -299,6 +299,12 @@ const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({'&':'&amp;','<':'&lt;','
 // altered.
 const state = { statement: null, keys: null, artifact: null, artifactName: null, label: null,
                 roots: null, serviceCert: null };
+const inputLoads = { statement: 0, keys: 0, artifact: 0, roots: 0, serviceCert: 0 };
+let runGeneration = 0;
+const invalidateRun = () => { runGeneration++; };
+const invalidatePendingLoads = () => {
+  for (const field of Object.keys(inputLoads)) inputLoads[field]++;
+};
 
 const TAG = { pass: 't-pass', fail: 't-fail', warn: 't-warn', none: 't-none' };
 const tag = (kind, label) => `<span class="tag ${TAG[kind]}">${esc(label)}</span>`;
@@ -664,25 +670,33 @@ function showError(e) {
 // Freshness rules still work; they are just evaluated against a stated instant.
 // Each run awaits the verifier, so a slower earlier run must not render over a
 // later one.
-let runGeneration = 0;
 async function run() {
   const generation = ++runGeneration;
+  const inputs = {
+    statement: state.statement,
+    keys: state.keys,
+    roots: state.roots,
+    serviceCert: state.serviceCert,
+    artifact: state.artifact,
+    artifactName: state.artifactName,
+    policy: $('policy').value.trim(),
+    bindingMode: $('binding-mode').value,
+  };
   $('error').style.display = 'none';
-  if (!state.statement || !state.keys) {
+  if (!inputs.statement || !inputs.keys) {
     return showError('Load a statement and a key set first.');
   }
   try {
-    const roots = state.roots || undefined;
-    const src = $('policy').value.trim();
-    const policy = src ? new TextEncoder().encode(src) : undefined;
-    const factsJson = state.serviceCert
+    const roots = inputs.roots || undefined;
+    const policy = inputs.policy ? new TextEncoder().encode(inputs.policy) : undefined;
+    const factsJson = inputs.serviceCert
       ? await wasm_bindgen.verifyStatementWithServiceCert(
-          state.statement, state.keys, state.serviceCert, roots, policy)
-      : await wasm_bindgen.verifyStatement(state.statement, state.keys, roots, policy);
+          inputs.statement, inputs.keys, inputs.serviceCert, roots, policy)
+      : await wasm_bindgen.verifyStatement(inputs.statement, inputs.keys, roots, policy);
     if (generation !== runGeneration) return;
     const facts = JSON.parse(factsJson);
-    const inspected = JSON.parse(wasm_bindgen.inspectStatement(state.statement));
-    const payload = JSON.parse(wasm_bindgen.statementPayload(state.statement));
+    const inspected = JSON.parse(wasm_bindgen.inspectStatement(inputs.statement));
+    const payload = JSON.parse(wasm_bindgen.statementPayload(inputs.statement));
 
     // The service certificate vouches for no key in the set: nothing was
     // verified, because there was nothing it would have been honest to verify
@@ -710,21 +724,21 @@ async function run() {
       const r0 = (facts.receipts || [])[0];
       const now = r0 && r0.registeredAt ? r0.registeredAt + 60 : Math.floor(Date.now() / 1000);
       decision = JSON.parse(await wasm_bindgen.evaluatePolicy(
-        state.statement, state.keys, policy, now,
-        roots, state.serviceCert || undefined));
+        inputs.statement, inputs.keys, policy, now,
+        roots, inputs.serviceCert || undefined));
       if (generation !== runGeneration) return;
     }
 
     // Only when an artifact was actually supplied. Comparing against nothing
     // and reporting the result would be a binding nobody asked for.
     let binding = null;
-    if (state.artifact) {
+    if (inputs.artifact) {
       binding = JSON.parse(wasm_bindgen.bindArtifact(
-        state.statement, state.artifact, $('binding-mode').value,
-        state.artifactName || ''));
+        inputs.statement, inputs.artifact, inputs.bindingMode,
+        inputs.artifactName || ''));
     }
 
-    setBanner(decide(facts, decision, binding, !!state.roots));
+    setBanner(decide(facts, decision, binding, !!inputs.roots));
 
     renderEvidence(facts, inspected, binding);
     renderPayload(payload);
@@ -735,6 +749,7 @@ async function run() {
     renderKeysGap(facts);
     $('verdict').classList.add('on');
   } catch (e) {
+    if (generation !== runGeneration) return;
     showError(e);
   }
 }
@@ -851,6 +866,8 @@ function saveDecoded() {
 }
 
 function clearArtifact() {
+  inputLoads.artifact++;
+  invalidateRun();
   state.artifact = null;
   state.artifactName = null;
   $('f-artifact').value = '';
@@ -864,6 +881,8 @@ function clearTrust(which) {
   const spec = which === 'roots'
     ? ['roots', 'f-roots', 'c-roots', 'clear-roots', 'Trusted roots (.pem, optional)']
     : ['serviceCert', 'f-service', 'c-service', 'clear-service', 'Service certificate (.pem, optional)'];
+  inputLoads[spec[0]]++;
+  invalidateRun();
   state[spec[0]] = null;
   $(spec[1]).value = '';
   $(spec[2]).classList.remove('loaded');
@@ -874,6 +893,8 @@ function clearTrust(which) {
 function setTrust(which, pem, name) {
   const spec = which === 'roots' ? ['roots', 'c-roots', 'clear-roots']
                                  : ['serviceCert', 'c-service', 'clear-service'];
+  inputLoads[spec[0]]++;
+  invalidateRun();
   state[spec[0]] = pem;
   $(spec[1]).classList.add('loaded');
   $(spec[1]).textContent = name;
@@ -881,6 +902,8 @@ function setTrust(which, pem, name) {
 }
 
 function loadScenario(s) {
+  invalidatePendingLoads();
+  invalidateRun();
   state.statement = b64(s.statement);
   state.keys = b64(s.keys);
   state.label = s.label;
@@ -916,7 +939,12 @@ function wireFile(inputId, chipId, field) {
   $(inputId).addEventListener('change', async (ev) => {
     const f = ev.target.files[0];
     if (!f) return;
-    state[field] = new Uint8Array(await f.arrayBuffer());
+    const generation = ++inputLoads[field];
+    invalidateRun();
+    const bytes = new Uint8Array(await f.arrayBuffer());
+    if (generation !== inputLoads[field]) return;
+    invalidateRun();
+    state[field] = bytes;
     const chip = $(chipId);
     chip.classList.add('loaded');
     chip.textContent = f.name;
@@ -952,7 +980,12 @@ function wireFile(inputId, chipId, field) {
   $('f-artifact').addEventListener('change', async (ev) => {
     const f = ev.target.files[0];
     if (!f) return;
-    state.artifact = new Uint8Array(await f.arrayBuffer());
+    const generation = ++inputLoads.artifact;
+    invalidateRun();
+    const bytes = new Uint8Array(await f.arrayBuffer());
+    if (generation !== inputLoads.artifact) return;
+    invalidateRun();
+    state.artifact = bytes;
     state.artifactName = f.name;
     $('c-artifact').classList.add('loaded');
     $('c-artifact').textContent = f.name;
@@ -967,13 +1000,19 @@ function wireFile(inputId, chipId, field) {
     $(input).addEventListener('change', async (ev) => {
       const f = ev.target.files[0];
       if (!f) return;
-      setTrust(which, await f.text(), f.name);
+      const field = which === 'roots' ? 'roots' : 'serviceCert';
+      const generation = ++inputLoads[field];
+      invalidateRun();
+      const pem = await f.text();
+      if (generation !== inputLoads[field]) return;
+      setTrust(which, pem, f.name);
       run();
     });
   }
   $('clear-roots').addEventListener('click', () => { clearTrust('roots'); run(); });
   $('clear-service').addEventListener('click', () => { clearTrust('service'); run(); });
   $('decode-run').addEventListener('click', decodeClaimNow);
+  $('policy').addEventListener('input', invalidateRun);
   $('decode-path').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') decodeClaimNow(); });
   $('decode-save').addEventListener('click', saveDecoded);
 

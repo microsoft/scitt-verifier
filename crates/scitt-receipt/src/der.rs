@@ -282,6 +282,63 @@ pub(crate) fn parse_certificate_eku_oids_strict(certificate: &[u8]) -> Result<Ve
     parse_eku_sequence_strict(eku)
 }
 
+pub(crate) fn parse_critical_extension_oids(certificate: &[u8]) -> Result<Vec<String>> {
+    let malformed = || Error::TrustMaterial("certificate extensions could not be read".into());
+    let Some((0x30, certificate, [])) = read_tlv_strict(certificate) else {
+        return Err(malformed());
+    };
+    let Some((0x30, mut fields, _)) = read_tlv_strict(certificate) else {
+        return Err(malformed());
+    };
+
+    let mut extensions_seen = false;
+    let mut critical_oids = Vec::new();
+    while !fields.is_empty() {
+        let (tag, value, rest) = read_tlv_strict(fields).ok_or_else(malformed)?;
+        fields = rest;
+        if tag != 0xA3 {
+            continue;
+        }
+        if extensions_seen {
+            return Err(malformed());
+        }
+        extensions_seen = true;
+
+        let Some((0x30, mut extensions, [])) = read_tlv_strict(value) else {
+            return Err(malformed());
+        };
+        while !extensions.is_empty() {
+            let Some((0x30, mut extension, rest)) = read_tlv_strict(extensions) else {
+                return Err(malformed());
+            };
+            extensions = rest;
+            let Some((0x06, oid_bytes, rest)) = read_tlv_strict(extension) else {
+                return Err(malformed());
+            };
+            let oid = decode_oid(oid_bytes).ok_or_else(malformed)?;
+            extension = rest;
+
+            let critical = if let Some((0x01, value, rest)) = read_tlv_strict(extension) {
+                if value != [0xFF] {
+                    return Err(malformed());
+                }
+                extension = rest;
+                true
+            } else {
+                false
+            };
+            let Some((0x04, _, [])) = read_tlv_strict(extension) else {
+                return Err(malformed());
+            };
+            if critical {
+                critical_oids.push(oid);
+            }
+        }
+    }
+
+    Ok(critical_oids)
+}
+
 /// The `notBefore` and `notAfter` of a certificate, as Unix seconds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Validity {
@@ -736,6 +793,35 @@ pub fn parse_name_attributes(name_der: &[u8]) -> Vec<(String, String)> {
     attributes
 }
 
+pub fn render_name(name_der: &[u8]) -> String {
+    parse_name_attributes(name_der)
+        .iter()
+        .map(|(key, value)| format!("{key}={}", escape_name_value(value)))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn escape_name_value(value: &str) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    let mut escaped = String::new();
+    for (index, ch) in chars.iter().copied().enumerate() {
+        if ch.is_control() {
+            for byte in ch.to_string().bytes() {
+                escaped.push_str(&format!("\\{byte:02X}"));
+            }
+        } else if matches!(ch, ',' | '+' | '"' | '\\' | '<' | '>' | ';')
+            || (ch == ' ' && (index == 0 || index + 1 == chars.len()))
+            || (ch == '#' && index == 0)
+        {
+            escaped.push('\\');
+            escaped.push(ch);
+        } else {
+            escaped.push(ch);
+        }
+    }
+    escaped
+}
+
 /// RFC 4514 short labels for the attribute types did:x509 names.
 fn name_label(oid: &str) -> String {
     match oid {
@@ -867,6 +953,33 @@ mod eku_tests {
         extension.extend(tlv(0x04, value));
         let extensions = tlv(0xA3, &tlv(0x30, &tlv(0x30, &extension)));
         tlv(0x30, &tlv(0x30, &extensions))
+    }
+
+    #[test]
+    fn critical_extension_oids_are_read_losslessly_from_der() {
+        let mut oid = vec![0x2A];
+        oid.extend_from_slice(&[0x00; 127]);
+        let mut extension = tlv(0x06, &oid);
+        extension.extend(tlv(0x01, &[0xFF]));
+        extension.extend(tlv(0x04, &[]));
+        let certificate = tlv(
+            0x30,
+            &tlv(0x30, &tlv(0xA3, &tlv(0x30, &tlv(0x30, &extension)))),
+        );
+
+        assert_eq!(
+            parse_critical_extension_oids(&certificate).unwrap(),
+            [format!("1.2{}", ".0".repeat(127))]
+        );
+    }
+
+    #[test]
+    fn rendered_names_keep_attribute_components_and_escape_values() {
+        let mut attribute = tlv(0x06, &[0x55, 0x04, 0x03]);
+        attribute.extend(tlv(0x0C, b"Example, Signer"));
+        let name = tlv(0x30, &tlv(0x31, &tlv(0x30, &attribute)));
+
+        assert_eq!(render_name(&name), "CN=Example\\, Signer");
     }
 
     #[test]

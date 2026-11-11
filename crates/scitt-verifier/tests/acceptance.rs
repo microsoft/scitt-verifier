@@ -52,6 +52,36 @@ fn verify(extra: &[&str]) -> Run {
     run(&args)
 }
 
+#[test]
+fn signer_name_filters_match_der_rendered_components() {
+    let dir = std::env::temp_dir().join("scitt-verifier-signer-name-filters");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let policy = dir.join("policy.json");
+    std::fs::write(
+        &policy,
+        r#"{"policyId":"signer-names","policyVersion":"1","assertions":{
+            "signerSubjectContains":"CN=","signerIssuerContains":"CN="}}"#,
+    )
+    .unwrap();
+    let statement = corpus(&["fixtures", "transparent-statement.cose"]);
+    let keys = corpus(&["fixtures", "mst-test-scitt-keys.cbor"]);
+    let r = run(&[
+        "verify",
+        "--statement",
+        &statement,
+        "--scitt-keys",
+        &keys,
+        "--policy",
+        &policy.display().to_string(),
+    ]);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(r.code, 0, "{}", r.stdout);
+    assert!(r.stdout.contains("signerSubjectContains"), "{}", r.stdout);
+    assert!(r.stdout.contains("signerIssuerContains"), "{}", r.stdout);
+}
+
 fn has_line(output: &str, expected: &str) -> bool {
     output.lines().any(|line| line == expected)
 }
@@ -1955,7 +1985,8 @@ fn a_detached_signature_in_a_protected_header_can_be_verified() {
     let r = verify_cbor_header_fixture(
         "pass",
         r#"{"externalSignatures":[{"path":["external-signature",0],"signedOver":"payload",
-            "signerSubjectContains":"Example Component Supplier"}]}"#,
+            "signerSubjectContains":"CN=Example External Signer",
+            "signerIssuerContains":"CN=Example External Signer"}]}"#,
     );
     assert_eq!(r.code, 0, "{}", r.stdout);
     assert!(
@@ -2054,7 +2085,8 @@ fn a_nested_cose_sign1_can_be_verified() {
     let r = verify_nested_fixture(
         "pass",
         r#"{"externalSignatures":[{"path":["external-statement"],"signedOver":"coseSign1",
-            "signerSubjectContains":"Example Component Supplier"}]}"#,
+            "signerSubjectContains":"CN=Example External Signer",
+            "signerIssuerContains":"CN=Example External Signer"}]}"#,
     );
     assert_eq!(r.code, 0, "{}", r.stdout);
     assert!(

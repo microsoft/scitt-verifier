@@ -364,13 +364,13 @@ async fn verify_sign1(inner: &Sign1, payload: &[u8], der: &[u8]) -> Result<bool>
 fn describe(der: &[u8], chain_len: usize) -> Result<DetachedSigner> {
     let cert = crate::der::parse_certificate(der)
         .map_err(|e| Error::Crypto(format!("the signer's certificate is not valid DER: {e}")))?;
+    let subject = <tav_crypto::Crypto as CertificateBackend>::subject_name_der(&cert)
+        .map_err(|e| Error::Crypto(format!("could not read the signer's subject: {e}")))?;
+    let issuer = <tav_crypto::Crypto as CertificateBackend>::issuer_name_der(&cert)
+        .map_err(|e| Error::Crypto(format!("could not read the signer's issuer: {e}")))?;
     Ok(DetachedSigner {
-        subject: Some(<tav_crypto::Crypto as CertificateBackend>::subject_name(
-            &cert,
-        )),
-        issuer: Some(<tav_crypto::Crypto as CertificateBackend>::issuer_name(
-            &cert,
-        )),
+        subject: Some(crate::der::render_name(&subject)),
+        issuer: Some(crate::der::render_name(&issuer)),
         chain_len,
     })
 }
