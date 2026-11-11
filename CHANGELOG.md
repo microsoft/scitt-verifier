@@ -17,6 +17,8 @@ OpenSSL (`vendored-openssl` feature) so they carry no runtime dependency.
   only RSA certificate signatures.
 - Certificates are rejected unless their signature algorithm is on an explicit
   allowlist and the DER has no trailing bytes.
+- The binary size budget now measures the shipped static musl binary with
+  vendored OpenSSL, for every adapter build, and rises from 4 MiB to 8 MiB.
 
 ### MAA certificate-evidence appraisal
 

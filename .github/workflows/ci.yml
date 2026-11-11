@@ -198,62 +198,34 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
-      - run: cargo build --release
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq musl-tools
+          rustup target add x86_64-unknown-linux-musl
 
       # The binary is downloaded on every pipeline run that uses the gate.
       # Size is a running cost, so regressions should be a conscious decision.
+      #
+      # Measured as shipped: static musl with vendored OpenSSL, the asset the
+      # action and the pipeline examples download. Each adapter build is held
+      # to the same budget; an adapter is a reason to carry more code, not a
+      # reason to stop counting it. Statically linking OpenSSL is what takes
+      # this past the old 4 MiB budget (7.3-7.5 MiB at the time it was set).
       - name: Enforce the size budget
         run: |
           set -euo pipefail
-          budget=$((4 * 1024 * 1024))
-          actual=$(stat -c%s target/release/scitt-verifier)
-          printf 'scitt-verifier: %s bytes (budget %s)\n' "$actual" "$budget"
-          if [ "$actual" -gt "$budget" ]; then
-            echo "::error::binary exceeded the size budget"
-            exit 1
-          fi
-
-      - run: cargo build --release -p scitt-verifier --features adapter-azure-confidential-ledger
-
-      # The adapter build is what an operator gating on a ledger actually
-      # downloads, so it gets a budget too rather than being left unmeasured.
-      # Held to the same 4 MiB: an adapter is a reason to carry more code, not
-      # a reason to stop counting it.
-      - name: Enforce the size budget with the adapter
-        run: |
-          set -euo pipefail
-          budget=$((4 * 1024 * 1024))
-          actual=$(stat -c%s target/release/scitt-verifier)
-          printf 'scitt-verifier + azure-confidential-ledger: %s bytes (budget %s)\n' "$actual" "$budget"
-          if [ "$actual" -gt "$budget" ]; then
-            echo "::error::adapter binary exceeded the size budget"
-            exit 1
-          fi
-
-      - run: cargo build --release -p scitt-verifier --features adapter-azure-attestation
-      - name: Enforce the size budget with MAA
-        run: |
-          set -euo pipefail
-          budget=$((4 * 1024 * 1024))
-          actual=$(stat -c%s target/release/scitt-verifier)
-          printf 'scitt-verifier + azure-attestation: %s bytes (budget %s)\n' "$actual" "$budget"
-          if [ "$actual" -gt "$budget" ]; then
-            echo "::error::MAA binary exceeded the size budget"
-            exit 1
-          fi
-
-      - run: cargo build --release -p scitt-verifier --features adapter-amd-snp-device
-
-      - name: Enforce the size budget with the SNP device adapter
-        run: |
-          set -euo pipefail
-          budget=$((4 * 1024 * 1024))
-          actual=$(stat -c%s target/release/scitt-verifier)
-          printf 'scitt-verifier + amd-snp-device: %s bytes (budget %s)\n' "$actual" "$budget"
-          if [ "$actual" -gt "$budget" ]; then
-            echo "::error::SNP device binary exceeded the size budget"
-            exit 1
-          fi
+          budget=$((8 * 1024 * 1024))
+          bin=target/x86_64-unknown-linux-musl/release/scitt-verifier
+          for adapter in "" adapter-azure-confidential-ledger adapter-azure-attestation adapter-amd-snp-device; do
+            cargo build -q --release -p scitt-verifier --target x86_64-unknown-linux-musl \
+              --features "vendored-openssl $adapter"
+            actual=$(stat -c%s "$bin")
+            printf 'scitt-verifier %s: %s bytes (budget %s)\n' "${adapter:-default}" "$actual" "$budget"
+            if [ "$actual" -gt "$budget" ]; then
+              echo "::error::scitt-verifier ${adapter:-default} exceeded the size budget"
+              exit 1
+            fi
+          done
 
   wasm:
     name: WASM boundary
