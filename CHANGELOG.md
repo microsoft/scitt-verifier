@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Latest TAV with compliant crypto backends
+
+TEE-Attestation-Verification moves to `c2562cb`, whose crypto is OpenSSL on
+Linux and macOS, CNG on Windows and WebCrypto in WASM. Building from source on
+Linux and macOS now needs OpenSSL development files; release binaries vendor
+OpenSSL (`vendored-openssl` feature) so they carry no runtime dependency.
+
+- **Breaking (npm):** `verifyStatement`, `verifyStatementWithServiceCert` and
+  `evaluatePolicy` return Promises, because WebCrypto is asynchronous. The
+  other exports are unchanged.
+- ECDSA-signed certificate chains now verify in native builds. In WASM they
+  are still reported unsupported, never passed: the WebCrypto backend verifies
+  only RSA certificate signatures.
+- Certificates are rejected unless their signature algorithm is on an explicit
+  allowlist and the DER has no trailing bytes.
+
 ### MAA certificate-evidence appraisal
 
 The optional `adapter-azure-attestation` feature adds the `azure-attestation`
