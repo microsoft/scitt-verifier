@@ -39,10 +39,10 @@ tav-crypto = { package = "tee-attestation-verification-crypto", git = "https://g
 # depends on those same crates by path, so a divergent pin would compile two
 # copies of the crypto layer and silently verify against whichever one won.
 #
-# This revision is also the last one that offers `crypto_pure_rust`. Upstream
-# has since dropped it in favour of openssl/webcrypto/windows backends, so
-# advancing the pin means taking on a C toolchain — a cost to weigh
-# deliberately rather than absorb during a routine bump.
+# The backends are the compliant ones TAV offers: OpenSSL on Linux and macOS,
+# Windows CNG on Windows, and WebCrypto in WASM. Native builds outside Windows
+# therefore need OpenSSL. WebCrypto is async, so the verification core is
+# written once against TAV's async traits; native callers use sync wrappers.
 tav-caci = { package = "tee-attestation-verification-caci", git = "https://github.com/microsoft/TEE-Attestation-Verification.git", rev = "c2562cb6a2995c18d088b92ab39801e6b444bbf0", default-features = false }
 sha2 = { version = "0.10", default-features = false }
 

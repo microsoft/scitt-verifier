@@ -31,9 +31,8 @@ jobs:
 
       - run: cargo fmt --all -- --check
 
-      # Not --all-features: the crypto backends are mutually exclusive, so
-      # enabling them together drags in OpenSSL and fails on a machine that has
-      # deliberately been kept free of it.
+      # Not --all-features: each adapter is built and tested in its own step
+      # below, the way it ships, and `vendored-openssl` is for release builds.
       - run: cargo clippy --all-targets
       - run: cargo test --workspace
 

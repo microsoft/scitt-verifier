@@ -34,12 +34,9 @@ scitt-receipt = { path = "../../crates/scitt-receipt", default-features = false 
 # cannot appraise attestation, and is why the unevaluated path is not merely a
 # placeholder.
 tav-caci = { workspace = true, optional = true }
-# The crypto backend, used directly to verify a CCF node certificate's ECDSA
-# signature. `scitt-receipt::chain` cannot: the pinned X.509 parser recognises
-# only RSA signature algorithms and reports every ECDSA-signed certificate as
-# uncheckable, while CCF signs its service and node certificates with P-384.
-# The raw signature primitives handle ECDSA, so the certificate is taken apart
-# and verified through those instead.
+# The crypto backend, used directly to verify that the CCF service certificate
+# signed a node certificate (ECDSA P-384). That is a single issuer link, not
+# path validation, so it does not go through `scitt-receipt::chain`.
 tav-crypto = { workspace = true }
 
 [features]

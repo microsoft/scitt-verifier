@@ -141,14 +141,16 @@ establish revocation status.
 
 ## Not implemented in this release
 
-### ECDSA-signed certificate chains, and RSA-PSS parameters the backend refuses
+### ECDSA-signed certificate chains in WASM, and RSA-PSS parameters the backend refuses
 
 *Reported at runtime:* `appraisal.notChecked` code `CertificateChainUnsupported`,
 naming the signature algorithm OID and the backend's own reason.
 
-The pinned crypto backend verifies RSA certificate signatures only — PKCS#1 v1.5
-with SHA-256/384/512, and RSA-PSS. A chain whose certificates are signed with
-ECDSA cannot be checked here at all. The observed AMD hardware
+The native backends (OpenSSL and Windows CNG) verify ECDSA and RSA certificate
+signatures. The WebCrypto backend used by `scitt-wasm` verifies RSA certificate
+signatures only — PKCS#1 v1.5 with SHA-256/384/512, and RSA-PSS — so in WASM a
+chain whose certificates are signed with ECDSA cannot be checked at all. The
+observed AMD hardware
 bill-of-materials chain is **not** an ECDSA example: it uses RSA-PSS SHA-384,
 MGF1 SHA-384 and a 48-byte salt, which this backend supports.
 
@@ -205,14 +207,12 @@ This is a local divergence from the pinned TAV `x509_policy`'s
 `HANDLED_CRITICAL_EXTENSIONS`, which lists only basic constraints and key usage.
 For this conditional leaf-EKU case, a local mirror retains the pinned policy's
 issuer, validity, CA, key-usage and path-length checks, with signatures still
-verified by TAV. Other paths continue through TAV's validator unchanged. The
-TAV pin is not advanced. Follow-up: upstream a purpose-aware policy hook and
+verified by TAV. Other paths continue through TAV's validator unchanged. Follow-up: upstream a purpose-aware policy hook and
 conditional critical-EKU processing, then replace the local mirror.
-This pin is the last TAV revision with the pure-Rust backend. Moving to a
-newer pin with the OpenSSL backend would give normal paths OpenSSL's validator
-while critical-EKU paths still use this local copy. Re-audit policy parity
-and migrate both paths together (or use the upstream purpose hook) before
-changing the pin/backend; do not assume this mirror remains equivalent.
+With the OpenSSL backend (Linux and macOS), normal paths use OpenSSL's
+validator, while CNG and WebCrypto use TAV's policy; critical-EKU paths use
+this local copy on every backend. Full parity between OpenSSL's validator and
+this mirror has not been audited; do not assume they are equivalent.
 
 The same applies to four extensions the policy refuses **even when they are not
 critical**: `policyMappings`, `nameConstraints`, `policyConstraints`, and
