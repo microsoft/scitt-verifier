@@ -11,7 +11,7 @@ use crate::labels;
 use crate::statement::Sign1;
 use sha2::{Digest, Sha256};
 use tav_cose::CborValue;
-use tav_crypto::KeyBackend;
+use tav_crypto::AsyncKeyBackend;
 
 /// What a single receipt turned out to be.
 #[derive(Debug, Clone, Default)]
@@ -301,7 +301,17 @@ fn read_inclusion_proof(receipt: &Sign1) -> Result<Option<InclusionProof>> {
 /// checks meaningful is recorded in `problems` and verification continues, so
 /// the caller learns everything that is wrong in one run instead of one problem
 /// per invocation.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn verify_receipt(
+    receipt_bytes: &[u8],
+    statement: &Sign1,
+    key_set: &LedgerKeySet,
+) -> Result<ReceiptFacts> {
+    crate::ready::run(verify_receipt_async(receipt_bytes, statement, key_set))
+}
+
+/// [`verify_receipt`] for asynchronous crypto backends.
+pub async fn verify_receipt_async(
     receipt_bytes: &[u8],
     statement: &Sign1,
     key_set: &LedgerKeySet,
@@ -422,17 +432,19 @@ pub fn verify_receipt(
     }
     let algorithm = tav_cose::signature_key_algorithm_for_cose_alg(alg)
         .map_err(|_| Error::UnsupportedAlgorithm(alg))?;
-    let public_key = <tav_crypto::Key as KeyBackend>::from_spki_der(&key.spki_der, algorithm)
+    let public_key = <tav_crypto::Key as AsyncKeyBackend>::from_spki_der(&key.spki_der, algorithm)
+        .await
         .map_err(|e| Error::Crypto(format!("could not import ledger key: {e}")))?;
 
     facts.root_signature_valid = Some(
-        tav_cose::synchronous::cose_verify1(
+        tav_cose::asynchronous::cose_verify1(
             &public_key,
             algorithm,
             &receipt.protected_raw,
             &root,
             &receipt.signature,
         )
+        .await
         .is_ok(),
     );
     if facts.root_signature_valid == Some(false) {

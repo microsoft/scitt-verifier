@@ -36,7 +36,7 @@
 
 use crate::der::{self, Validity};
 use crate::error::{Error, Result};
-use tav_crypto::{CertificateBackend, CryptoBackend, KeyBackend, SignatureBackend};
+use tav_crypto::{AsyncCryptoBackend, AsyncKeyBackend, CertificateBackend, SignatureBackend};
 
 type Cert = <tav_crypto::Crypto as CertificateBackend>::Certificate;
 type Backend = tav_crypto::Crypto;
@@ -173,7 +173,13 @@ struct Selection {
 }
 
 /// Validate a certificate chain given leaf-first, as `x5chain` supplies it.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn validate(chain: &[Vec<u8>], options: &Options) -> Result<Outcome> {
+    crate::ready::run(validate_async(chain, options))
+}
+
+/// [`validate`] for asynchronous crypto backends.
+pub async fn validate_async(chain: &[Vec<u8>], options: &Options) -> Result<Outcome> {
     match chain.len() {
         0 => {
             return Ok(Outcome::Insufficient(
@@ -209,7 +215,7 @@ pub fn validate(chain: &[Vec<u8>], options: &Options) -> Result<Outcome> {
     let mut capability_gap: Option<Outcome> = None;
 
     for selection in candidates {
-        match attempt(chain, &parsed, &roots, options, &selection)? {
+        match attempt(chain, &parsed, &roots, options, &selection).await? {
             valid @ Outcome::Valid(_) => return Ok(valid),
             unsupported @ Outcome::Unsupported(_) => {
                 capability_gap.get_or_insert(unsupported);
@@ -230,7 +236,7 @@ pub fn validate(chain: &[Vec<u8>], options: &Options) -> Result<Outcome> {
 }
 
 /// Try one candidate anchor end to end.
-fn attempt(
+async fn attempt(
     chain: &[Vec<u8>],
     parsed: &[Cert],
     roots: &[Cert],
@@ -305,9 +311,15 @@ fn attempt(
             .map_err(|e| Error::Crypto(format!("could not inspect leaf EKU: {e}")))?
             == Some(true);
     let verified = if critical_leaf_eku {
-        verify_path_with_leaf_eku(&path_certs, &path_der, time)
+        verify_path_with_leaf_eku(&path_certs, &path_der, time).await
     } else {
-        Backend::verify_chain(anchor, &intermediate_refs, &parsed[0], Some(time))
+        <Backend as AsyncCryptoBackend>::verify_chain(
+            anchor,
+            &intermediate_refs,
+            &parsed[0],
+            Some(time),
+        )
+        .await
     };
     if let Err(e) = verified {
         return Ok(Outcome::Invalid(format!(
@@ -355,7 +367,7 @@ fn check_leaf_eku(leaf: &[u8], required: &[String]) -> std::result::Result<Vec<S
 /// accepts a critical EKU itself, while CNG and WebCrypto run TAV's
 /// `x509_policy`, which refuses it. This copy is what keeps all three alike.
 /// Upstream the purpose hook or migrate both paths together.
-fn verify_path_with_leaf_eku(
+async fn verify_path_with_leaf_eku(
     path: &[&Cert],
     path_der: &[&[u8]],
     time: std::time::Duration,
@@ -401,9 +413,14 @@ fn verify_path_with_leaf_eku(
         let algorithm = der::certificate_signature_key_algorithm(subject_der, &issuer_spki)?
             .map_err(|reason| format!("unsupported certificate signature: {reason}"))?;
         let (tbs, signature) = der::tbs_and_signature(subject_der)?;
-        let key = <Backend as CryptoBackend>::Key::from_spki_der(&issuer_spki, algorithm)?;
-        let signature = <Backend as CryptoBackend>::Signature::from_bytes(signature, algorithm)?;
-        Backend::verify_signature(&key, &signature, tbs)?;
+        let key = <<Backend as AsyncCryptoBackend>::Key as AsyncKeyBackend>::from_spki_der(
+            &issuer_spki,
+            algorithm,
+        )
+        .await?;
+        let signature =
+            <Backend as AsyncCryptoBackend>::Signature::from_bytes(signature, algorithm)?;
+        <Backend as AsyncCryptoBackend>::verify_signature(&key, &signature, tbs).await?;
     }
     Ok(())
 }

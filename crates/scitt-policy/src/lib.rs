@@ -1087,7 +1087,7 @@ impl ExternalSignature {
         Ok(())
     }
 
-    fn evaluate(
+    async fn evaluate(
         &self,
         facts: &StatementFacts,
         root_sources: &[ExternalRootSource],
@@ -1104,7 +1104,7 @@ impl ExternalSignature {
             root_source_matched: None,
             certificates_valid_at_registration: None,
         };
-        let (outcome, detail) = self.evaluate_signature(facts, &mut evidence);
+        let (outcome, detail) = self.evaluate_signature(facts, &mut evidence).await;
         let mut evaluated = result(
             "externalSignatures",
             outcome,
@@ -1114,7 +1114,7 @@ impl ExternalSignature {
         evaluated
     }
 
-    fn evaluate_signature(
+    async fn evaluate_signature(
         &self,
         facts: &StatementFacts,
         evidence: &mut ExternalSignatureEvidence,
@@ -1133,9 +1133,11 @@ impl ExternalSignature {
             Ok(Some(descriptor)) => descriptor,
         };
         let checked = match self.signed_over {
-            SignedOver::Payload => external::verify_detached(descriptor, facts.payload.as_deref()),
+            SignedOver::Payload => {
+                external::verify_detached_async(descriptor, facts.payload.as_deref()).await
+            }
             SignedOver::CoseSign1 => {
-                external::verify_cose_sign1(descriptor, facts.payload.as_deref())
+                external::verify_cose_sign1_async(descriptor, facts.payload.as_deref()).await
             }
         };
         let signer = match checked {
@@ -1143,7 +1145,7 @@ impl ExternalSignature {
                 // A malformed leaf can stop the signature check before it
                 // reaches the path. Do not let that turn a broken required
                 // chain into merely absent evidence.
-                if let Err(finding) = self.check_chain(descriptor, facts, evidence) {
+                if let Err(finding) = self.check_chain(descriptor, facts, evidence).await {
                     return finding;
                 }
                 return (Outcome::CannotEvaluate, why);
@@ -1165,7 +1167,7 @@ impl ExternalSignature {
         if let Err(why) = self.check_signer(&signer) {
             return (Outcome::Fail, why);
         }
-        let chain_detail = match self.check_chain(descriptor, facts, evidence) {
+        let chain_detail = match self.check_chain(descriptor, facts, evidence).await {
             Ok(detail) => detail,
             Err(finding) => return finding,
         };
@@ -1185,9 +1187,9 @@ impl ExternalSignature {
         }
     }
 
-    fn check_chain(
+    async fn check_chain(
         &self,
-        descriptor: &CborValue,
+        descriptor: &CborValue<'_>,
         facts: &StatementFacts,
         evidence: &mut ExternalSignatureEvidence,
     ) -> Result<String, (Outcome, String)> {
@@ -1204,7 +1206,8 @@ impl ExternalSignature {
             }
             external::ChainMaterial::Malformed(why) => return Err((Outcome::Fail, why)),
         };
-        let outcome = scitt_receipt::chain::validate(&chain, &Default::default()).map_err(|e| {
+        let validated = scitt_receipt::chain::validate_async(&chain, &Default::default()).await;
+        let outcome = validated.map_err(|e| {
             let outcome = match e {
                 scitt_receipt::Error::Malformed(_)
                 | scitt_receipt::Error::Structure(_)
@@ -1775,8 +1778,14 @@ impl Policy {
     /// than reading the clock keeps the same inputs producing the same decision
     /// on every machine, which matters when a build agent and a human are
     /// arguing about why a gate failed.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn evaluate(&self, facts: &StatementFacts, now: i64) -> PolicyDecision {
-        let mut decision = self.evaluate_statement(facts, now);
+        self.ready(self.evaluate_async(facts, now))
+    }
+
+    /// [`Policy::evaluate`] for asynchronous crypto backends.
+    pub async fn evaluate_async(&self, facts: &StatementFacts, now: i64) -> PolicyDecision {
+        let mut decision = self.evaluate_statement_async(facts, now).await;
         decision.results.extend(self.adapters.unavailable_results());
         decision
     }
@@ -1786,14 +1795,54 @@ impl Policy {
     /// This is not a decision on the whole policy: callers must separately
     /// evaluate every requested adapter before accepting it. With no statement
     /// assertions, the decision has no results and is not satisfied.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn evaluate_statement(&self, facts: &StatementFacts, now: i64) -> PolicyDecision {
-        self.evaluate_statement_with_external_roots(facts, now, &[])
+        self.ready(self.evaluate_statement_async(facts, now))
+    }
+
+    /// [`Policy::evaluate_statement`] for asynchronous crypto backends.
+    pub async fn evaluate_statement_async(
+        &self,
+        facts: &StatementFacts,
+        now: i64,
+    ) -> PolicyDecision {
+        self.evaluate_statement_with_external_roots_async(facts, now, &[])
+            .await
     }
 
     /// Evaluate statement assertions with independently authenticated root
     /// sources for outer and external signatures. This neither acquires roots
     /// nor evaluates adapters.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn evaluate_statement_with_external_roots(
+        &self,
+        facts: &StatementFacts,
+        now: i64,
+        root_sources: &[ExternalRootSource],
+    ) -> PolicyDecision {
+        self.ready(self.evaluate_statement_with_external_roots_async(facts, now, root_sources))
+    }
+
+    /// Drive an evaluation that native backends always finish on first poll.
+    ///
+    /// A backend that suspends gets a decision that cannot be satisfied,
+    /// never a partial one that might be.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn ready(&self, future: impl std::future::Future<Output = PolicyDecision>) -> PolicyDecision {
+        scitt_receipt::ready::poll_once(future).unwrap_or_else(|| PolicyDecision {
+            policy_id: self.policy_id.clone(),
+            policy_version: self.policy_version.clone(),
+            results: vec![result(
+                "policy",
+                Outcome::CannotEvaluate,
+                scitt_receipt::ready::SUSPENDED,
+            )],
+        })
+    }
+
+    /// [`Policy::evaluate_statement_with_external_roots`] for asynchronous
+    /// crypto backends.
+    pub async fn evaluate_statement_with_external_roots_async(
         &self,
         facts: &StatementFacts,
         now: i64,
@@ -2033,7 +2082,7 @@ impl Policy {
 
         if let Some(externals) = &a.external_signatures {
             for external in externals {
-                results.push(external.evaluate(facts, root_sources));
+                results.push(external.evaluate(facts, root_sources).await);
             }
         }
 

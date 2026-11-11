@@ -20,7 +20,7 @@ use crate::labels;
 use crate::statement::Sign1;
 use tav_cose::CborValue;
 use tav_crypto::{
-    CertificateBackend, CryptoBackend, KeyBackend, RsaPkcs1v15SignatureKeyAlgorithm,
+    AsyncCryptoBackend, AsyncKeyBackend, CertificateBackend, RsaPkcs1v15SignatureKeyAlgorithm,
     SignatureBackend, SignatureKeyAlgorithm,
 };
 
@@ -182,7 +182,13 @@ fn parse_sign1(descriptor: &CborValue) -> Result<Sign1> {
 ///
 /// `payload` is the statement's payload. A detached payload leaves nothing to
 /// check against and is reported as unusable rather than assumed empty.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn verify_detached(descriptor: &CborValue, payload: Option<&[u8]>) -> Detached {
+    ready(verify_detached_async(descriptor, payload))
+}
+
+/// [`verify_detached`] for asynchronous crypto backends.
+pub async fn verify_detached_async(descriptor: &CborValue<'_>, payload: Option<&[u8]>) -> Detached {
     let Some(payload) = payload else {
         return Detached::Unusable(
             "the statement's payload is detached, so there are no bytes to check the signature \
@@ -222,7 +228,7 @@ pub fn verify_detached(descriptor: &CborValue, payload: Option<&[u8]>) -> Detach
         Err(e) => return Detached::Unusable(e.to_string()),
     };
 
-    match verify(&der, algorithm, signature_bytes, payload) {
+    match verify(&der, algorithm, signature_bytes, payload).await {
         Ok(true) => Detached::Valid(signer),
         Ok(false) => Detached::Invalid {
             signer,
@@ -253,7 +259,16 @@ pub fn verify_detached(descriptor: &CborValue, payload: Option<&[u8]>) -> Detach
 /// agree, means a producer could embed what the supplier endorsed and register
 /// something else. Both signatures verify. Treating that as a pass would
 /// report an endorsement of bytes nobody is deploying.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn verify_cose_sign1(descriptor: &CborValue, payload: Option<&[u8]>) -> Detached {
+    ready(verify_cose_sign1_async(descriptor, payload))
+}
+
+/// [`verify_cose_sign1`] for asynchronous crypto backends.
+pub async fn verify_cose_sign1_async(
+    descriptor: &CborValue<'_>,
+    payload: Option<&[u8]>,
+) -> Detached {
     // Re-encoding to reach `Sign1::parse` is safe in a way re-encoding the
     // outer statement would not be. Nothing here is compared against the wire:
     // the protected bucket is a byte string, which round-trips exactly, and it
@@ -304,7 +319,7 @@ pub fn verify_cose_sign1(descriptor: &CborValue, payload: Option<&[u8]>) -> Deta
         }
     }
 
-    match verify_sign1(&inner, statement_payload, &leaf) {
+    match verify_sign1(&inner, statement_payload, &leaf).await {
         Ok(true) => Detached::Valid(signer),
         Ok(false) => Detached::Invalid {
             signer,
@@ -316,7 +331,13 @@ pub fn verify_cose_sign1(descriptor: &CborValue, payload: Option<&[u8]>) -> Deta
     }
 }
 
-fn verify_sign1(inner: &Sign1, payload: &[u8], der: &[u8]) -> Result<bool> {
+#[cfg(not(target_arch = "wasm32"))]
+fn ready(future: impl std::future::Future<Output = Detached>) -> Detached {
+    crate::ready::poll_once(future)
+        .unwrap_or_else(|| Detached::Unusable(crate::ready::SUSPENDED.into()))
+}
+
+async fn verify_sign1(inner: &Sign1, payload: &[u8], der: &[u8]) -> Result<bool> {
     let alg = inner.alg()?;
     let algorithm = key_algorithm(alg).ok_or(Error::UnsupportedAlgorithm(alg))?;
 
@@ -337,7 +358,7 @@ fn verify_sign1(inner: &Sign1, payload: &[u8], der: &[u8]) -> Result<bool> {
     .to_bytes_det()
     .map_err(|e| Error::Structure(format!("could not build the Sig_structure: {e:?}")))?;
 
-    verify(der, algorithm, &inner.signature, &tbs)
+    verify(der, algorithm, &inner.signature, &tbs).await
 }
 
 fn describe(der: &[u8], chain_len: usize) -> Result<DetachedSigner> {
@@ -354,7 +375,7 @@ fn describe(der: &[u8], chain_len: usize) -> Result<DetachedSigner> {
     })
 }
 
-fn verify(
+async fn verify(
     der: &[u8],
     algorithm: SignatureKeyAlgorithm,
     signature: &[u8],
@@ -364,7 +385,8 @@ fn verify(
         .map_err(|e| Error::Crypto(format!("the signer's certificate is not valid DER: {e}")))?;
     let spki = <tav_crypto::Crypto as CertificateBackend>::get_public_key(&cert)
         .map_err(|e| Error::Crypto(format!("could not read the signer's public key: {e}")))?;
-    let key = <tav_crypto::Key as KeyBackend>::from_spki_der(&spki, algorithm)
+    let key = <tav_crypto::Key as AsyncKeyBackend>::from_spki_der(&spki, algorithm)
+        .await
         .map_err(|e| Error::Crypto(format!("could not import the signer's public key: {e}")))?;
 
     // A signature of the wrong length or shape for the declared algorithm is a
@@ -376,7 +398,11 @@ fn verify(
         return Ok(false);
     };
 
-    Ok(<tav_crypto::Crypto as CryptoBackend>::verify_signature(&key, &signature, payload).is_ok())
+    Ok(
+        <tav_crypto::Crypto as AsyncCryptoBackend>::verify_signature(&key, &signature, payload)
+            .await
+            .is_ok(),
+    )
 }
 
 #[cfg(test)]

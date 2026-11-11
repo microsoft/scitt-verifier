@@ -521,7 +521,7 @@ fn ecdsa(
 ) -> std::result::Result<SignatureKeyAlgorithm, String> {
     #[cfg(target_arch = "wasm32")]
     {
-        Err("the WebCrypto backend verifies only RSA certificate signatures".into())
+        Err("the WebCrypto backend does not verify ECDSA certificate signatures".into())
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -1272,7 +1272,7 @@ mod tests {
         let mismatched = admitted(&signed_with(ECDSA_SHA384, &[]), &p256_issuer);
         assert!(mismatched.is_none());
         if cfg!(target_arch = "wasm32") {
-            assert!(matched.is_none(), "WebCrypto verifies only RSA paths");
+            assert!(matched.is_none(), "WebCrypto does not verify ECDSA paths");
         } else {
             assert!(matches!(
                 matched,

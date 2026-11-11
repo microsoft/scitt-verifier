@@ -5,7 +5,7 @@ use crate::error::{Error, Result};
 use crate::labels;
 use sha2::{Digest, Sha256};
 use tav_cose::CborValue;
-use tav_crypto::{CertificateBackend, KeyBackend};
+use tav_crypto::{AsyncKeyBackend, CertificateBackend};
 
 /// COSE_Sign1 CBOR tag.
 pub const COSE_SIGN1_TAG: u64 = 18;
@@ -293,11 +293,18 @@ impl Sign1 {
     ///
     /// Only the signature is checked here. Whether the signing certificate is
     /// one you trust is a policy question, answered elsewhere.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn verify_signature(&self, spki_der: &[u8]) -> Result<bool> {
+        crate::ready::run(self.verify_signature_async(spki_der))
+    }
+
+    /// [`Sign1::verify_signature`] for asynchronous crypto backends.
+    pub async fn verify_signature_async(&self, spki_der: &[u8]) -> Result<bool> {
         let alg = self.alg()?;
         let algorithm = tav_cose::signature_key_algorithm_for_cose_alg(alg)
             .map_err(|_| Error::UnsupportedAlgorithm(alg))?;
-        let key = <tav_crypto::Key as KeyBackend>::from_spki_der(spki_der, algorithm)
+        let key = <tav_crypto::Key as AsyncKeyBackend>::from_spki_der(spki_der, algorithm)
+            .await
             .map_err(|e| Error::Crypto(format!("could not import public key: {e}")))?;
 
         let payload = self
@@ -305,13 +312,14 @@ impl Sign1 {
             .as_deref()
             .ok_or_else(|| Error::Structure("statement payload is detached".into()))?;
 
-        Ok(tav_cose::synchronous::cose_verify1(
+        Ok(tav_cose::asynchronous::cose_verify1(
             &key,
             algorithm,
             &self.protected_raw,
             payload,
             &self.signature,
         )
+        .await
         .is_ok())
     }
 

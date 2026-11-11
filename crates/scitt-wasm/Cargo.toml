@@ -34,11 +34,11 @@ scitt-receipt = { path = "../scitt-receipt", default-features = false }
 scitt-policy = { path = "../scitt-policy", default-features = false }
 serde_json = "1"
 wasm-bindgen = ">=0.2, <0.3"
+wasm-bindgen-futures = ">=0.4, <0.5"
 
 [features]
-# The pure-Rust backend is synchronous, so `verify_statement` stays a plain
-# function and the JavaScript shim needs no async plumbing. WebCrypto is async
-# all the way down and would force a change to the core's API.
+# On wasm32 this selects WebCrypto, which is async-only, so the verifying
+# exports return Promises (see the crate docs).
 default = ["crypto_compliant"]
 crypto_compliant = ["scitt-receipt/crypto_compliant", "scitt-policy/crypto_compliant"]
 
