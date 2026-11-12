@@ -172,13 +172,14 @@ crate:
    statements round-trip through it byte-identically. That matters because the
    claim digest is computed over a *re-encoded* statement; a non-canonical
    encoder would silently change the digest and break every receipt.
-2. **The crypto backend is swappable at compile time** — pure Rust, OpenSSL, or
-   WebCrypto. The pure-Rust backend needs no OpenSSL, no C compiler, and no
-   external crypto library. Native builds still require a Rust-compatible
-   linker; the same core also supports the WASM consumer.
+2. **The crypto backend is chosen per target** — OpenSSL, Windows CNG, or
+   WebCrypto, all delegating to platform crypto. WebCrypto is async, so the
+   core is written once against TAV's async traits and native callers use sync
+   wrappers over it.
 
-We verify real PS256 statements with 4-certificate chains through the pure-Rust
-path, so this is measured rather than assumed.
+The same corpus — real PS256 statements with 4-certificate chains — runs through
+the native backends in `cargo test` and through WebCrypto in the Node harness,
+so this is measured rather than assumed.
 
 ## Verification order, and why
 

@@ -40,24 +40,25 @@ serde_json = "1"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Only to switch on `vendored` for release builds; the crypto layer already
+# depends on `openssl` on these targets, and this unifies with it.
+[target.'cfg(all(not(target_family = "wasm"), not(windows)))'.dependencies]
+openssl = { version = "0.10", optional = true }
+
 [features]
-default = ["crypto_pure_rust"]
-crypto_pure_rust = [
-    "scitt-receipt/crypto_pure_rust",
-    "scitt-policy/crypto_pure_rust",
-    "acl?/crypto_pure_rust",
-    "maa?/crypto_pure_rust",
-    "snpdev?/crypto_pure_rust",
-    "repro/crypto_pure_rust",
+default = ["crypto_compliant"]
+crypto_compliant = [
+    "scitt-receipt/crypto_compliant",
+    "scitt-policy/crypto_compliant",
+    "acl?/crypto_compliant",
+    "maa?/crypto_compliant",
+    "snpdev?/crypto_compliant",
+    "repro/crypto_compliant",
 ]
-crypto_openssl = [
-    "scitt-receipt/crypto_openssl",
-    "scitt-policy/crypto_openssl",
-    "acl?/crypto_openssl",
-    "maa?/crypto_openssl",
-    "snpdev?/crypto_openssl",
-    "repro/crypto_openssl",
-]
+# Build and statically link OpenSSL instead of using the system copy. Release
+# binaries use it so they run without a matching libssl on the target host;
+# development builds use the system OpenSSL. No effect on Windows or WASM.
+vendored-openssl = ["dep:openssl", "openssl/vendored"]
 # The Azure Confidential Ledger adapter: appraise saved or explicitly acquired
 # ledger evidence against the execution policy an accepted statement embeds.
 adapter-azure-confidential-ledger = ["dep:acl", "acl/azure-confidential-ledger"]

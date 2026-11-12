@@ -7,8 +7,10 @@ cargo build
 cargo test
 ```
 
-The default crypto backend is pure Rust, so it needs no OpenSSL installation.
-Native builds still need the linker required by the chosen Rust toolchain.
+The crypto backend is chosen per target: Windows CNG on Windows, OpenSSL on
+Linux and macOS (so those builds need OpenSSL development files), and WebCrypto
+in WASM. Native builds also need the linker required by the chosen Rust
+toolchain.
 The optional MST ledger adapter is enabled with `--features adapter-azure-confidential-ledger`.
 The MAA adapter uses `--features adapter-azure-attestation`; see
 [its supported scope](docs/adapters.md#microsoft-azure-attestation-maa).

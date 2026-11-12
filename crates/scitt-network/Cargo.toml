@@ -13,8 +13,8 @@ authors.workspace = true
 # what lets the CLI reach a ledger without either of them learning how.
 #
 # The TLS provider is `rustls-graviola` rather than the more common `ring` or
-# `aws-lc-rs` backends because both of those need a C toolchain, which would
-# cost the pure-Rust build the rest of this workspace has. That choice carries
+# `aws-lc-rs` backends because both of those need a C toolchain, which the
+# Windows build otherwise does not. That choice carries
 # no FIPS claim; see docs/trust-material.md.
 [dependencies]
 scitt-receipt = { path = "../scitt-receipt", default-features = false }
@@ -31,6 +31,5 @@ rustls-pki-types = "1"
 webpki-roots = "1"
 
 [features]
-default = ["crypto_pure_rust"]
-crypto_pure_rust = ["scitt-receipt/crypto_pure_rust"]
-crypto_openssl = ["scitt-receipt/crypto_openssl"]
+default = ["crypto_compliant"]
+crypto_compliant = ["scitt-receipt/crypto_compliant"]

@@ -15,10 +15,11 @@ a check that never ran.
 
 ## Design
 
-**Synchronous.** Built with `crypto_pure_rust`, not `crypto_webcrypto`. WebCrypto
-is async, which would make `verify_statement` async and push `await` through
-every caller for no gain — the pure-Rust backend verifies these statements in
-single-digit milliseconds.
+**Asynchronous.** Built with TAV's WebCrypto backend, which is async, so
+`verifyStatement`, `verifyStatementWithServiceCert` and `evaluatePolicy` return
+Promises. The other exports do no signature verification and stay synchronous.
+WebCrypto does not verify ECDSA certificate signatures, so an ECDSA-signed chain
+is reported as `unsupported` here even though the native CLI verifies it.
 
 **No verdicts.** The API returns facts, never an `isValid` boolean. "Valid" means
 something different to a deployment gate than to someone browsing a ledger, so
@@ -86,7 +87,8 @@ the boundary have to agree for the pinned digests to come out right.
 | `describeCertificate(der)` | A single certificate's contents |
 | `version()` | The crate version |
 
-All return JSON strings. Errors are thrown as JavaScript exceptions.
+All return JSON strings; the first three resolve to them through a Promise.
+Errors are thrown as JavaScript exceptions, or reject the Promise.
 
 `trustedRoots` is optional PEM text holding one or more `CERTIFICATE` blocks.
 The chain is always validated; without roots it is validated only up to the
@@ -96,7 +98,7 @@ a root. With roots, a chain that does not reach one is `invalid`. An empty
 string or a PEM with no certificate in it throws rather than being read as "no
 roots". `chainValidation.outcome` is `valid`, `invalid`, `insufficient` (too
 few certificates to evaluate) or `unsupported` (an algorithm this build does
-not validate, such as an ECDSA-signed chain), and has the same shape as the
+not validate, such as an ECDSA-signed chain in WASM), and has the same shape as the
 CLI's `certificateChain` record.
 
 The verification functions accept optional UTF-8 policy bytes, using the same

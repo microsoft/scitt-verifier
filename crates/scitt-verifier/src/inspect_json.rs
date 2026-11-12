@@ -90,7 +90,7 @@ fn header_bucket(bucket: &CborValue, verbose: bool) -> Value {
                 Some(name) => (name.to_string(), true),
                 None => (i.to_string(), false),
             },
-            CborValue::TextString(s) => (s.clone(), false),
+            CborValue::TextString(s) => (s.to_string(), false),
             other => (cbor::type_name(other).to_string(), false),
         };
         if !known {
@@ -146,7 +146,7 @@ fn cwt_claims(value: &CborValue, verbose: bool) -> Value {
             CborValue::Int(i) => labels::cwt_claim_name(*i)
                 .map(str::to_owned)
                 .unwrap_or_else(|| i.to_string()),
-            CborValue::TextString(s) => s.clone(),
+            CborValue::TextString(s) => s.to_string(),
             other => cbor::type_name(other).to_string(),
         };
         // Dates are rendered as numbers, not strings, and are unwrapped from
@@ -320,7 +320,7 @@ fn proofs(value: &CborValue, verbose: bool) -> Value {
         }
         let name = match key {
             CborValue::Int(i) => i.to_string(),
-            CborValue::TextString(s) => s.clone(),
+            CborValue::TextString(s) => s.to_string(),
             other => cbor::type_name(other).to_string(),
         };
         out.insert(name, generic(item, verbose));
@@ -506,7 +506,7 @@ fn generic(value: &CborValue, verbose: bool) -> Value {
             for (k, v) in entries {
                 let key = match k {
                     CborValue::Int(i) => i.to_string(),
-                    CborValue::TextString(s) => s.clone(),
+                    CborValue::TextString(s) => s.to_string(),
                     other => cbor::type_name(other).to_string(),
                 };
                 out.insert(key, generic(v, verbose));
@@ -543,7 +543,7 @@ mod tests {
     #[test]
     fn a_long_text_header_is_summarised_but_not_dropped() {
         let long = "A".repeat(TEXT_LIMIT + 50);
-        let value = CborValue::TextString(long.clone());
+        let value = CborValue::text(long.clone());
 
         let elided = generic(&value, false);
         assert_eq!(elided["chars"], json!(long.len()));
@@ -561,7 +561,7 @@ mod tests {
 
     #[test]
     fn eliding_a_multibyte_string_does_not_split_a_character() {
-        let value = CborValue::TextString("é".repeat(TEXT_LIMIT));
+        let value = CborValue::text("é".repeat(TEXT_LIMIT));
         let elided = generic(&value, false);
         // Reaching this assertion at all is the test: slicing on a non-boundary
         // would have panicked above.

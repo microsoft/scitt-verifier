@@ -186,8 +186,9 @@ Run `cargo test` with the same `-p`/`--features` pairs (CI only lints the
 combined feature set). `.github/workflows/ci.yml` is the source of truth if
 this list drifts.
 
-`RUSTFLAGS: -D warnings` in CI, so a warning is a failure. The release binary
-has a 4 MiB budget and the WASM bundle 1 MiB; both are enforced.
+`RUSTFLAGS: -D warnings` in CI, so a warning is a failure. The shipped release
+binary (static musl, vendored OpenSSL, with or without an adapter) has an 8 MiB
+budget and the WASM bundle 1 MiB; both are enforced.
 
 ## Style
 

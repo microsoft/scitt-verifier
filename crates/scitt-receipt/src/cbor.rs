@@ -6,9 +6,9 @@
 use crate::error::{Error, Result};
 use tav_cose::CborValue;
 
-pub fn as_bytes(v: &CborValue) -> Result<&[u8]> {
+pub fn as_bytes<'a>(v: &'a CborValue<'_>) -> Result<&'a [u8]> {
     match v {
-        CborValue::ByteString(b) => Ok(b),
+        CborValue::ByteString(b) => Ok(b.as_ref()),
         other => Err(Error::Structure(format!(
             "expected byte string, got {}",
             type_name(other)
@@ -16,9 +16,9 @@ pub fn as_bytes(v: &CborValue) -> Result<&[u8]> {
     }
 }
 
-pub fn as_text(v: &CborValue) -> Result<&str> {
+pub fn as_text<'a>(v: &'a CborValue<'_>) -> Result<&'a str> {
     match v {
-        CborValue::TextString(s) => Ok(s),
+        CborValue::TextString(s) => Ok(s.as_ref()),
         other => Err(Error::Structure(format!(
             "expected text string, got {}",
             type_name(other)
@@ -49,7 +49,7 @@ pub fn as_numeric_date(v: &CborValue) -> Result<i64> {
     }
 }
 
-pub fn as_array(v: &CborValue) -> Result<&Vec<CborValue>> {
+pub fn as_array<'a, 'b>(v: &'a CborValue<'b>) -> Result<&'a Vec<CborValue<'b>>> {
     match v {
         CborValue::Array(a) => Ok(a),
         other => Err(Error::Structure(format!(
@@ -60,7 +60,7 @@ pub fn as_array(v: &CborValue) -> Result<&Vec<CborValue>> {
 }
 
 /// Optional map lookup by integer key. Absent is not an error.
-pub fn opt_int_key(map: &CborValue, key: i64) -> Option<&CborValue> {
+pub fn opt_int_key<'a, 'b>(map: &'a CborValue<'b>, key: i64) -> Option<&'a CborValue<'b>> {
     match map {
         CborValue::Map(entries) => entries
             .iter()
@@ -71,7 +71,7 @@ pub fn opt_int_key(map: &CborValue, key: i64) -> Option<&CborValue> {
 }
 
 /// Optional map lookup by text key. Absent is not an error.
-pub fn opt_text_key<'a>(map: &'a CborValue, key: &str) -> Option<&'a CborValue> {
+pub fn opt_text_key<'a, 'b>(map: &'a CborValue<'b>, key: &str) -> Option<&'a CborValue<'b>> {
     match map {
         CborValue::Map(entries) => entries
             .iter()
@@ -81,7 +81,7 @@ pub fn opt_text_key<'a>(map: &'a CborValue, key: &str) -> Option<&'a CborValue> 
     }
 }
 
-pub fn req_int_key(map: &CborValue, key: i64) -> Result<&CborValue> {
+pub fn req_int_key<'a, 'b>(map: &'a CborValue<'b>, key: i64) -> Result<&'a CborValue<'b>> {
     opt_int_key(map, key).ok_or_else(|| Error::Structure(format!("missing map key {key}")))
 }
 
@@ -89,7 +89,7 @@ pub fn req_int_key(map: &CborValue, key: i64) -> Result<&CborValue> {
 pub fn as_kid(v: &CborValue) -> Result<String> {
     match v {
         CborValue::ByteString(b) => Ok(b.iter().map(|c| *c as char).collect()),
-        CborValue::TextString(s) => Ok(s.clone()),
+        CborValue::TextString(s) => Ok(s.to_string()),
         other => Err(Error::Structure(format!(
             "kid must be bstr or tstr, got {}",
             type_name(other)

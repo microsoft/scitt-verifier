@@ -110,12 +110,10 @@ pub(crate) fn verify_binding(
 
 /// Verify that `issuer_der` signed `subject_der`.
 ///
-/// Not `scitt_receipt::chain::validate`, which cannot answer this question:
-/// the pinned X.509 backend parses only RSA signature algorithms, so it
-/// reports every ECDSA-signed certificate as one this build cannot check — and
-/// CCF signs both its service and node certificates with ECDSA P-384. What the
-/// backend *can* do is verify a raw ECDSA signature, so the certificate is
-/// taken apart here and that primitive is used directly.
+/// Not `scitt_receipt::chain::validate`, which answers a different question —
+/// full path validation. CCF signs both its service and node certificates with
+/// ECDSA P-384; the certificate is taken apart here so the backend's raw ECDSA
+/// primitive verifies the one link directly.
 ///
 /// Only the issuer relationship is established. This is not path validation:
 /// there is exactly one link, the anchor is supplied by the consumer rather
