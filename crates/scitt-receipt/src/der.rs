@@ -110,9 +110,9 @@ pub fn spki_from_ec_point(curve: Curve, x: &[u8], y: &[u8]) -> Result<Vec<u8>> {
 
     let mut point = Vec::with_capacity(1 + 2 * n);
     point.push(0x04); // uncompressed
-    point.extend(std::iter::repeat(0u8).take(n - x.len()));
+    point.extend(std::iter::repeat_n(0u8, n - x.len()));
     point.extend_from_slice(x);
-    point.extend(std::iter::repeat(0u8).take(n - y.len()));
+    point.extend(std::iter::repeat_n(0u8, n - y.len()));
     point.extend_from_slice(y);
 
     let mut alg_id = Vec::new();

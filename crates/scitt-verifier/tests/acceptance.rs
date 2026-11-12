@@ -1985,7 +1985,7 @@ fn a_detached_signature_in_a_protected_header_can_be_verified() {
     let r = verify_cbor_header_fixture(
         "pass",
         r#"{"externalSignatures":[{"path":["external-signature",0],"signedOver":"payload",
-            "signerSubjectContains":"CN=Example External Signer",
+            "signerSubjectContains":"Example Component Supplier",
             "signerIssuerContains":"CN=Example External Signer"}]}"#,
     );
     assert_eq!(r.code, 0, "{}", r.stdout);
@@ -2085,7 +2085,7 @@ fn a_nested_cose_sign1_can_be_verified() {
     let r = verify_nested_fixture(
         "pass",
         r#"{"externalSignatures":[{"path":["external-statement"],"signedOver":"coseSign1",
-            "signerSubjectContains":"CN=Example External Signer",
+            "signerSubjectContains":"Example Component Supplier",
             "signerIssuerContains":"CN=Example External Signer"}]}"#,
     );
     assert_eq!(r.code, 0, "{}", r.stdout);

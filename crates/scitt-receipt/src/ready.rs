@@ -11,14 +11,7 @@
 
 use crate::error::{Error, Result};
 use std::future::Future;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
-
-struct Noop;
-
-impl Wake for Noop {
-    fn wake(self: Arc<Self>) {}
-}
+use std::task::{Context, Poll, Waker};
 
 /// Why a synchronous entry point gave up, for callers that report it.
 pub const SUSPENDED: &str =
@@ -26,8 +19,7 @@ pub const SUSPENDED: &str =
 
 /// Poll `future` once. `None` means it suspended.
 pub fn poll_once<F: Future>(future: F) -> Option<F::Output> {
-    let waker = Waker::from(Arc::new(Noop));
-    let mut cx = Context::from_waker(&waker);
+    let mut cx = Context::from_waker(Waker::noop());
     let mut future = std::pin::pin!(future);
     match future.as_mut().poll(&mut cx) {
         Poll::Ready(output) => Some(output),
