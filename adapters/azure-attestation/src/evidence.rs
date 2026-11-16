@@ -98,7 +98,7 @@ fn key_evidence(key: &Key) -> Result<Option<Evidence>, String> {
     let mut evidence = None;
     for (index, encoded) in key.x5c.iter().enumerate() {
         let der = bounded_decode(encoded, Alphabet::Standard, MAX_CERT)?;
-        let cert = <tav_crypto::Crypto as CertificateBackend>::from_der(&der)
+        let cert = scitt_receipt::der::parse_certificate(&der)
             .map_err(|e| format!("invalid x5c certificate: {e}"))?;
         let raw = <tav_crypto::Crypto as CertificateBackend>::get_extension_value_by_oid(
             &cert,
@@ -452,7 +452,7 @@ mod tests {
     }
 
     fn raw_evidence(der: &[u8]) -> RawEvidence {
-        let cert = <tav_crypto::Crypto as CertificateBackend>::from_der(der).unwrap();
+        let cert = scitt_receipt::der::parse_certificate(der).unwrap();
         let raw = <tav_crypto::Crypto as CertificateBackend>::get_extension_value_by_oid(
             &cert,
             EVIDENCE_OID,

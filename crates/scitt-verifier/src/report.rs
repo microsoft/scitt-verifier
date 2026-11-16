@@ -1710,7 +1710,7 @@ mod tests {
     /// integers and text. Offering a path for anything else would be a lie.
     #[test]
     fn a_key_no_policy_can_name_has_no_path() {
-        assert!(path_segment(&CborValue::ByteString(vec![1, 2, 3])).is_none());
+        assert!(path_segment(&CborValue::bytes(vec![1, 2, 3])).is_none());
         assert!(path_segment(&CborValue::Array(vec![])).is_none());
     }
 

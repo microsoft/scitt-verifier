@@ -14,6 +14,5 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [features]
-default = ["crypto_pure_rust"]
-crypto_pure_rust = ["scitt-receipt/crypto_pure_rust"]
-crypto_openssl = ["scitt-receipt/crypto_openssl"]
+default = ["crypto_compliant"]
+crypto_compliant = ["scitt-receipt/crypto_compliant"]

@@ -10,15 +10,14 @@
 //! *outside* the core for the same reason: a verdict is a consumer's opinion,
 //! and the core is deliberately free of them.
 //!
-//! ## Why the API is synchronous
+//! ## Why the verifying exports are async
 //!
-//! Built with `crypto_pure_rust`, every signature check is a plain function
-//! call. That keeps `verify_statement` synchronous here, which matters more
-//! than it looks: WebCrypto's `SubtleCrypto` is async-only, so a WebCrypto
-//! backend makes the whole call stack async — through `verify_receipt`, through
-//! `verify_statement`, and out into every caller. The pure-Rust backend is what
-//! lets one source tree serve a static binary and a browser without the two
-//! consumers disagreeing about function colour.
+//! On `wasm32` the only compliant crypto backend is WebCrypto, and
+//! `SubtleCrypto` is async-only. So `verifyStatement`,
+//! `verifyStatementWithServiceCert` and `evaluatePolicy` return Promises. The
+//! core is written once against async crypto traits; native callers get sync
+//! wrappers whose backends always finish on the first poll. Exports that only
+//! parse and describe bytes check no signatures and stay synchronous.
 //!
 //! ## Why JSON, and not `serde_wasm_bindgen`
 //!
@@ -66,9 +65,9 @@ pub fn version() -> String {
 /// displayed facts and evaluated assertions describe the same path. This
 /// function still returns facts, not policy outcomes.
 #[wasm_bindgen(js_name = verifyStatement)]
-pub fn verify_statement(
-    statement: &[u8],
-    key_set: &[u8],
+pub async fn verify_statement(
+    statement: Vec<u8>,
+    key_set: Vec<u8>,
     trusted_roots: Option<String>,
     policy: Option<Vec<u8>>,
 ) -> Result<String, JsValue> {
@@ -78,14 +77,16 @@ pub fn verify_statement(
         .transpose()
         .map_err(to_js)?;
     let options = verify_options(trusted_roots.as_deref(), policy.as_ref())?;
-    let keys = LedgerKeySet::from_cose_key_set(key_set).map_err(to_js)?;
+    let keys = LedgerKeySet::from_cose_key_set(&key_set).map_err(to_js)?;
 
-    let facts = scitt_receipt::verify_statement_with(statement, &keys, &options).map_err(to_js)?;
+    let facts = scitt_receipt::verify_statement_with_async(&statement, &keys, &options)
+        .await
+        .map_err(to_js)?;
 
     // Re-parsing to describe the chain costs a few hundred microseconds and
     // saves the caller a second entry point. The chain is what a human looks
     // at first when a signature fails to verify.
-    let chain = Sign1::parse(statement)
+    let chain = Sign1::parse(&statement)
         .map(|s| s.describe_chain())
         .unwrap_or_default();
 
@@ -131,10 +132,10 @@ pub fn verify_statement(
 /// chain; it has nothing to do with the service certificate.
 /// `policy` enables purpose checking as for `verifyStatement`.
 #[wasm_bindgen(js_name = verifyStatementWithServiceCert)]
-pub fn verify_statement_with_service_cert(
-    statement: &[u8],
-    key_set: &[u8],
-    service_cert: &str,
+pub async fn verify_statement_with_service_cert(
+    statement: Vec<u8>,
+    key_set: Vec<u8>,
+    service_cert: String,
     trusted_roots: Option<String>,
     policy: Option<Vec<u8>>,
 ) -> Result<String, JsValue> {
@@ -144,9 +145,9 @@ pub fn verify_statement_with_service_cert(
         .transpose()
         .map_err(to_js)?;
     let options = verify_options(trusted_roots.as_deref(), policy.as_ref())?;
-    let (service_key_kid, service_cert_sha256) = service_cert_identity(service_cert)?;
+    let (service_key_kid, service_cert_sha256) = service_cert_identity(&service_cert)?;
 
-    let keys = LedgerKeySet::from_cose_key_set(key_set).map_err(to_js)?;
+    let keys = LedgerKeySet::from_cose_key_set(&key_set).map_err(to_js)?;
 
     let key_set_json = json!({
         "keyCount": keys.keys.len(),
@@ -171,9 +172,11 @@ pub fn verify_statement_with_service_cert(
     };
 
     let only = keys.restricted_to(key);
-    let facts = scitt_receipt::verify_statement_with(statement, &only, &options).map_err(to_js)?;
+    let facts = scitt_receipt::verify_statement_with_async(&statement, &only, &options)
+        .await
+        .map_err(to_js)?;
 
-    let chain = Sign1::parse(statement)
+    let chain = Sign1::parse(&statement)
         .map(|s| s.describe_chain())
         .unwrap_or_default();
 
@@ -711,10 +714,10 @@ pub fn bind_artifact(
 /// key bound to the certificate is an exception here, because there are no
 /// facts to evaluate; `verifyStatementWithServiceCert` reports it as a result.
 #[wasm_bindgen(js_name = evaluatePolicy)]
-pub fn evaluate_policy(
-    statement: &[u8],
-    key_set: &[u8],
-    policy: &[u8],
+pub async fn evaluate_policy(
+    statement: Vec<u8>,
+    key_set: Vec<u8>,
+    policy: Vec<u8>,
     now: f64,
     trusted_roots: Option<String>,
     service_cert: Option<String>,
@@ -728,10 +731,10 @@ pub fn evaluate_policy(
 
     // A malformed policy is a usage error, not a finding: nothing was
     // evaluated, so there is no result to render and an exception is honest.
-    let policy = Policy::from_json(policy).map_err(to_js)?;
+    let policy = Policy::from_json(&policy).map_err(to_js)?;
     let options = verify_options(trusted_roots.as_deref(), Some(&policy))?;
 
-    let keys = LedgerKeySet::from_cose_key_set(key_set).map_err(to_js)?;
+    let keys = LedgerKeySet::from_cose_key_set(&key_set).map_err(to_js)?;
     let keys = match service_cert.as_deref() {
         Some(pem) => {
             let (kid, _) = service_cert_identity(pem)?;
@@ -745,9 +748,11 @@ pub fn evaluate_policy(
         }
         None => keys,
     };
-    let facts = scitt_receipt::verify_statement_with(statement, &keys, &options).map_err(to_js)?;
+    let facts = scitt_receipt::verify_statement_with_async(&statement, &keys, &options)
+        .await
+        .map_err(to_js)?;
 
-    let decision = policy.evaluate(&facts, now);
+    let decision = policy.evaluate_async(&facts, now).await;
 
     let out = json!({
         "policyId": decision.policy_id,

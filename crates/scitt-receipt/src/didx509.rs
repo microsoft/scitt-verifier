@@ -244,7 +244,7 @@ fn check_predicate(name: &str, value: &str, leaf_der: &[u8]) -> Result<Resolutio
 
 /// `eku` holds when the OID is among the leaf's extended key usages.
 fn check_eku(value: &str, leaf_der: &[u8]) -> Result<Resolution> {
-    let leaf = <tav_crypto::Crypto as CertificateBackend>::from_der(leaf_der)
+    let leaf = crate::der::parse_certificate(leaf_der)
         .map_err(|e| Error::Crypto(format!("leaf certificate is not valid DER: {e}")))?;
     let extension = <tav_crypto::Crypto as CertificateBackend>::get_extension_value_by_oid(
         &leaf,
@@ -287,7 +287,7 @@ fn check_eku(value: &str, leaf_der: &[u8]) -> Result<Resolution> {
 /// test and not equality: naming `CN` alone matches a subject that also
 /// carries `O` and `C`.
 fn check_subject(value: &str, leaf_der: &[u8]) -> Result<Resolution> {
-    let leaf = <tav_crypto::Crypto as CertificateBackend>::from_der(leaf_der)
+    let leaf = crate::der::parse_certificate(leaf_der)
         .map_err(|e| Error::Crypto(format!("leaf certificate is not valid DER: {e}")))?;
     let subject_der = <tav_crypto::Crypto as CertificateBackend>::subject_name_der(&leaf)
         .map_err(|e| Error::Crypto(format!("could not read leaf subject: {e}")))?;

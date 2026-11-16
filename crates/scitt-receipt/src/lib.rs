@@ -50,15 +50,18 @@ pub mod error;
 pub mod external;
 pub mod keys;
 pub mod labels;
+pub mod ready;
 pub mod receipt;
 pub mod statement;
 
 pub use binding::{bind, Binding, BindingMode, BindingReason, BindingReport};
 pub use error::{Error, Result};
 pub use keys::{KeyLookup, LedgerKey, LedgerKeySet, ServiceKeyMismatch};
+#[cfg(not(target_arch = "wasm32"))]
+pub use receipt::verify_receipt;
 pub use receipt::{
-    describe_inclusion_proof, describe_receipt, registration_txid, verify_receipt, InclusionProof,
-    ProofStep, ReceiptFacts, ReceiptSummary,
+    describe_inclusion_proof, describe_receipt, registration_txid, verify_receipt_async,
+    InclusionProof, ProofStep, ReceiptFacts, ReceiptSummary,
 };
 pub use statement::{
     describe_certificate, digest_with, render_scalar, sha256, sha256_hex,
@@ -131,7 +134,7 @@ pub struct StatementFacts {
     /// this is the strongest material a policy can read.
     ///
     /// `None` only when no statement was parsed.
-    pub protected: Option<CborValue>,
+    pub protected: Option<CborValue<'static>>,
     /// Every receipt found in the statement, verified or not.
     ///
     /// Receipts arrive in the statement's *unprotected* header bucket, which
@@ -228,6 +231,7 @@ impl StatementFacts {
 /// [`verify_statement_with`] to supply trusted roots and evaluate the chain.
 /// Kept as-is so existing callers keep their exact meaning rather than
 /// silently acquiring a check they never asked for.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn verify_statement(statement_bytes: &[u8], key_set: &LedgerKeySet) -> Result<StatementFacts> {
     verify_statement_with(statement_bytes, key_set, &VerifyOptions::default())
 }
@@ -243,7 +247,25 @@ pub struct VerifyOptions {
 }
 
 /// Verify a transparent statement end to end, minus policy.
+///
+/// Native crypto backends complete synchronously. Under WebCrypto, which
+/// is asynchronous, use [`verify_statement_with_async`]; this function does
+/// not exist on `wasm32`.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn verify_statement_with(
+    statement_bytes: &[u8],
+    key_set: &LedgerKeySet,
+    options: &VerifyOptions,
+) -> Result<StatementFacts> {
+    ready::run(verify_statement_with_async(
+        statement_bytes,
+        key_set,
+        options,
+    ))
+}
+
+/// [`verify_statement_with`] for asynchronous crypto backends.
+pub async fn verify_statement_with_async(
     statement_bytes: &[u8],
     key_set: &LedgerKeySet,
     options: &VerifyOptions,
@@ -268,7 +290,7 @@ pub fn verify_statement_with(
     // certificate. That proves internal consistency only; whether the chain
     // ends in a root you trust is checked by the caller.
     let signature_valid = match statement.leaf_spki() {
-        Ok(Some(spki)) => match statement.verify_signature(&spki) {
+        Ok(Some(spki)) => match statement.verify_signature_async(&spki).await {
             Ok(valid) => {
                 if !valid {
                     problems
@@ -296,7 +318,7 @@ pub fn verify_statement_with(
     // signature above was checked against the leaf the statement itself
     // carries, which proves internal consistency and nothing about who signed.
     let chain_outcome = match &options.chain {
-        Some(chain_options) => match chain::validate(&chain, chain_options) {
+        Some(chain_options) => match chain::validate_async(&chain, chain_options).await {
             Ok(outcome) => {
                 if let chain::Outcome::Invalid(reason) = &outcome {
                     problems.push(format!("certificate chain did not validate: {reason}"));
@@ -328,7 +350,7 @@ pub fn verify_statement_with(
     let mut receipts = Vec::new();
     let mut unevaluable_receipts = Vec::new();
     for (index, blob) in receipt_blobs.iter().enumerate() {
-        match verify_receipt(blob, &statement, key_set) {
+        match receipt::verify_receipt_async(blob, &statement, key_set).await {
             Ok(mut facts) => {
                 // Stamped here because this is the only place that knows where
                 // the blob sat in the envelope.

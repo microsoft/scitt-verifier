@@ -29,6 +29,5 @@ tav-crypto = { workspace = true }
 serde_json = "1"
 
 [features]
-default = ["crypto_pure_rust"]
-crypto_pure_rust = ["scitt-policy/crypto_pure_rust", "tav-caci/crypto_pure_rust", "tav-crypto/crypto_pure_rust"]
-crypto_openssl = ["scitt-policy/crypto_openssl", "tav-caci/crypto_openssl", "tav-crypto/crypto_openssl"]
+default = ["crypto_compliant"]
+crypto_compliant = ["scitt-policy/crypto_compliant", "tav-caci/crypto_openssl", "tav-caci/crypto_webcrypto", "tav-caci/crypto_windows", "tav-crypto/crypto_openssl", "tav-crypto/crypto_webcrypto", "tav-crypto/crypto_windows"]

@@ -73,7 +73,7 @@ pub struct LedgerKeySet {
 impl LedgerKeySet {
     /// Parse a COSE_KeySet: a CBOR array of COSE_Key maps.
     pub fn from_cose_key_set(bytes: &[u8]) -> Result<Self> {
-        let value = CborValue::from_bytes(bytes)
+        let value = CborValue::parse_nondet(bytes)
             .map_err(|e| Error::TrustMaterial(format!("key set is not valid CBOR: {e:?}")))?;
 
         let entries = cbor::as_array(&value).map_err(|_| {

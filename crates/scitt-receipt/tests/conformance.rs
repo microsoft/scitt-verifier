@@ -68,6 +68,18 @@ fn stripping_receipts_is_stable_across_reparse() {
 }
 
 #[test]
+fn certificate_names_keep_their_components_in_facts_and_summaries() {
+    let statement = Sign1::parse(&fixture("transparent-statement.cose")).unwrap();
+    let (subject, issuer) = statement.leaf_names().unwrap().unwrap();
+    let summary = statement.describe_chain();
+
+    assert!(subject.contains("CN="), "{subject}");
+    assert!(issuer.contains("CN="), "{issuer}");
+    assert_eq!(summary[0].subject.as_deref(), Some(subject.as_str()));
+    assert_eq!(summary[0].issuer.as_deref(), Some(issuer.as_str()));
+}
+
+#[test]
 fn key_set_parses_and_binds_kids_to_key_material() {
     let keys = key_set();
     assert!(!keys.keys.is_empty(), "fixture must contain usable keys");

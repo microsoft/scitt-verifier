@@ -20,7 +20,7 @@ use crate::labels;
 use crate::statement::Sign1;
 use tav_cose::CborValue;
 use tav_crypto::{
-    CertificateBackend, CryptoBackend, KeyBackend, RsaPkcs1v15SignatureKeyAlgorithm,
+    AsyncCryptoBackend, AsyncKeyBackend, CertificateBackend, RsaPkcs1v15SignatureKeyAlgorithm,
     SignatureBackend, SignatureKeyAlgorithm,
 };
 
@@ -89,7 +89,7 @@ fn key_algorithm(alg: i64) -> Option<SignatureKeyAlgorithm> {
     }
 }
 
-fn member(map: &CborValue, label: i64) -> Option<&CborValue> {
+fn member<'a, 'b>(map: &'a CborValue<'b>, label: i64) -> Option<&'a CborValue<'b>> {
     let CborValue::Map(entries) = map else {
         return None;
     };
@@ -99,9 +99,9 @@ fn member(map: &CborValue, label: i64) -> Option<&CborValue> {
         .map(|(_, v)| v)
 }
 
-fn bytes(value: Option<&CborValue>) -> Option<&[u8]> {
+fn bytes<'a>(value: Option<&'a CborValue<'_>>) -> Option<&'a [u8]> {
     match value {
-        Some(CborValue::ByteString(b)) => Some(b),
+        Some(CborValue::ByteString(b)) => Some(b.as_ref()),
         _ => None,
     }
 }
@@ -113,9 +113,9 @@ fn bytes(value: Option<&CborValue>) -> Option<&[u8]> {
 /// the shorthand would fail statements that are perfectly well formed.
 fn leaf_der(descriptor: &CborValue) -> Option<(Vec<u8>, usize)> {
     match member(descriptor, labels::X5CHAIN)? {
-        CborValue::ByteString(b) => Some((b.clone(), 1)),
+        CborValue::ByteString(b) => Some((b.to_vec(), 1)),
         CborValue::Array(items) => match items.first() {
-            Some(CborValue::ByteString(b)) => Some((b.clone(), items.len())),
+            Some(CborValue::ByteString(b)) => Some((b.to_vec(), items.len())),
             _ => None,
         },
         _ => None,
@@ -139,7 +139,7 @@ pub enum ChainMaterial {
 /// the producer supplied.
 pub fn certificate_chain(descriptor: &CborValue) -> ChainMaterial {
     match member(descriptor, labels::X5CHAIN) {
-        Some(CborValue::ByteString(der)) => ChainMaterial::Present(vec![der.clone()]),
+        Some(CborValue::ByteString(der)) => ChainMaterial::Present(vec![der.to_vec()]),
         Some(CborValue::Array(items)) if !items.is_empty() => {
             let mut chain = Vec::with_capacity(items.len());
             for (index, item) in items.iter().enumerate() {
@@ -148,7 +148,7 @@ pub fn certificate_chain(descriptor: &CborValue) -> ChainMaterial {
                         "x5chain entry {index} is not a DER byte string"
                     ));
                 };
-                chain.push(der.clone());
+                chain.push(der.to_vec());
             }
             ChainMaterial::Present(chain)
         }
@@ -173,7 +173,7 @@ pub fn cose_sign1_certificate_chain(descriptor: &CborValue) -> ChainMaterial {
 
 fn parse_sign1(descriptor: &CborValue) -> Result<Sign1> {
     let bytes = descriptor
-        .to_bytes()
+        .to_bytes_det()
         .map_err(|e| Error::Structure(format!("could not encode the nested COSE_Sign1: {e:?}")))?;
     Sign1::parse(&bytes)
 }
@@ -182,7 +182,13 @@ fn parse_sign1(descriptor: &CborValue) -> Result<Sign1> {
 ///
 /// `payload` is the statement's payload. A detached payload leaves nothing to
 /// check against and is reported as unusable rather than assumed empty.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn verify_detached(descriptor: &CborValue, payload: Option<&[u8]>) -> Detached {
+    ready(verify_detached_async(descriptor, payload))
+}
+
+/// [`verify_detached`] for asynchronous crypto backends.
+pub async fn verify_detached_async(descriptor: &CborValue<'_>, payload: Option<&[u8]>) -> Detached {
     let Some(payload) = payload else {
         return Detached::Unusable(
             "the statement's payload is detached, so there are no bytes to check the signature \
@@ -222,7 +228,7 @@ pub fn verify_detached(descriptor: &CborValue, payload: Option<&[u8]>) -> Detach
         Err(e) => return Detached::Unusable(e.to_string()),
     };
 
-    match verify(&der, algorithm, signature_bytes, payload) {
+    match verify(&der, algorithm, signature_bytes, payload).await {
         Ok(true) => Detached::Valid(signer),
         Ok(false) => Detached::Invalid {
             signer,
@@ -253,7 +259,16 @@ pub fn verify_detached(descriptor: &CborValue, payload: Option<&[u8]>) -> Detach
 /// agree, means a producer could embed what the supplier endorsed and register
 /// something else. Both signatures verify. Treating that as a pass would
 /// report an endorsement of bytes nobody is deploying.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn verify_cose_sign1(descriptor: &CborValue, payload: Option<&[u8]>) -> Detached {
+    ready(verify_cose_sign1_async(descriptor, payload))
+}
+
+/// [`verify_cose_sign1`] for asynchronous crypto backends.
+pub async fn verify_cose_sign1_async(
+    descriptor: &CborValue<'_>,
+    payload: Option<&[u8]>,
+) -> Detached {
     // Re-encoding to reach `Sign1::parse` is safe in a way re-encoding the
     // outer statement would not be. Nothing here is compared against the wire:
     // the protected bucket is a byte string, which round-trips exactly, and it
@@ -304,7 +319,7 @@ pub fn verify_cose_sign1(descriptor: &CborValue, payload: Option<&[u8]>) -> Deta
         }
     }
 
-    match verify_sign1(&inner, statement_payload, &leaf) {
+    match verify_sign1(&inner, statement_payload, &leaf).await {
         Ok(true) => Detached::Valid(signer),
         Ok(false) => Detached::Invalid {
             signer,
@@ -316,7 +331,13 @@ pub fn verify_cose_sign1(descriptor: &CborValue, payload: Option<&[u8]>) -> Deta
     }
 }
 
-fn verify_sign1(inner: &Sign1, payload: &[u8], der: &[u8]) -> Result<bool> {
+#[cfg(not(target_arch = "wasm32"))]
+fn ready(future: impl std::future::Future<Output = Detached>) -> Detached {
+    crate::ready::poll_once(future)
+        .unwrap_or_else(|| Detached::Unusable(crate::ready::SUSPENDED.into()))
+}
+
+async fn verify_sign1(inner: &Sign1, payload: &[u8], der: &[u8]) -> Result<bool> {
     let alg = inner.alg()?;
     let algorithm = key_algorithm(alg).ok_or(Error::UnsupportedAlgorithm(alg))?;
 
@@ -327,44 +348,45 @@ fn verify_sign1(inner: &Sign1, payload: &[u8], der: &[u8]) -> Result<bool> {
     // reads exactly like a forgery. Building the structure here keeps the two
     // apart: an algorithm this build cannot compute is refused above, by name.
     let tbs = CborValue::Array(vec![
-        CborValue::TextString(SIG_STRUCTURE_CONTEXT.into()),
-        CborValue::ByteString(inner.protected_raw.clone()),
+        CborValue::text(SIG_STRUCTURE_CONTEXT),
+        CborValue::bytes(inner.protected_raw.as_slice()),
         // external_aad, empty. Nothing in this profile supplies one, and a
         // value here would have to come from outside the statement.
-        CborValue::ByteString(Vec::new()),
-        CborValue::ByteString(payload.to_vec()),
+        CborValue::bytes(&[][..]),
+        CborValue::bytes(payload),
     ])
-    .to_bytes()
+    .to_bytes_det()
     .map_err(|e| Error::Structure(format!("could not build the Sig_structure: {e:?}")))?;
 
-    verify(der, algorithm, &inner.signature, &tbs)
+    verify(der, algorithm, &inner.signature, &tbs).await
 }
 
 fn describe(der: &[u8], chain_len: usize) -> Result<DetachedSigner> {
-    let cert = <tav_crypto::Crypto as CertificateBackend>::from_der(der)
+    let cert = crate::der::parse_certificate(der)
         .map_err(|e| Error::Crypto(format!("the signer's certificate is not valid DER: {e}")))?;
+    let subject = <tav_crypto::Crypto as CertificateBackend>::subject_name_der(&cert)
+        .map_err(|e| Error::Crypto(format!("could not read the signer's subject: {e}")))?;
+    let issuer = <tav_crypto::Crypto as CertificateBackend>::issuer_name_der(&cert)
+        .map_err(|e| Error::Crypto(format!("could not read the signer's issuer: {e}")))?;
     Ok(DetachedSigner {
-        subject: Some(<tav_crypto::Crypto as CertificateBackend>::subject_name(
-            &cert,
-        )),
-        issuer: Some(<tav_crypto::Crypto as CertificateBackend>::issuer_name(
-            &cert,
-        )),
+        subject: Some(crate::der::render_name(&subject)),
+        issuer: Some(crate::der::render_name(&issuer)),
         chain_len,
     })
 }
 
-fn verify(
+async fn verify(
     der: &[u8],
     algorithm: SignatureKeyAlgorithm,
     signature: &[u8],
     payload: &[u8],
 ) -> Result<bool> {
-    let cert = <tav_crypto::Crypto as CertificateBackend>::from_der(der)
+    let cert = crate::der::parse_certificate(der)
         .map_err(|e| Error::Crypto(format!("the signer's certificate is not valid DER: {e}")))?;
     let spki = <tav_crypto::Crypto as CertificateBackend>::get_public_key(&cert)
         .map_err(|e| Error::Crypto(format!("could not read the signer's public key: {e}")))?;
-    let key = <tav_crypto::Key as KeyBackend>::from_spki_der(&spki, algorithm)
+    let key = <tav_crypto::Key as AsyncKeyBackend>::from_spki_der(&spki, algorithm)
+        .await
         .map_err(|e| Error::Crypto(format!("could not import the signer's public key: {e}")))?;
 
     // A signature of the wrong length or shape for the declared algorithm is a
@@ -376,7 +398,11 @@ fn verify(
         return Ok(false);
     };
 
-    Ok(<tav_crypto::Crypto as CryptoBackend>::verify_signature(&key, &signature, payload).is_ok())
+    Ok(
+        <tav_crypto::Crypto as AsyncCryptoBackend>::verify_signature(&key, &signature, payload)
+            .await
+            .is_ok(),
+    )
 }
 
 #[cfg(test)]
@@ -404,8 +430,8 @@ mod tests {
     /// every time a producer omitted a field.
     #[test]
     fn an_incomplete_descriptor_cannot_be_evaluated() {
-        let cert = CborValue::Array(vec![CborValue::ByteString(vec![0x30, 0x82])]);
-        let sig = CborValue::ByteString(vec![0u8; 384]);
+        let cert = CborValue::Array(vec![CborValue::bytes(vec![0x30, 0x82])]);
+        let sig = CborValue::bytes(vec![0u8; 384]);
 
         let no_alg = map(vec![
             (labels::X5CHAIN, cert.clone()),
@@ -434,12 +460,9 @@ mod tests {
             (labels::ALG, CborValue::Int(-8)),
             (
                 labels::X5CHAIN,
-                CborValue::Array(vec![CborValue::ByteString(vec![0x30])]),
+                CborValue::Array(vec![CborValue::bytes(vec![0x30])]),
             ),
-            (
-                labels::DETACHED_SIGNATURE,
-                CborValue::ByteString(vec![0; 64]),
-            ),
+            (labels::DETACHED_SIGNATURE, CborValue::bytes(vec![0; 64])),
         ]);
         let why = unusable(verify_detached(&descriptor, Some(b"x")));
         assert!(why.contains("EdDSA"), "{why}");
@@ -465,12 +488,9 @@ mod tests {
             (labels::ALG, CborValue::Int(labels::alg::RS256)),
             (
                 labels::X5CHAIN,
-                CborValue::Array(vec![CborValue::ByteString(b"not a certificate".to_vec())]),
+                CborValue::Array(vec![CborValue::bytes(b"not a certificate".to_vec())]),
             ),
-            (
-                labels::DETACHED_SIGNATURE,
-                CborValue::ByteString(vec![0; 384]),
-            ),
+            (labels::DETACHED_SIGNATURE, CborValue::bytes(vec![0; 384])),
         ]);
         assert!(unusable(verify_detached(&descriptor, Some(b"x"))).contains("valid DER"));
     }

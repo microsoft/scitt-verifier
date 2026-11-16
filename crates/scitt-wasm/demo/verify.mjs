@@ -99,8 +99,8 @@ check('core version is reported', typeof version === 'string' && version.length 
 console.log(`      core v${version}`);
 
 const scenarios = vm.runInContext('SCENARIOS', ctx);
-const load = (i) => {
-  vm.runInContext(`loadScenario(SCENARIOS[${i}])`, ctx);
+const load = async (i) => {
+  await vm.runInContext(`loadScenario(SCENARIOS[${i}])`, ctx);
   return {
     headline: el('banner-headline').textContent,
     because: el('banner-because').textContent,
@@ -134,7 +134,7 @@ const EXPECTED = [
 
 for (let i = 0; i < EXPECTED.length; i++) {
   console.log(`\n--- scenario ${i + 1}: ${scenarios[i].label} ---`);
-  const r = load(i);
+  const r = await load(i);
   check('rendered without throwing', r.error, null);
   check('results are visible', r.shown, true);
   check('headline', r.headline, EXPECTED[i][0]);
@@ -145,7 +145,7 @@ for (let i = 0; i < EXPECTED.length; i++) {
 // to believe it. The three cases must stay visually distinct, because calling a
 // digest "the payload" would misrepresent what was signed.
 console.log('\n--- payload: a carried document ---');
-load(0);
+await load(0);
 contains('content type is shown', el('payload-meta').innerHTML, 'Content type');
 contains('sha-256 is qualified against the claim digest',
   el('payload-meta').innerHTML, 'Not the claim digest');
@@ -153,7 +153,7 @@ check('content is offered', el('payload-details').style.display, '');
 check('body is non-empty', el('payload-body').textContent.length > 0, true);
 
 console.log('\n--- payload: a hash envelope is a digest, not content ---');
-const env = load(7);
+const env = await load(7);
 check('rendered without throwing', env.error, null);
 contains('labelled as a digest', el('payload-meta').innerHTML, 'Digest, not content');
 contains('says the statement does not carry the content',
@@ -170,39 +170,39 @@ check('no content pane to mistake for the document', el('payload-details').style
 // The binding result stays visible in the evidence table rather than being
 // hidden behind the higher-precedence failure.
 console.log('\n--- a tampered payload is not a tampered receipt ---');
-const tamperedPayload = load(2);
+const tamperedPayload = await load(2);
 contains('names the signature as the primary finding', tamperedPayload.because, 'signature did not verify');
 contains('binding row still shows the receipt points elsewhere',
   tamperedPayload.evidence, 'Not this statement');
-const tamperedReceipt = load(3);
+const tamperedReceipt = await load(3);
 contains("says the statement's own signature is intact", tamperedReceipt.because, "root signature");
 contains('statement signature still reported valid', tamperedReceipt.evidence, 'Valid');
 
 console.log('\n--- an unknown key is unproven, not disproven ---');
-const stale = load(4);
+const stale = await load(4);
 contains('rotation and forgery look alike', stale.because, 'rotation');
 check('not styled as a failure', stale.banner.includes('v-fail'), false);
 
 console.log('\n--- policy failure names what it saw ---');
-const wrongPolicy = load(1);
+const wrongPolicy = await load(1);
 contains('a failing assertion is rendered', wrongPolicy.assertions, 't-fail');
 contains('detail names the observed issuer', wrongPolicy.assertions, 'mst-test-scitt-verifier');
 contains('and the verdict separates policy from tampering', wrongPolicy.because, 'different finding');
 
 console.log('\n--- editing the policy changes the verdict, with no rebuild ---');
-load(0);
+await load(0);
 check('starts verified', el('banner-headline').textContent, 'Verified');
 el('policy').value = JSON.stringify({
   policyId: 'demo/edited', policyVersion: '1',
   assertions: { issuer: ['not-this-ledger.example'] },
 });
-vm.runInContext('run()', ctx);
+await vm.runInContext('run()', ctx);
 check('flips on re-evaluate', el('banner-headline').textContent, 'Policy not satisfied');
 contains('and reports the edited policy', el('policy-meta').textContent, 'demo/edited');
 
 console.log('\n--- a malformed policy is surfaced, not swallowed ---');
 el('policy').value = '{ not json';
-vm.runInContext('run()', ctx);
+await vm.runInContext('run()', ctx);
 check('error is shown', el('error').style.display, 'block');
 check('results are hidden', el('verdict').classList.contains('on'), false);
 
@@ -211,14 +211,14 @@ check('results are hidden', el('verdict').classList.contains('on'), false);
 // into "this is the wrong file" would halt a release over a mode the operator
 // typed wrong.
 console.log('\n--- artifact binding: the check a signature cannot make ---');
-const bound = load(5);
+const bound = await load(5);
 contains('the evidence table names binding', bound.evidence, 'Artifact binding');
 contains('reported as bound', bound.evidence, 'Bound');
 contains('names the file it compared', bound.evidence, 'artifact.bin');
 contains('records the mode as declared', bound.evidence, 'declared mode payload-bytes');
 check('the gap is no longer claimed', el('gap-artifact').style.display, 'none');
 
-const wrong = load(6);
+const wrong = await load(6);
 contains('a genuine statement about another file is a failure', wrong.because, 'genuine');
 contains('the statement signature is still reported valid', wrong.evidence, 'Valid');
 contains('the mismatch names both digests', wrong.evidence, 'does not equal');
@@ -226,7 +226,7 @@ check('the gap is restated rather than hidden', el('gap-artifact').style.display
 
 // Without an artifact the page must say so rather than implying a file was
 // checked. This is the state every user-loaded statement starts in.
-const noArtifact = load(0);
+const noArtifact = await load(0);
 contains('no artifact means not requested', noArtifact.evidence, 'Not requested');
 
 // A mode that does not fit the statement is a limitation of the request. The
@@ -237,14 +237,14 @@ contains('no artifact means not requested', noArtifact.evidence, 'Not requested'
 // that ordering is worth pinning too. The binding result is still reported in
 // the evidence table, which is where this section reads it.
 console.log('\n--- a mode that does not fit refuses rather than accuses ---');
-load(7);
+await load(7);
 check('the banner stops at the missing receipt', el('banner-headline').textContent, 'Unavailable');
 contains('the envelope binds under payload-digest', el('evidence').innerHTML, 'Bound');
 contains('recording the declared mode', el('evidence').innerHTML, 'declared mode payload-digest');
 contains('and saying what matched', el('evidence').innerHTML, 'equals the statement');
 
 el('binding-mode').value = 'payload-bytes';
-vm.runInContext('run()', ctx);
+await vm.runInContext('run()', ctx);
 contains('switching to the wrong mode cannot compare', el('evidence').innerHTML, 'Cannot compare');
 check('and never reports a mismatch it has no evidence for',
   el('evidence').innerHTML.includes('Mismatch'), false);
@@ -255,10 +255,10 @@ check('never styled as a failure', el('banner').className.includes('v-fail'), fa
 // rendering of it. Only one rule differs between the two scenarios, so only
 // one row may change outcome.
 console.log('\n--- payload claims are policy, evaluated inside the signature ---');
-const claims = load(8);
+const claims = await load(8);
 contains('payload assertions are rendered', claims.assertions, 'payloadJson');
 check('none of them fail', claims.assertions.includes('t-fail'), false);
-const claimMiss = load(9);
+const claimMiss = await load(9);
 contains('a failing payload assertion is rendered', claimMiss.assertions, 't-fail');
 contains('naming the claim it read', claimMiss.assertions, 'source-repository');
 check('exactly one assertion fails', (claimMiss.assertions.match(/t-fail/g) || []).length, 1);
@@ -268,18 +268,18 @@ contains('the statement itself is still genuine', claimMiss.evidence, 'Valid');
 // The page must say so on success, and stop saying it only once a root the
 // operator trusts has been supplied.
 console.log('\n--- the signer chain: consistent is not anchored ---');
-const selfAnchored = load(0);
+const selfAnchored = await load(0);
 contains('the chain row is rendered', selfAnchored.evidence, 'Signer certificate chain');
 contains('a chain with no supplied root is self-anchored', selfAnchored.evidence, 'Self-anchored');
 check('and the verdict does not hide that', el('gap-chain').style.display, '');
 contains('the gap explains why that is weak', el('gap-chain').innerHTML, 'mints their own root');
 
-const anchored = load(10);
+const anchored = await load(10);
 contains('a supplied root anchors the chain', anchored.evidence, 'Anchored');
 contains('naming the root by digest', anchored.evidence, 'root SHA-256');
 check('the chain gap is closed', el('gap-chain').style.display, 'none');
 
-const wrongRoot = load(11);
+const wrongRoot = await load(11);
 contains('a root the chain does not reach is a failure', wrongRoot.because, 'did not validate');
 contains('and says it was the roots supplied', wrongRoot.because, 'trusted roots you supplied');
 contains('the chain row is marked invalid', wrongRoot.evidence, 'Invalid');
@@ -287,7 +287,7 @@ contains('the statement signature is still reported valid', wrongRoot.evidence, 
 
 // Roots belong to their scenario. Carrying them forward would turn a later
 // "Verified" into an anchoring claim nobody made.
-load(0);
+await load(0);
 contains('roots do not leak into the next scenario', el('evidence').innerHTML, 'Self-anchored');
 
 console.log('\n--- an ECDSA chain is unsupported, not failed ---');
@@ -295,28 +295,28 @@ contains('the image-reproduction chain is reported as unsupported', claims.evide
 check('and that does not fail the statement', claims.banner, 'banner v-pass');
 
 console.log('\n--- the service certificate decides which key may vouch ---');
-const vouched = load(12);
+const vouched = await load(12);
 contains('the vouching key is shown', vouched.evidence, 'Ledger key vouched for by');
 contains('as bound to the certificate', vouched.evidence, 'Service certificate');
 check('the key-set gap is closed', el('gap-keys').style.display, 'none');
 contains('and the policy was evaluated under it', vouched.assertions, 't-pass');
 
-const unvouched = load(13);
+const unvouched = await load(13);
 contains('an unbound key set is explained', unvouched.because, 'no key bound to the service certificate');
 contains('naming why', unvouched.because, 'absent');
 contains('the evidence names the mismatch', unvouched.evidence, 'Not in key set');
 check('no policy is evaluated over an unchecked receipt', el('policy-meta').textContent, '');
 check('not styled as a failure', unvouched.banner.includes('v-fail'), false);
 
-load(0);
+await load(0);
 check('without a certificate the key-set gap is stated', el('gap-keys').style.display, '');
 
 // Decoding is a view onto bytes the signature already covers. The digest must
 // be of the decoded bytes, because that is what a producer publishes.
 console.log('\n--- decoding a claim ---');
-load(7);
+await load(7);
 check('no decode panel for a hash envelope', el('decode').style.display, 'none');
-load(8);
+await load(8);
 check('the decode panel is offered for a JSON payload', el('decode').style.display, '');
 const payloadText = vm.runInContext(
   'JSON.parse(wasm_bindgen.statementPayload(state.statement)).text', ctx);
@@ -355,7 +355,7 @@ if (!ekuRoot) throw new Error('the synthetic purpose root was not found');
 sandbox.ekuStatement = new Uint8Array(ekuStatement);
 sandbox.ekuKeys = new Uint8Array(readFileSync(join(ekuDir, 'keys.cbor')));
 sandbox.ekuRoot = ekuRoot;
-load(0);
+await load(0);
 vm.runInContext(`
   state.statement = ekuStatement;
   state.keys = ekuKeys;
@@ -372,7 +372,7 @@ const ekuAssertions = {
   certificateValidAtSigningTime: true,
 };
 el('policy').value = ekuPolicy(ekuAssertions);
-vm.runInContext('run()', ctx);
+await vm.runInContext('run()', ctx);
 check('purpose-checked demo renders without error', el('error').style.display, 'none');
 check('matching critical EKU and roots verify', el('banner-headline').textContent, 'Verified');
 check('displayed facts are the purpose-checked path',
@@ -383,7 +383,7 @@ check('no unsupported-chain gap remains', el('gap-chain').style.display, 'none')
 el('policy').value = ekuPolicy({
   ...ekuAssertions, requireEku: ['1.2.3'],
 });
-vm.runInContext('run()', ctx);
+await vm.runInContext('run()', ctx);
 check('a missing purpose fails in both facts and verdict', el('banner-headline').textContent, 'Failed');
 check('displayed facts report the failed purpose path',
   JSON.parse(el('raw-facts').textContent).chainValidation.outcome, 'invalid');
@@ -392,24 +392,24 @@ el('policy').value = ekuPolicy({
   requireChainToRootSha256: ekuExpected.rootSha256,
   certificateValidAtSigningTime: true,
 });
-vm.runInContext('run()', ctx);
+await vm.runInContext('run()', ctx);
 check('removing purpose restores unsupported behavior', el('banner-headline').textContent, 'Unavailable');
 check('and the displayed facts are unsupported too',
   JSON.parse(el('raw-facts').textContent).chainValidation.outcome, 'unsupported');
 
 vm.runInContext('state.roots = null', ctx);
 el('policy').value = ekuPolicy({ requireEku: ekuExpected.leafEkuOids });
-vm.runInContext('run()', ctx);
+await vm.runInContext('run()', ctx);
 check('matching purpose without independent trust remains unavailable',
   el('banner-headline').textContent, 'Unavailable');
 contains('the assertion explains the missing anchor', el('assertions').innerHTML,
   'requireChainToRootSha256');
 
-load(12);
+await load(12);
 const servicePolicy = JSON.parse(el('policy').value);
 servicePolicy.assertions.requireEku = ['1.2.3'];
 el('policy').value = JSON.stringify(servicePolicy);
-vm.runInContext('run()', ctx);
+await vm.runInContext('run()', ctx);
 check('service-bound verification also applies purpose to its facts',
   JSON.parse(el('raw-facts').textContent).chainValidation.outcome, 'invalid');
 check('and renders the same failed verdict', el('banner-headline').textContent, 'Failed');

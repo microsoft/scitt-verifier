@@ -195,7 +195,7 @@ mod tests {
         if let Some(ct) = ct {
             protected.push((
                 CborValue::Int(labels::CONTENT_TYPE),
-                CborValue::TextString(ct.to_string()),
+                CborValue::text(ct.to_string()),
             ));
         }
         Sign1 {

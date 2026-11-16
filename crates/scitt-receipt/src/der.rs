@@ -15,6 +15,7 @@
 //! ```
 
 use crate::error::{Error, Result};
+use tav_crypto::SignatureKeyAlgorithm;
 
 const OID_EC_PUBLIC_KEY: &[u8] = &[0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01];
 const OID_P256: &[u8] = &[0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07];
@@ -109,9 +110,9 @@ pub fn spki_from_ec_point(curve: Curve, x: &[u8], y: &[u8]) -> Result<Vec<u8>> {
 
     let mut point = Vec::with_capacity(1 + 2 * n);
     point.push(0x04); // uncompressed
-    point.extend(std::iter::repeat(0u8).take(n - x.len()));
+    point.extend(std::iter::repeat_n(0u8, n - x.len()));
     point.extend_from_slice(x);
-    point.extend(std::iter::repeat(0u8).take(n - y.len()));
+    point.extend(std::iter::repeat_n(0u8, n - y.len()));
     point.extend_from_slice(y);
 
     let mut alg_id = Vec::new();
@@ -281,6 +282,63 @@ pub(crate) fn parse_certificate_eku_oids_strict(certificate: &[u8]) -> Result<Ve
     parse_eku_sequence_strict(eku)
 }
 
+pub(crate) fn parse_critical_extension_oids(certificate: &[u8]) -> Result<Vec<String>> {
+    let malformed = || Error::TrustMaterial("certificate extensions could not be read".into());
+    let Some((0x30, certificate, [])) = read_tlv_strict(certificate) else {
+        return Err(malformed());
+    };
+    let Some((0x30, mut fields, _)) = read_tlv_strict(certificate) else {
+        return Err(malformed());
+    };
+
+    let mut extensions_seen = false;
+    let mut critical_oids = Vec::new();
+    while !fields.is_empty() {
+        let (tag, value, rest) = read_tlv_strict(fields).ok_or_else(malformed)?;
+        fields = rest;
+        if tag != 0xA3 {
+            continue;
+        }
+        if extensions_seen {
+            return Err(malformed());
+        }
+        extensions_seen = true;
+
+        let Some((0x30, mut extensions, [])) = read_tlv_strict(value) else {
+            return Err(malformed());
+        };
+        while !extensions.is_empty() {
+            let Some((0x30, mut extension, rest)) = read_tlv_strict(extensions) else {
+                return Err(malformed());
+            };
+            extensions = rest;
+            let Some((0x06, oid_bytes, rest)) = read_tlv_strict(extension) else {
+                return Err(malformed());
+            };
+            let oid = decode_oid(oid_bytes).ok_or_else(malformed)?;
+            extension = rest;
+
+            let critical = if let Some((0x01, value, rest)) = read_tlv_strict(extension) {
+                if value != [0xFF] {
+                    return Err(malformed());
+                }
+                extension = rest;
+                true
+            } else {
+                false
+            };
+            let Some((0x04, _, [])) = read_tlv_strict(extension) else {
+                return Err(malformed());
+            };
+            if critical {
+                critical_oids.push(oid);
+            }
+        }
+    }
+
+    Ok(critical_oids)
+}
+
 /// The `notBefore` and `notAfter` of a certificate, as Unix seconds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Validity {
@@ -373,6 +431,198 @@ pub fn parse_signature_algorithm_oid(der: &[u8]) -> Result<String> {
     };
 
     decode_oid(oid).ok_or_else(malformed)
+}
+
+/// The algorithm under which `subject`'s signature can be checked against the
+/// key in `issuer_spki`, or why this build declines to check it.
+///
+/// This is an explicit allowlist, and it applies to every backend. The
+/// backends disagree on what they accept — the native ones verify SHA-1 and
+/// mixed ECDSA curve/digest pairs, WebCrypto parses RSA only — so asking the
+/// backend would make the same certificate verifiable on one platform and not
+/// another. The outer `Err` is a certificate that cannot be read; the inner
+/// one is a capability limit, which is not evidence against the chain.
+pub(crate) fn certificate_signature_key_algorithm(
+    subject: &[u8],
+    issuer_spki: &[u8],
+) -> Result<std::result::Result<SignatureKeyAlgorithm, String>> {
+    let malformed =
+        || Error::TrustMaterial("certificate signature algorithm could not be read".into());
+
+    let (0x30, certificate, _) = read_tlv(subject).ok_or_else(malformed)? else {
+        return Err(malformed());
+    };
+    let (0x30, _tbs, after_tbs) = read_tlv(certificate).ok_or_else(malformed)? else {
+        return Err(malformed());
+    };
+    let (0x30, algorithm, _) = read_tlv(after_tbs).ok_or_else(malformed)? else {
+        return Err(malformed());
+    };
+    let (0x06, oid, parameters) = read_tlv(algorithm).ok_or_else(malformed)? else {
+        return Err(malformed());
+    };
+    let oid = decode_oid(oid).ok_or_else(malformed)?;
+
+    use tav_crypto::{EcSignatureKeyAlgorithm as Ec, RsaPkcs1v15SignatureKeyAlgorithm as Rs};
+    Ok(match oid.as_str() {
+        "1.2.840.113549.1.1.11" => rsa_pkcs1(parameters, Rs::Rs256),
+        "1.2.840.113549.1.1.12" => rsa_pkcs1(parameters, Rs::Rs384),
+        "1.2.840.113549.1.1.13" => rsa_pkcs1(parameters, Rs::Rs512),
+        "1.2.840.113549.1.1.10" => rsa_pss(parameters),
+        "1.2.840.10045.4.3.2" => ecdsa(parameters, issuer_spki, Ec::P256),
+        "1.2.840.10045.4.3.3" => ecdsa(parameters, issuer_spki, Ec::P384),
+        "1.2.840.10045.4.3.4" => ecdsa(parameters, issuer_spki, Ec::P521),
+        _ => Err("it is not an algorithm this build verifies".into()),
+    })
+}
+
+fn absent_or_null(parameters: &[u8]) -> bool {
+    parameters.is_empty() || parameters == [0x05, 0x00]
+}
+
+fn rsa_pkcs1(
+    parameters: &[u8],
+    algorithm: tav_crypto::RsaPkcs1v15SignatureKeyAlgorithm,
+) -> std::result::Result<SignatureKeyAlgorithm, String> {
+    if !absent_or_null(parameters) {
+        return Err("its RSA algorithm parameters are not NULL".into());
+    }
+    Ok(SignatureKeyAlgorithm::RsaPkcs1v15(algorithm))
+}
+
+/// RSASSA-PSS is admitted only in the form RFC 4055 recommends: one SHA-2
+/// digest for both hash and MGF1, a salt as long as that digest, and the
+/// standard trailer. The ASN.1 defaults (SHA-1, 20-byte salt) are refused.
+fn rsa_pss(parameters: &[u8]) -> std::result::Result<SignatureKeyAlgorithm, String> {
+    use tav_crypto::RsaPssSignatureKeyAlgorithm as Ps;
+    let unsupported = || "its RSA-PSS parameters are not a form this build verifies".to_string();
+
+    let (0x30, mut fields, []) = read_tlv(parameters).ok_or_else(unsupported)? else {
+        return Err(unsupported());
+    };
+    let mut field = |tag: u8| -> Option<&[u8]> {
+        match read_tlv(fields) {
+            Some((t, contents, rest)) if t == tag => {
+                fields = rest;
+                Some(contents)
+            }
+            _ => None,
+        }
+    };
+    let hash_algorithm = |explicit: &[u8]| -> Option<String> {
+        let (0x30, identifier, []) = read_tlv(explicit)? else {
+            return None;
+        };
+        let (0x06, oid, parameters) = read_tlv(identifier)? else {
+            return None;
+        };
+        absent_or_null(parameters)
+            .then(|| decode_oid(oid))
+            .flatten()
+    };
+
+    let hash = hash_algorithm(field(0xA0).ok_or_else(unsupported)?).ok_or_else(unsupported)?;
+    let algorithm = match hash.as_str() {
+        "2.16.840.1.101.3.4.2.1" => Ps::Ps256,
+        "2.16.840.1.101.3.4.2.2" => Ps::Ps384,
+        "2.16.840.1.101.3.4.2.3" => Ps::Ps512,
+        _ => return Err(unsupported()),
+    };
+
+    let (0x30, mask, []) =
+        read_tlv(field(0xA1).ok_or_else(unsupported)?).ok_or_else(unsupported)?
+    else {
+        return Err(unsupported());
+    };
+    let (0x06, mask_oid, mask_hash) = read_tlv(mask).ok_or_else(unsupported)? else {
+        return Err(unsupported());
+    };
+    if decode_oid(mask_oid).as_deref() != Some("1.2.840.113549.1.1.8")
+        || hash_algorithm(mask_hash).as_deref() != Some(hash.as_str())
+    {
+        return Err(unsupported());
+    }
+
+    let small_integer = |explicit: &[u8]| -> Option<u64> {
+        let (0x02, contents, []) = read_tlv(explicit)? else {
+            return None;
+        };
+        if contents.is_empty() || contents.len() > 8 || contents[0] & 0x80 != 0 {
+            return None;
+        }
+        Some(contents.iter().fold(0, |n, b| (n << 8) | u64::from(*b)))
+    };
+    let salt = match field(0xA2) {
+        Some(explicit) => small_integer(explicit).ok_or_else(unsupported)?,
+        None => 20,
+    };
+    let trailer = match field(0xA3) {
+        Some(explicit) => small_integer(explicit).ok_or_else(unsupported)?,
+        None => 1,
+    };
+    if !fields.is_empty() || trailer != 1 || salt != algorithm.salt_len() as u64 {
+        return Err(unsupported());
+    }
+    Ok(SignatureKeyAlgorithm::RsaPss(algorithm))
+}
+
+/// The backend's EC algorithm fuses curve and digest, so a signature is
+/// admitted only when the issuer key's curve matches the digest the OID names.
+/// A non-EC issuer key is passed through and fails at key import, which is a
+/// genuinely mismatched certificate rather than a limit of this build.
+#[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
+fn ecdsa(
+    parameters: &[u8],
+    issuer_spki: &[u8],
+    algorithm: tav_crypto::EcSignatureKeyAlgorithm,
+) -> std::result::Result<SignatureKeyAlgorithm, String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        Err("the WebCrypto backend does not verify ECDSA certificate signatures".into())
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use tav_crypto::EcSignatureKeyAlgorithm as Ec;
+        if !parameters.is_empty() {
+            return Err("its ECDSA algorithm carries parameters".into());
+        }
+        let issuer_curve = ec_spki_curve(issuer_spki).map(|curve| match curve.as_str() {
+            "1.2.840.10045.3.1.7" => Some(Ec::P256),
+            "1.3.132.0.34" => Some(Ec::P384),
+            "1.3.132.0.35" => Some(Ec::P521),
+            _ => None,
+        });
+        match issuer_curve {
+            Some(Some(curve)) if curve == algorithm => Ok(SignatureKeyAlgorithm::Ec(algorithm)),
+            Some(_) => Err(format!(
+                "it names the {} digest, which does not match the issuer key's curve",
+                algorithm.name()
+            )),
+            None => Ok(SignatureKeyAlgorithm::Ec(algorithm)),
+        }
+    }
+}
+
+/// The named-curve OID of an EC SubjectPublicKeyInfo, or `None` for any other
+/// key type.
+#[cfg(not(target_arch = "wasm32"))]
+fn ec_spki_curve(spki: &[u8]) -> Option<String> {
+    let (0x30, spki, _) = read_tlv(spki)? else {
+        return None;
+    };
+    let (0x30, algorithm, _) = read_tlv(spki)? else {
+        return None;
+    };
+    let (0x06, key_type, parameters) = read_tlv(algorithm)? else {
+        return None;
+    };
+    if decode_oid(key_type)? != "1.2.840.10045.2.1" {
+        return None;
+    }
+    let (0x06, curve, _) = read_tlv(parameters)? else {
+        return None;
+    };
+    decode_oid(curve)
 }
 
 /// The exact `TBSCertificate` bytes the signature was made over, paired with
@@ -543,6 +793,35 @@ pub fn parse_name_attributes(name_der: &[u8]) -> Vec<(String, String)> {
     attributes
 }
 
+pub fn render_name(name_der: &[u8]) -> String {
+    parse_name_attributes(name_der)
+        .iter()
+        .map(|(key, value)| format!("{key}={}", escape_name_value(value)))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn escape_name_value(value: &str) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    let mut escaped = String::new();
+    for (index, ch) in chars.iter().copied().enumerate() {
+        if ch.is_control() {
+            for byte in ch.to_string().bytes() {
+                escaped.push_str(&format!("\\{byte:02X}"));
+            }
+        } else if matches!(ch, ',' | '+' | '"' | '\\' | '<' | '>' | ';')
+            || (ch == ' ' && (index == 0 || index + 1 == chars.len()))
+            || (ch == '#' && index == 0)
+        {
+            escaped.push('\\');
+            escaped.push(ch);
+        } else {
+            escaped.push(ch);
+        }
+    }
+    escaped
+}
+
 /// RFC 4514 short labels for the attribute types did:x509 names.
 fn name_label(oid: &str) -> String {
     match oid {
@@ -556,6 +835,25 @@ fn name_label(oid: &str) -> String {
         other => return other.to_string(),
     }
     .to_string()
+}
+
+/// Parse exactly one DER certificate, refusing anything around it.
+///
+/// The crypto backends differ in what they tolerate: OpenSSL's `d2i` stops at
+/// the end of the first element and ignores the rest. Bytes that hash as one
+/// certificate must not verify as another, so the outer framing is checked
+/// here — one minimally-encoded SEQUENCE with nothing after it — before the
+/// backend sees the input.
+pub fn parse_certificate(
+    der: &[u8],
+) -> std::result::Result<<tav_crypto::Crypto as tav_crypto::CertificateBackend>::Certificate, String>
+{
+    match read_tlv_strict(der) {
+        Some((0x30, _, [])) => {}
+        Some((0x30, _, _)) => return Err("trailing bytes after the certificate".into()),
+        _ => return Err("not a single DER certificate".into()),
+    }
+    <tav_crypto::Crypto as tav_crypto::CertificateBackend>::from_der(der).map_err(|e| e.to_string())
 }
 
 /// Split one DER TLV, returning `(tag, contents, remainder)`.
@@ -655,6 +953,33 @@ mod eku_tests {
         extension.extend(tlv(0x04, value));
         let extensions = tlv(0xA3, &tlv(0x30, &tlv(0x30, &extension)));
         tlv(0x30, &tlv(0x30, &extensions))
+    }
+
+    #[test]
+    fn critical_extension_oids_are_read_losslessly_from_der() {
+        let mut oid = vec![0x2A];
+        oid.extend_from_slice(&[0x00; 127]);
+        let mut extension = tlv(0x06, &oid);
+        extension.extend(tlv(0x01, &[0xFF]));
+        extension.extend(tlv(0x04, &[]));
+        let certificate = tlv(
+            0x30,
+            &tlv(0x30, &tlv(0xA3, &tlv(0x30, &tlv(0x30, &extension)))),
+        );
+
+        assert_eq!(
+            parse_critical_extension_oids(&certificate).unwrap(),
+            [format!("1.2{}", ".0".repeat(127))]
+        );
+    }
+
+    #[test]
+    fn rendered_names_keep_attribute_components_and_escape_values() {
+        let mut attribute = tlv(0x06, &[0x55, 0x04, 0x03]);
+        attribute.extend(tlv(0x0C, b"Example, Signer"));
+        let name = tlv(0x30, &tlv(0x31, &tlv(0x30, &attribute)));
+
+        assert_eq!(render_name(&name), "CN=Example\\, Signer");
     }
 
     #[test]
@@ -984,6 +1309,107 @@ mod tests {
     fn a_truncated_certificate_is_refused() {
         assert!(tbs_and_signature(&[0x30, 0x02, 0x30]).is_err());
         assert!(tbs_and_signature(&[]).is_err());
+    }
+
+    fn tlv(tag: u8, contents: &[u8]) -> Vec<u8> {
+        assert!(contents.len() < 0x80);
+        [&[tag, contents.len() as u8], contents].concat()
+    }
+
+    const SHA256_RSA: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0B];
+    const SHA1_RSA: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x05];
+    const RSA_PSS: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0A];
+    const MGF1: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x08];
+    const SHA256: &[u8] = &[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01];
+    const ECDSA_SHA256: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x02];
+    const ECDSA_SHA384: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x03];
+
+    /// `Certificate { tbs: empty, signatureAlgorithm: { oid, parameters } }`.
+    fn signed_with(oid: &[u8], parameters: &[u8]) -> Vec<u8> {
+        let algorithm = tlv(0x30, &[tlv(0x06, oid).as_slice(), parameters].concat());
+        tlv(0x30, &[tlv(0x30, &[]), algorithm].concat())
+    }
+
+    fn pss(hash: &[u8], salt: u8) -> Vec<u8> {
+        let hash_id = tlv(0x30, &[tlv(0x06, hash), vec![0x05, 0x00]].concat());
+        let mgf = tlv(0x30, &[tlv(0x06, MGF1), hash_id.clone()].concat());
+        tlv(
+            0x30,
+            &[
+                tlv(0xA0, &hash_id),
+                tlv(0xA1, &mgf),
+                tlv(0xA2, &tlv(0x02, &[salt])),
+            ]
+            .concat(),
+        )
+    }
+
+    fn admitted(subject: &[u8], issuer_spki: &[u8]) -> Option<SignatureKeyAlgorithm> {
+        certificate_signature_key_algorithm(subject, issuer_spki)
+            .expect("the certificate is readable")
+            .ok()
+    }
+
+    #[test]
+    fn rsa_pkcs1_is_admitted_only_with_sha2_and_null_parameters() {
+        let rsa_issuer = [0x30, 0x00];
+        assert!(matches!(
+            admitted(&signed_with(SHA256_RSA, &[0x05, 0x00]), &rsa_issuer),
+            Some(SignatureKeyAlgorithm::RsaPkcs1v15(
+                tav_crypto::RsaPkcs1v15SignatureKeyAlgorithm::Rs256
+            ))
+        ));
+        assert!(admitted(&signed_with(SHA256_RSA, &[0x02, 0x01, 0x00]), &rsa_issuer).is_none());
+        assert!(admitted(&signed_with(SHA1_RSA, &[0x05, 0x00]), &rsa_issuer).is_none());
+    }
+
+    /// The ASN.1 defaults select SHA-1, and a salt that does not match the
+    /// digest is a form the backends disagree on; both are capability gaps.
+    #[test]
+    fn rsa_pss_is_admitted_only_in_the_rfc_4055_form() {
+        let rsa_issuer = [0x30, 0x00];
+        assert!(matches!(
+            admitted(&signed_with(RSA_PSS, &pss(SHA256, 32)), &rsa_issuer),
+            Some(SignatureKeyAlgorithm::RsaPss(
+                tav_crypto::RsaPssSignatureKeyAlgorithm::Ps256
+            ))
+        ));
+        assert!(admitted(&signed_with(RSA_PSS, &[0x30, 0x00]), &rsa_issuer).is_none());
+        assert!(admitted(&signed_with(RSA_PSS, &pss(SHA256, 20)), &rsa_issuer).is_none());
+    }
+
+    #[test]
+    fn ecdsa_must_name_the_digest_of_the_issuer_curve() {
+        let p256_issuer = spki_from_ec_point(Curve::P256, &[1u8; 32], &[2u8; 32]).unwrap();
+        let matched = admitted(&signed_with(ECDSA_SHA256, &[]), &p256_issuer);
+        let mismatched = admitted(&signed_with(ECDSA_SHA384, &[]), &p256_issuer);
+        assert!(mismatched.is_none());
+        if cfg!(target_arch = "wasm32") {
+            assert!(matched.is_none(), "WebCrypto does not verify ECDSA paths");
+        } else {
+            assert!(matches!(
+                matched,
+                Some(SignatureKeyAlgorithm::Ec(
+                    tav_crypto::EcSignatureKeyAlgorithm::P256
+                ))
+            ));
+        }
+    }
+
+    #[test]
+    fn an_unreadable_certificate_is_an_error_not_a_capability_gap() {
+        assert!(certificate_signature_key_algorithm(&[0x30, 0x00], &[]).is_err());
+    }
+
+    /// OpenSSL's parser stops after the first element; the framing check is
+    /// what keeps trailing bytes and long-form lengths from reaching it.
+    #[test]
+    fn parse_certificate_refuses_framing_the_backend_would_ignore() {
+        let trailing = parse_certificate(&[0x30, 0x00, 0x00]).unwrap_err();
+        assert!(trailing.contains("trailing"), "{trailing}");
+        assert!(parse_certificate(&[0x30, 0x81, 0x00]).is_err());
+        assert!(parse_certificate(&[0x31, 0x00]).is_err());
+        assert!(parse_certificate(&[]).is_err());
     }
 
     #[test]

@@ -5,6 +5,7 @@
 //! and one that does not — cannot be reached without real key material. The
 //! unit tests next to the module cover the shapes that need no crypto.
 
+use scitt_receipt::chain::{validate, Options, Outcome};
 use scitt_receipt::external::{verify_cose_sign1, verify_detached, Detached};
 use scitt_receipt::statement::Sign1;
 use scitt_receipt::{labels, CborValue};
@@ -17,7 +18,7 @@ fn fixture(name: &str) -> Vec<u8> {
 }
 
 /// The descriptor at `external-signature[0]`, and the payload it covers.
-fn descriptor_and_payload() -> (CborValue, Vec<u8>) {
+fn descriptor_and_payload() -> (CborValue<'static>, Vec<u8>) {
     let statement = Sign1::parse(&fixture("cbor-header.cose")).expect("fixture must parse");
     let payload = statement.payload.clone().expect("fixture has a payload");
 
@@ -35,7 +36,30 @@ fn descriptor_and_payload() -> (CborValue, Vec<u8>) {
     (items[0].clone(), payload)
 }
 
-fn replace(descriptor: &CborValue, label: i64, value: CborValue) -> CborValue {
+fn external_leaf_der() -> Vec<u8> {
+    let (descriptor, _) = descriptor_and_payload();
+    let CborValue::Map(entries) = descriptor else {
+        panic!("descriptor is not a map");
+    };
+    match entries
+        .iter()
+        .find(|(key, _)| matches!(key, CborValue::Int(i) if *i == labels::X5CHAIN))
+        .map(|(_, value)| value)
+    {
+        Some(CborValue::ByteString(der)) => der.to_vec(),
+        Some(CborValue::Array(items)) => match items.first() {
+            Some(CborValue::ByteString(der)) => der.to_vec(),
+            _ => panic!("external signer chain has no leaf"),
+        },
+        _ => panic!("external signer chain is missing"),
+    }
+}
+
+fn replace(
+    descriptor: &CborValue<'static>,
+    label: i64,
+    value: CborValue<'static>,
+) -> CborValue<'static> {
     let CborValue::Map(entries) = descriptor else {
         panic!("descriptor is not a map");
     };
@@ -77,7 +101,7 @@ fn one_flipped_bit_fails() {
         .iter()
         .find_map(|(k, v)| match (k, v) {
             (CborValue::Int(i), CborValue::ByteString(b)) if *i == labels::DETACHED_SIGNATURE => {
-                Some(b.clone())
+                Some(b.to_vec())
             }
             _ => None,
         })
@@ -87,7 +111,7 @@ fn one_flipped_bit_fails() {
     let tampered = replace(
         &descriptor,
         labels::DETACHED_SIGNATURE,
-        CborValue::ByteString(signature),
+        CborValue::bytes(signature),
     );
     assert!(matches!(
         verify_detached(&tampered, Some(&payload)),
@@ -118,7 +142,7 @@ fn a_signature_of_the_wrong_length_fails() {
     let truncated = replace(
         &descriptor,
         labels::DETACHED_SIGNATURE,
-        CborValue::ByteString(vec![0u8; 16]),
+        CborValue::bytes(vec![0u8; 16]),
     );
     assert!(matches!(
         verify_detached(&truncated, Some(&payload)),
@@ -131,7 +155,7 @@ fn a_signature_of_the_wrong_length_fails() {
 // ---------------------------------------------------------------------------
 
 /// The nested COSE_Sign1 at `external-statement`, and the payload it covers.
-fn nested_and_payload() -> (CborValue, Vec<u8>) {
+fn nested_and_payload() -> (CborValue<'static>, Vec<u8>) {
     let statement = Sign1::parse(&fixture("nested-sign1.cose")).expect("fixture must parse");
     let payload = statement.payload.clone().expect("fixture has a payload");
 
@@ -147,7 +171,11 @@ fn nested_and_payload() -> (CborValue, Vec<u8>) {
 }
 
 /// Rebuild the nested COSE_Sign1 with one array element replaced.
-fn with_element(nested: &CborValue, index: usize, value: CborValue) -> CborValue {
+fn with_element(
+    nested: &CborValue<'static>,
+    index: usize,
+    value: CborValue<'static>,
+) -> CborValue<'static> {
     let CborValue::Tagged { tag, payload } = nested else {
         panic!("nested value is not tagged");
     };
@@ -170,7 +198,7 @@ fn signature_of(nested: &CborValue) -> Vec<u8> {
         panic!("not an array")
     };
     match &items[3] {
-        CborValue::ByteString(b) => b.clone(),
+        CborValue::ByteString(b) => b.to_vec(),
         other => panic!("signature is {other:?}"),
     }
 }
@@ -192,7 +220,7 @@ fn a_nested_cose_sign1_with_a_flipped_bit_fails() {
     let (nested, payload) = nested_and_payload();
     let mut sig = signature_of(&nested);
     sig[0] ^= 0x01;
-    let tampered = with_element(&nested, 3, CborValue::ByteString(sig));
+    let tampered = with_element(&nested, 3, CborValue::bytes(sig));
     assert!(matches!(
         verify_cose_sign1(&tampered, Some(&payload)),
         Detached::Invalid { .. }
@@ -204,7 +232,7 @@ fn a_nested_cose_sign1_with_a_flipped_bit_fails() {
 #[test]
 fn an_embedded_payload_that_matches_is_accepted() {
     let (nested, payload) = nested_and_payload();
-    let embedded = with_element(&nested, 2, CborValue::ByteString(payload.clone()));
+    let embedded = with_element(&nested, 2, CborValue::bytes(payload.clone()));
     assert!(matches!(
         verify_cose_sign1(&embedded, Some(&payload)),
         Detached::Valid(_)
@@ -219,11 +247,7 @@ fn an_embedded_payload_that_matches_is_accepted() {
 #[test]
 fn an_embedded_payload_that_differs_fails() {
     let (nested, payload) = nested_and_payload();
-    let embedded = with_element(
-        &nested,
-        2,
-        CborValue::ByteString(b"something else".to_vec()),
-    );
+    let embedded = with_element(&nested, 2, CborValue::bytes(b"something else".to_vec()));
     match verify_cose_sign1(&embedded, Some(&payload)) {
         Detached::Invalid { why, .. } => {
             assert!(why.contains("embeds its own payload"), "{why}");
@@ -252,4 +276,23 @@ fn the_two_conventions_do_not_silently_read_each_other() {
         Detached::Unusable(_) => {}
         other => panic!("expected unusable, got {other:?}"),
     }
+}
+
+#[test]
+fn an_unrelated_intermediate_cannot_be_ignored_when_the_leaf_reaches_the_root() {
+    let leaf = external_leaf_der();
+    let statement = Sign1::parse(&fixture("transparent-statement.cose")).unwrap();
+    let unrelated = statement.x5chain()[1].clone();
+    let chain = vec![leaf.clone(), unrelated, leaf.clone()];
+
+    let outcome = validate(
+        &chain,
+        &Options {
+            trusted_roots: vec![leaf],
+            ..Options::default()
+        },
+    )
+    .unwrap();
+
+    assert!(matches!(outcome, Outcome::Invalid(_)), "{outcome:?}");
 }

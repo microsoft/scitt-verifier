@@ -515,8 +515,8 @@ verified receipt carried an `iat`.
 `certificateChainValidated` and `requireChainToRootSha256` likewise report
 **cannot evaluate**, not *fail*, when the chain was not examined — no chain
 present, or a chain this build cannot check (see
-[limitations](limitations.md): ECDSA-signed certificates and unhandled critical
-extensions). "I did not look" is never evidence of compromise, and the exit code
+[limitations](limitations.md): ECDSA-signed certificates in WASM and unhandled
+critical extensions). "I did not look" is never evidence of compromise, and the exit code
 says 3 rather than 1 so you can tell the two apart in a pipeline.
 
 ### `requireChainToRootFromHttps`

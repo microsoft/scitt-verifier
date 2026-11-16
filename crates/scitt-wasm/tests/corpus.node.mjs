@@ -62,7 +62,7 @@ const staleKeys = read('other-service-scitt-keys.cbor');
 // 1. The genuine statement reproduces every pinned value.
 // ---------------------------------------------------------------------------
 console.log('\n--- genuine transparent statement ---');
-const verified = JSON.parse(verifyStatement(genuine, keys));
+const verified = JSON.parse(await verifyStatement(genuine, keys));
 const receipt = verified.receipts[0];
 
 check('signed statement length', verified.signedStatementLength, PINNED.signedStatementLength);
@@ -108,7 +108,7 @@ check('key set reports how many keys it holds', verified.keySet.keyCount > 0, tr
 // 3. A rotated key set is not a forgery. Different fact, different report.
 // ---------------------------------------------------------------------------
 console.log('\n--- stale key set (rotation, not compromise) ---');
-const stale = JSON.parse(verifyStatement(genuine, staleKeys));
+const stale = JSON.parse(await verifyStatement(genuine, staleKeys));
 check('kid is not in the stale set', stale.receipts[0].keyLookup, 'unknown-kid');
 check('root signature never ran', stale.receipts[0].rootSignatureValid, null);
 check('not reported as verified', stale.receipts[0].fullyVerified, false);
@@ -119,7 +119,7 @@ check('not reported as verified', stale.receipts[0].fullyVerified, false);
 //    verifying root signature. It is still not evidence about this payload.
 // ---------------------------------------------------------------------------
 console.log('\n--- payload tampered (binding check) ---');
-const payloadTampered = JSON.parse(verifyStatement(read('payload-tampered.cose'), keys));
+const payloadTampered = JSON.parse(await verifyStatement(read('payload-tampered.cose'), keys));
 const ptReceipt = payloadTampered.receipts[0];
 check('root signature still verifies', ptReceipt.rootSignatureValid, true);
 check('receipt is NOT bound to this statement', ptReceipt.boundToStatement, false);
@@ -130,7 +130,7 @@ check('claim digest differs from genuine', payloadTampered.claimDigest !== PINNE
 // 5. A tampered receipt fails its root signature, but the statement is intact.
 // ---------------------------------------------------------------------------
 console.log('\n--- tampered receipt ---');
-const tampered = JSON.parse(verifyStatement(read('tampered-statement.cose'), keys));
+const tampered = JSON.parse(await verifyStatement(read('tampered-statement.cose'), keys));
 check('statement signature is untouched', tampered.signatureValid, true);
 check('root signature fails', tampered.receipts[0].rootSignatureValid, false);
 check('nothing verified', tampered.anyReceiptVerified, false);
@@ -142,7 +142,7 @@ check('nothing verified', tampered.anyReceiptVerified, false);
 //    every mirror and CI cache would hold a veto. RFC 9943 7.1: at least one.
 // ---------------------------------------------------------------------------
 console.log('\n--- appended receipt ---');
-const appended = JSON.parse(verifyStatement(read('appended-receipt.cose'), keys));
+const appended = JSON.parse(await verifyStatement(read('appended-receipt.cose'), keys));
 check('two receipt blobs arrived', appended.receiptsPresent, 2);
 check('exactly one verified', appended.verifiedReceiptCount, 1);
 check('the genuine one still counts', appended.anyReceiptVerified, true);
@@ -171,7 +171,7 @@ const policy = (name) => new Uint8Array(readFileSync(join(policies, name)));
 const registeredAt = receipt.registeredAt;
 const AT_REGISTRATION = registeredAt + 60;
 
-const satisfied = JSON.parse(evaluatePolicy(genuine, keys, policy('fixture-mst.json'), AT_REGISTRATION));
+const satisfied = JSON.parse(await evaluatePolicy(genuine, keys, policy('fixture-mst.json'), AT_REGISTRATION));
 check('policy is identified in the result', satisfied.policyId, 'corpus/fixture-mst');
 check('policy version is reported', satisfied.policyVersion, '1');
 check('every assertion passed', satisfied.satisfied, true);
@@ -208,7 +208,7 @@ for (const statementRules of [true, false]) {
     ...adapterPolicy,
     assertions: statementRules ? adapterPolicy.assertions : {},
   };
-  const result = JSON.parse(evaluatePolicy(
+  const result = JSON.parse(await evaluatePolicy(
     genuine, keys, new TextEncoder().encode(JSON.stringify(input)), AT_REGISTRATION,
   ));
   const label = statementRules ? 'statement plus adapter' : 'adapter only';
@@ -223,7 +223,7 @@ for (const statementRules of [true, false]) {
 
 // A policy naming a transparency service this statement was not registered
 // with. The receipt still verifies — the signature was never the question.
-const wrongIssuer = JSON.parse(evaluatePolicy(genuine, keys, policy('wrong-issuer.json'), AT_REGISTRATION));
+const wrongIssuer = JSON.parse(await evaluatePolicy(genuine, keys, policy('wrong-issuer.json'), AT_REGISTRATION));
 check('policy is not satisfied', wrongIssuer.satisfied, false);
 check('and the reason is failure, not absence', wrongIssuer.failed, true);
 check('not reported as unevaluable', wrongIssuer.unevaluable, false);
@@ -246,7 +246,7 @@ const svnPolicy = new TextEncoder().encode(JSON.stringify({
   policyVersion: '1',
   assertions: { minSvn: 1 },
 }));
-const absent = JSON.parse(evaluatePolicy(genuine, keys, svnPolicy, AT_REGISTRATION));
+const absent = JSON.parse(await evaluatePolicy(genuine, keys, svnPolicy, AT_REGISTRATION));
 check('the statement makes no SVN claim', verified.cwt.svn, null);
 check('so the assertion cannot be evaluated', absent.assertions[0].outcome, 'cannotEvaluate');
 check('which is not a failure', absent.failed, false);
@@ -263,16 +263,16 @@ const freshness = new TextEncoder().encode(JSON.stringify({
   policyVersion: '1',
   assertions: { maxAgeDays: 30 },
 }));
-const fresh = JSON.parse(evaluatePolicy(genuine, keys, freshness, AT_REGISTRATION));
+const fresh = JSON.parse(await evaluatePolicy(genuine, keys, freshness, AT_REGISTRATION));
 check('fresh at registration time', fresh.satisfied, true);
-const aged = JSON.parse(evaluatePolicy(genuine, keys, freshness, registeredAt + 60 * 60 * 24 * 400));
+const aged = JSON.parse(await evaluatePolicy(genuine, keys, freshness, registeredAt + 60 * 60 * 24 * 400));
 check('stale 400 days later', aged.failed, true);
 
 // A clock that is silently wrong would quietly change a freshness decision, so
 // a nonsensical one is refused rather than truncated.
 let badClock = false;
 try {
-  evaluatePolicy(genuine, keys, freshness, 1.5);
+  await evaluatePolicy(genuine, keys, freshness, 1.5);
 } catch {
   badClock = true;
 }
@@ -285,7 +285,7 @@ check('a non-integral clock is rejected', badClock, true);
 console.log('\n--- malformed policy ---');
 let threw = false;
 try {
-  evaluatePolicy(genuine, keys, new TextEncoder().encode('{ not json'), AT_REGISTRATION);
+  await evaluatePolicy(genuine, keys, new TextEncoder().encode('{ not json'), AT_REGISTRATION);
 } catch {
   threw = true;
 }
@@ -394,7 +394,7 @@ console.log('\n--- service certificate binding ---');
 const serviceCert = readFileSync(join(fixtures, 'mst-test-service-cert.pem'), 'utf8');
 const SERVICE_CERT_SHA256 = 'b021d80900d21bead1fb8b98f9442d7ed94ab5aa5bf26216202eb615e86dc768';
 
-const anchored = JSON.parse(verifyStatementWithServiceCert(genuine, keys, serviceCert));
+const anchored = JSON.parse(await verifyStatementWithServiceCert(genuine, keys, serviceCert));
 check('the key set is bound to the certificate', anchored.serviceKey.bound, true);
 check('the certificate is identified', anchored.serviceKey.certificateSha256, SERVICE_CERT_SHA256);
 check('the service key signed this receipt', anchored.receipts[0].kid, anchored.serviceKey.kid);
@@ -402,14 +402,14 @@ check('the receipt verifies under it alone', anchored.receipts[0].fullyVerified,
 check('the facts agree with unanchored verification', anchored.claimDigest, PINNED.claimDigest);
 check('set-aside keys are counted', anchored.keySet.unvouchedKeyCount, verified.keySet.keyCount - 1);
 
-const unanchored = JSON.parse(verifyStatementWithServiceCert(genuine, staleKeys, serviceCert));
+const unanchored = JSON.parse(await verifyStatementWithServiceCert(genuine, staleKeys, serviceCert));
 check('a key set without the service key is not bound', unanchored.serviceKey.bound, false);
 check('and says why', unanchored.serviceKey.mismatch, 'absent');
 check('and verifies nothing', unanchored.receipts, undefined);
 
 // A tampered statement is still a finding, not an exception, on this path.
 const anchoredTampered = JSON.parse(
-  verifyStatementWithServiceCert(read('tampered-statement.cose'), keys, serviceCert));
+  await verifyStatementWithServiceCert(read('tampered-statement.cose'), keys, serviceCert));
 check('a tampered receipt still fails under the service key',
   anchoredTampered.receipts[0].rootSignatureValid, false);
 
@@ -420,7 +420,7 @@ for (const [label, pem] of [
 ]) {
   let refused = false;
   try {
-    verifyStatementWithServiceCert(genuine, keys, pem);
+    await verifyStatementWithServiceCert(genuine, keys, pem);
   } catch {
     refused = true;
   }
@@ -463,22 +463,22 @@ check('which is the corpus root', selfAnchored.rootSha256, rootSha);
 check('over all four certificates', selfAnchored.pathLength, 4);
 check('live when the ledger registered it', verified.certificatesValidAtRegistration, true);
 
-const externally = JSON.parse(verifyStatement(genuine, keys, rootPem)).chainValidation;
+const externally = JSON.parse(await verifyStatement(genuine, keys, rootPem)).chainValidation;
 check('a supplied root anchors the chain', externally.outcome, 'valid');
 check('and is reported as external', externally.anchoredExternally, true);
 check('to the same root', externally.rootSha256, rootSha);
 
 // The service certificate is a real certificate, and not one this chain leads to.
-const wrongRoot = JSON.parse(verifyStatement(genuine, keys, serviceCert));
+const wrongRoot = JSON.parse(await verifyStatement(genuine, keys, serviceCert));
 check('a root the chain does not lead to is a failure', wrongRoot.chainValidation.outcome, 'invalid');
 check('never a quiet fallback to the embedded root', wrongRoot.chainValidation.anchoredExternally, undefined);
 check('and is named as a problem',
   wrongRoot.problems.some((p) => p.startsWith('certificate chain did not validate')), true);
 check('the statement signature is a separate finding', wrongRoot.signatureValid, true);
 
-const ecdsa = JSON.parse(verifyStatement(read('cbor-header.cose'), keys)).chainValidation;
+const ecdsa = JSON.parse(await verifyStatement(read('cbor-header.cose'), keys)).chainValidation;
 check('an ECDSA chain is unsupported, not invalid', ecdsa.outcome, 'unsupported');
-const leafOnly = JSON.parse(verifyStatement(read('hash-envelope.cose'), keys)).chainValidation;
+const leafOnly = JSON.parse(await verifyStatement(read('hash-envelope.cose'), keys)).chainValidation;
 check('a lone leaf with no roots is insufficient, not invalid', leafOnly.outcome, 'insufficient');
 
 for (const [label, roots] of [
@@ -486,7 +486,7 @@ for (const [label, roots] of [
   ['a non-certificate block as a root', '-----BEGIN PRIVATE KEY-----\nAA==\n-----END PRIVATE KEY-----\n'],
 ]) {
   let refused = false;
-  try { verifyStatement(genuine, keys, roots); } catch { refused = true; }
+  try { await verifyStatement(genuine, keys, roots); } catch { refused = true; }
   check(`${label} are refused rather than ignored`, refused, true);
 }
 
@@ -500,12 +500,12 @@ const chainPolicy = new TextEncoder().encode(JSON.stringify({
 }));
 const outcomes = (d) => Object.fromEntries(d.assertions.map((a) => [a.name, a.outcome]));
 const chainAnchored = JSON.parse(
-  evaluatePolicy(genuine, keys, chainPolicy, AT_REGISTRATION, rootPem));
+  await evaluatePolicy(genuine, keys, chainPolicy, AT_REGISTRATION, rootPem));
 check('chain assertions pass against a supplied root', outcomes(chainAnchored), {
   issuer: 'pass', certificateChainValidated: 'pass', requireChainToRootSha256: 'pass',
 });
 const chainWrong = JSON.parse(
-  evaluatePolicy(genuine, keys, chainPolicy, AT_REGISTRATION, serviceCert));
+  await evaluatePolicy(genuine, keys, chainPolicy, AT_REGISTRATION, serviceCert));
 check('and fail against a root the chain does not reach', outcomes(chainWrong), {
   issuer: 'pass', certificateChainValidated: 'fail', requireChainToRootSha256: 'fail',
 });
@@ -518,12 +518,12 @@ check('and fail against a root the chain does not reach', outcomes(chainWrong), 
 //     key it vouches for.
 // ---------------------------------------------------------------------------
 console.log('\n--- policy under the service certificate ---');
-const viaCert = JSON.parse(evaluatePolicy(
+const viaCert = JSON.parse(await evaluatePolicy(
   genuine, keys, policy('fixture-mst.json'), AT_REGISTRATION, undefined, serviceCert));
 check('a bound key set evaluates as before', viaCert.satisfied, true);
 let unboundRefused = '';
 try {
-  evaluatePolicy(genuine, staleKeys, policy('fixture-mst.json'), AT_REGISTRATION, undefined, serviceCert);
+  await evaluatePolicy(genuine, staleKeys, policy('fixture-mst.json'), AT_REGISTRATION, undefined, serviceCert);
 } catch (e) { unboundRefused = String(e); }
 check('an unbound key set is refused, not evaluated against unvouched keys',
   unboundRefused.includes('no key bound to the service certificate'), true);
@@ -577,15 +577,15 @@ const ekuAssertions = {
   requireChainToRootSha256: ekuExpected.rootSha256,
   certificateValidAtSigningTime: true,
 };
-const ekuEvaluate = (fixture, assertions = ekuAssertions) => JSON.parse(evaluatePolicy(
+const ekuEvaluate = async (fixture, assertions = ekuAssertions) => JSON.parse(await evaluatePolicy(
   ekuRead(`${fixture}.cose`), ekuKeys, ekuPolicy(assertions), ekuExpected.registeredAt,
 ));
 check('a critical EKU without purpose is unsupported',
-  JSON.parse(verifyStatement(ekuRead('valid.cose'), ekuKeys)).chainValidation.outcome,
+  JSON.parse(await verifyStatement(ekuRead('valid.cose'), ekuKeys)).chainValidation.outcome,
   'unsupported');
 check('the policy entry point enables matching critical EKU',
-  ekuEvaluate('valid').satisfied, true);
-check('noncritical EKU is also checked', ekuEvaluate('noncritical').satisfied, true);
+  (await ekuEvaluate('valid')).satisfied, true);
+check('noncritical EKU is also checked', (await ekuEvaluate('noncritical')).satisfied, true);
 for (const withPin of [false, true]) {
   const assertions = {
     requireChainToRootFromHttps: 'https://publisher.example/trust/root.crt',
@@ -593,7 +593,7 @@ for (const withPin of [false, true]) {
     certificateValidAtSigningTime: true,
     ...(withPin ? { requireChainToRootSha256: ekuExpected.rootSha256 } : {}),
   };
-  const result = ekuEvaluate('valid', assertions);
+  const result = (await ekuEvaluate('valid', assertions));
   const rootSource = result.assertions.find((a) => a.name === 'requireChainToRootFromHttps');
   check(`HTTPS roots with pin=${withPin}: policy cannot silently accept`,
     result.satisfied, false);
@@ -608,7 +608,7 @@ for (const withPin of [false, true]) {
 }
 const ekuOnly = { requireEku: ekuExpected.leafEkuOids };
 for (const fixture of ['valid', 'noncritical']) {
-  const unpinnedPurpose = ekuEvaluate(fixture, ekuOnly);
+  const unpinnedPurpose = (await ekuEvaluate(fixture, ekuOnly));
   check(`${fixture}: embedded EKU alone cannot satisfy policy`,
     unpinnedPurpose.satisfied, false);
   check(`${fixture}: independent anchoring is unevaluable, not satisfied`,
@@ -618,13 +618,13 @@ for (const fixture of ['valid', 'noncritical']) {
 const ekuRoot = certificatesIn(ekuRead('valid.cose'))
   .find((c) => c.subject === 'CN=Synthetic Purpose Root');
 check('the synthetic purpose root is found', Boolean(ekuRoot), true);
-const externallyAnchoredPurpose = JSON.parse(evaluatePolicy(
+const externallyAnchoredPurpose = JSON.parse(await evaluatePolicy(
   ekuRead('valid.cose'), ekuKeys, ekuPolicy(ekuOnly), ekuExpected.registeredAt,
   pem(ekuRoot.der),
 ));
 check('a supplied trusted anchor satisfies EKU without a root pin',
   externallyAnchoredPurpose.satisfied, true);
-const purposeFacts = JSON.parse(verifyStatement(
+const purposeFacts = JSON.parse(await verifyStatement(
   ekuRead('valid.cose'), ekuKeys, pem(ekuRoot.der), ekuPolicy(ekuAssertions),
 ));
 check('verification uses the same purpose as policy evaluation',
@@ -635,14 +635,14 @@ check('the displayed purpose evidence matches the policy',
   purposeFacts.chainValidation.leafEkuOids, ekuExpected.leafEkuOids);
 check('registration-time validity uses the purpose-checked path',
   purposeFacts.certificatesValidAtRegistration, true);
-const wrongPurposeFacts = JSON.parse(verifyStatement(
+const wrongPurposeFacts = JSON.parse(await verifyStatement(
   ekuRead('valid.cose'), ekuKeys, pem(ekuRoot.der), ekuPolicy({
     ...ekuAssertions, requireEku: ['1.2.3'],
   }),
 ));
 check('verification does not ignore a missing required purpose',
   wrongPurposeFacts.chainValidation.outcome, 'invalid');
-const servicePurposeFacts = JSON.parse(verifyStatementWithServiceCert(
+const servicePurposeFacts = JSON.parse(await verifyStatementWithServiceCert(
   genuine, keys, serviceCert, rootPem, ekuPolicy({ requireEku: ['1.2.3'] }),
 ));
 check('service-certificate verification also checks the supplied purpose',
@@ -650,31 +650,31 @@ check('service-certificate verification also checks the supplied purpose',
 check('purpose options do not bypass service-key binding',
   servicePurposeFacts.serviceKey.bound, true);
 for (const verify of [
-  (policy) => verifyStatement(genuine, keys, rootPem, policy),
-  (policy) => verifyStatementWithServiceCert(genuine, keys, serviceCert, rootPem, policy),
+  async (policy) => verifyStatement(genuine, keys, rootPem, policy),
+  async (policy) => verifyStatementWithServiceCert(genuine, keys, serviceCert, rootPem, policy),
 ]) {
   let refused = false;
-  try { verify(new TextEncoder().encode('{ not json')); } catch { refused = true; }
+  try { await verify(new TextEncoder().encode('{ not json')); } catch { refused = true; }
   check('a malformed verification policy is refused, not ignored', refused, true);
 }
 for (const fixture of ['absent-eku', 'any-eku', 'malformed-eku', 'duplicate-eku']) {
   check(`${fixture} cannot satisfy the purpose requirement`,
-    ekuEvaluate(fixture).assertions.find((a) => a.name === 'requireEku').outcome, 'fail');
+    (await ekuEvaluate(fixture)).assertions.find((a) => a.name === 'requireEku').outcome, 'fail');
 }
-check('every required OID is necessary', ekuEvaluate('valid', {
+check('every required OID is necessary', (await ekuEvaluate('valid', {
   ...ekuAssertions, requireEku: [...ekuExpected.leafEkuOids, '1.3.6.1.4.1.55555.3'],
-}).failed, true);
-check('matching purpose does not bypass a wrong root', ekuEvaluate('valid', {
+})).failed, true);
+check('matching purpose does not bypass a wrong root', (await ekuEvaluate('valid', {
   ...ekuAssertions, requireChainToRootSha256: '00'.repeat(32),
-}).failed, true);
+})).failed, true);
 for (const fixture of ['leaf-only', 'ca-critical-eku', 'unknown-critical']) {
   check(`${fixture} cannot evaluate purpose`,
-    ekuEvaluate(fixture).assertions.find((a) => a.name === 'requireEku').outcome,
+    (await ekuEvaluate(fixture)).assertions.find((a) => a.name === 'requireEku').outcome,
     'cannotEvaluate');
 }
-check('registration after expiry still fails', ekuEvaluate('late-registration').failed, true);
+check('registration after expiry still fails', (await ekuEvaluate('late-registration')).failed, true);
 check('missing registration time is not replaced by the statement iat',
-  ekuEvaluate('no-registration-time').unevaluable, true);
+  (await ekuEvaluate('no-registration-time')).unevaluable, true);
 
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`);
 process.exit(failures === 0 ? 0 : 1);

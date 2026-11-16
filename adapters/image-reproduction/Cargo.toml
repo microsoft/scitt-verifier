@@ -25,6 +25,5 @@ scitt-policy = { path = "../../crates/scitt-policy", default-features = false }
 serde_json = "1"
 
 [features]
-default = ["crypto_pure_rust"]
-crypto_pure_rust = ["scitt-receipt/crypto_pure_rust", "scitt-policy/crypto_pure_rust"]
-crypto_openssl = ["scitt-receipt/crypto_openssl", "scitt-policy/crypto_openssl"]
+default = ["crypto_compliant"]
+crypto_compliant = ["scitt-receipt/crypto_compliant", "scitt-policy/crypto_compliant"]

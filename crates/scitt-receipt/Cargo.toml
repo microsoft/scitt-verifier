@@ -19,10 +19,8 @@ authors.workspace = true
 # ---------------------------------------------------------------------------
 
 [features]
-default = ["crypto_pure_rust"]
-crypto_pure_rust = ["tav-cose/crypto_pure_rust", "tav-crypto/crypto_pure_rust"]
-crypto_openssl = ["tav-cose/crypto_openssl", "tav-crypto/crypto_openssl"]
-crypto_webcrypto = ["tav-cose/crypto_webcrypto", "tav-crypto/crypto_webcrypto"]
+default = ["crypto_compliant"]
+crypto_compliant = ["tav-cose/crypto_openssl", "tav-cose/crypto_webcrypto", "tav-cose/crypto_windows", "tav-crypto/crypto_openssl", "tav-crypto/crypto_webcrypto", "tav-crypto/crypto_windows"]
 
 [dependencies]
 tav-cose = { workspace = true }

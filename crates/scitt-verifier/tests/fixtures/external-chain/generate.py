@@ -107,8 +107,8 @@ def main():
     critical = cert(
         leaf_key, "Synthetic Supplier Signer", intermediate, intermediate_key, critical=True
     )
-    # ECDSA-signed RSA leaf: its detached RSA signature remains supported while
-    # the certificate signature algorithm is beyond the pinned path backend.
+    # ECDSA-signed RSA leaf under its own P-256 root: native builds validate
+    # the path; the WebCrypto (WASM) backend cannot and must say so.
     ec_ca_key = ec.generate_private_key(ec.SECP256R1())
     ec_ca = cert(ec_ca_key, "Synthetic ECDSA Root", ca=True)
     ec_leaf = cert(leaf_key, "Synthetic Supplier Signer", ec_ca, ec_ca_key)
@@ -196,7 +196,7 @@ def main():
     statement("missing-chain", None)
     statement("nested-missing-chain", None, nested=True)
     statement("unsupported-pss", [der(unsupported), *chain[1:]])
-    statement("unsupported-ecdsa", [der(ec_leaf), der(ec_ca)])
+    statement("ecdsa-path", [der(ec_leaf), der(ec_ca)])
     statement("unsupported-critical", [der(critical), *chain[1:]])
     statement("late-registration", chain, registered_at=2240611200)
     statement("no-registration-time", chain, registered_at=None)

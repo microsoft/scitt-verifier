@@ -52,6 +52,36 @@ fn verify(extra: &[&str]) -> Run {
     run(&args)
 }
 
+#[test]
+fn signer_name_filters_match_der_rendered_components() {
+    let dir = std::env::temp_dir().join("scitt-verifier-signer-name-filters");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let policy = dir.join("policy.json");
+    std::fs::write(
+        &policy,
+        r#"{"policyId":"signer-names","policyVersion":"1","assertions":{
+            "signerSubjectContains":"CN=","signerIssuerContains":"CN="}}"#,
+    )
+    .unwrap();
+    let statement = corpus(&["fixtures", "transparent-statement.cose"]);
+    let keys = corpus(&["fixtures", "mst-test-scitt-keys.cbor"]);
+    let r = run(&[
+        "verify",
+        "--statement",
+        &statement,
+        "--scitt-keys",
+        &keys,
+        "--policy",
+        &policy.display().to_string(),
+    ]);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(r.code, 0, "{}", r.stdout);
+    assert!(r.stdout.contains("signerSubjectContains"), "{}", r.stdout);
+    assert!(r.stdout.contains("signerIssuerContains"), "{}", r.stdout);
+}
+
 fn has_line(output: &str, expected: &str) -> bool {
     output.lines().any(|line| line == expected)
 }
@@ -1955,7 +1985,8 @@ fn a_detached_signature_in_a_protected_header_can_be_verified() {
     let r = verify_cbor_header_fixture(
         "pass",
         r#"{"externalSignatures":[{"path":["external-signature",0],"signedOver":"payload",
-            "signerSubjectContains":"Example Component Supplier"}]}"#,
+            "signerSubjectContains":"Example Component Supplier",
+            "signerIssuerContains":"CN=Example External Signer"}]}"#,
     );
     assert_eq!(r.code, 0, "{}", r.stdout);
     assert!(
@@ -2054,7 +2085,8 @@ fn a_nested_cose_sign1_can_be_verified() {
     let r = verify_nested_fixture(
         "pass",
         r#"{"externalSignatures":[{"path":["external-statement"],"signedOver":"coseSign1",
-            "signerSubjectContains":"Example Component Supplier"}]}"#,
+            "signerSubjectContains":"Example Component Supplier",
+            "signerIssuerContains":"CN=Example External Signer"}]}"#,
     );
     assert_eq!(r.code, 0, "{}", r.stdout);
     assert!(
@@ -2740,11 +2772,7 @@ fn external_chain_truncated_leaf_der_fails_even_when_the_signature_cannot_run() 
 
 #[test]
 fn external_chain_unsupported_algorithms_and_critical_extensions_never_pass() {
-    for fixture in [
-        "unsupported-pss",
-        "unsupported-ecdsa",
-        "unsupported-critical",
-    ] {
+    for fixture in ["unsupported-pss", "unsupported-critical"] {
         let (r, record, _) = verify_external_chain(fixture, fixture, &[external_chain_rule()]);
         assert_eq!(r.code, 3, "{fixture}: {}", r.stdout);
         assert_eq!(record["signedStatement"]["signatureValid"], true);
@@ -2755,6 +2783,33 @@ fn external_chain_unsupported_algorithms_and_critical_extensions_never_pass() {
         assert!(assertion["externalSignature"]["certificateChain"].is_null());
         assert_eq!(record["relyingPartyPolicy"]["satisfied"], false);
     }
+}
+
+/// An ECDSA-signed path is validated on native builds, so it is decided by
+/// the root pin rather than reported as beyond this build.
+#[test]
+fn external_chain_ecdsa_signed_path_is_validated_and_bound_by_the_root_pin() {
+    // SHA-256 of the P-256 root DER, the last element of the fixture's chain.
+    const ECDSA_ROOT: &str = "3f87719f8842cede3a67557d6f85723c6ca4961dfe16a79a151514466aa915cc";
+
+    let (r, record, _) =
+        verify_external_chain("ecdsa-wrong-pin", "ecdsa-path", &[external_chain_rule()]);
+    assert_eq!(r.code, 2, "{}", r.stdout);
+    let assertion = external_assertion(&record, 0);
+    assert_eq!(assertion["outcome"], "fail");
+    assert_eq!(assertion["externalSignature"]["rootPinMatched"], false);
+    assert_eq!(
+        assertion["externalSignature"]["certificateChain"]["rootSha256"],
+        ECDSA_ROOT
+    );
+
+    let mut rule = external_chain_rule();
+    rule["requireChainToRootSha256"] = ECDSA_ROOT.into();
+    let (r, record, _) = verify_external_chain("ecdsa-pinned", "ecdsa-path", &[rule]);
+    assert_eq!(r.code, 0, "{}", r.stdout);
+    let assertion = external_assertion(&record, 0);
+    assert_eq!(assertion["outcome"], "pass");
+    assert_eq!(assertion["externalSignature"]["rootPinMatched"], true);
 }
 
 #[test]
