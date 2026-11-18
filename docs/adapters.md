@@ -322,6 +322,40 @@ not a finding that its policy is wrong.
 bundle file and leave the bundle unreplayable. The combination is refused while
 the command line is parsed, so no directory is created and nothing is collected.
 
+### Without `--statement`
+
+In live-evidence mode `--statement` may be omitted. The verifier then asks the
+target which statement it was built from:
+
+```console
+scitt-verifier verify --policy ledger-policy.json \
+  --online --adapter azure-confidential-ledger --binding-mode live-evidence
+```
+
+1. It reads `/gov/service/nodes` over the same pinned connection and takes
+   `nodeData.buildEvidenceUrl` from every node whose status is `Trusted`.
+2. Every trusted node must name the same URL, of the form
+   `https://<issuer>/entries/<transaction id>/statement`. A paged list, a node
+   without a URL, or nodes that disagree are refused.
+3. `<issuer>` must already be listed in `assertions.issuer`. Discovery never
+   adds an issuer; with no `assertions.issuer` it is a usage error.
+4. The statement is fetched from that issuer over TLS pinned to the issuer's
+   own identity. A ledger answers `503` until the entry is cached, so the fetch
+   is retried with growing delays (1–5 s) within a fixed deadline.
+
+The fetched bytes are then verified and appraised exactly as a file passed with
+`--statement` would be, and are saved as `statement.cose` in a
+`--save-evidence` directory, so the bundle replays offline with
+`--statement evidence-snapshot/statement.cose`. An existing `statement.cose`
+there is never replaced; the run stops instead. The record's `statementSource`
+names the URL, transaction ID, digest and attempts.
+
+The node data that names the URL is not covered by any attestation report, so
+the target chose which statement it is compared with. The run reports
+`StatementChoiceNotAttested`: a pass shows the nodes match *that* statement, not
+that it is the newest or the one you expected. Pass `--statement` when you need
+to pin a specific one.
+
 ## Saved evidence
 
 ```console

@@ -163,3 +163,43 @@ fn valid_adapter_policy_in_an_adapterless_build_is_not_malformed_or_a_pass() {
     );
     assert!(!text.contains("PolicyMalformed"), "{text}");
 }
+
+/// Omitting `--statement` widens nothing: with no issuer allowlist there is
+/// nothing a node could name that the policy would accept, so the run stops
+/// before any request, as a usage error, and does not describe a discovery.
+#[cfg(feature = "adapter-azure-confidential-ledger")]
+#[test]
+fn discovery_without_an_issuer_allowlist_is_a_usage_error() {
+    let mut policy = adapter_policy();
+    policy["assertions"]
+        .as_object_mut()
+        .unwrap()
+        .remove("issuer");
+    let path = std::env::temp_dir().join(format!(
+        "scitt-adapter-contract-{}-discover.json",
+        std::process::id()
+    ));
+    std::fs::write(&path, serde_json::to_vec(&policy).unwrap()).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_scitt-verifier"))
+        .arg("verify")
+        .arg("--policy")
+        .arg(&path)
+        .args([
+            "--online",
+            "--adapter",
+            "azure-confidential-ledger",
+            "--binding-mode",
+            "live-evidence",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    std::fs::remove_file(path).unwrap();
+    let text = assert_code(&output, 4);
+    let record: Value = serde_json::from_str(&text).unwrap();
+    assert!(text.contains("StatementNotDiscovered"), "{text}");
+    assert!(record["inputs"]["statement"].is_null(), "{text}");
+    assert!(record.get("statementSource").is_none(), "{text}");
+    assert!(!text.contains("StatementChoiceNotAttested"), "{text}");
+}

@@ -407,6 +407,33 @@ missing. The host is probed first so that a run on an older or
 feature-masked agent still writes a record and still exits with a code a gate
 can read. Verification itself has no such requirement — only `--online` does.
 
+## `statementSource`
+
+Present only when `--statement` was omitted and the statement was discovered
+from the target (see [adapters](adapters.md#without---statement)); then
+`inputs.statement` is `null`.
+
+```json
+"statementSource": {
+  "advertisedBy": "target-node-data",
+  "target": "mst-must-canary.confidential-ledger.azure.com",
+  "advertisedUrl": "https://esrp-cts-cp.confidential-ledger.azure.com/entries/1225.551634/statement",
+  "fetchedUrl": "https://esrp-cts-cp.confidential-ledger.azure.com/entries/1225.551634/statement",
+  "issuer": "esrp-cts-cp.confidential-ledger.azure.com",
+  "transactionId": "1225.551634",
+  "trustedNodes": 3,
+  "sha256": "4fbf4999…",
+  "size": 28838,
+  "attempts": 1,
+  "fetchedAt": 1795040418
+}
+```
+
+It is an observation, not a conclusion: the statement is verified exactly as a
+supplied file would be, and `appraisal.notChecked` carries
+`StatementChoiceNotAttested` because the node data naming it is unattested.
+The facts document carries it unchanged.
+
 ## The facts document carries `acquisition` too
 
 `--facts` is the record with `relyingPartyPolicy` and `appraisal` removed, so

@@ -2,6 +2,10 @@
 
 mod acl;
 #[cfg(feature = "adapter-azure-confidential-ledger")]
+mod discover;
+#[cfg(feature = "adapter-azure-confidential-ledger")]
+pub use discover::discover as discover_statement;
+#[cfg(feature = "adapter-azure-confidential-ledger")]
 mod live;
 #[cfg(feature = "adapter-azure-confidential-ledger")]
 mod load;

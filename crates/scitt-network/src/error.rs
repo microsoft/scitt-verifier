@@ -43,6 +43,8 @@ pub enum Diagnostic {
     InvalidRootSource,
     /// The root endpoint did not supply usable PEM or DER certificates.
     MalformedRoots,
+    /// A service-supplied statement location is not one this build will fetch.
+    InvalidStatementLocation,
 }
 
 impl Diagnostic {
@@ -64,6 +66,7 @@ impl Diagnostic {
             Diagnostic::MalformedConfiguration => "malformedConfiguration",
             Diagnostic::InvalidRootSource => "invalidRootSource",
             Diagnostic::MalformedRoots => "malformedRoots",
+            Diagnostic::InvalidStatementLocation => "invalidStatementLocation",
         }
     }
 
@@ -140,6 +143,10 @@ impl Diagnostic {
             Diagnostic::MalformedRoots => {
                 "The approved root endpoint must publish a non-empty PEM certificate bundle \
                  or one DER certificate within this build's size and certificate-count limits."
+            }
+            Diagnostic::InvalidStatementLocation => {
+                "The service named a statement location this build will not fetch. Obtain \
+                 the statement out of band and pass it with --statement."
             }
         }
     }

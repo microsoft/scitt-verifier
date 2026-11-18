@@ -60,6 +60,13 @@ pub const MAX_NODES_BYTES: usize = 4 * 1024 * 1024;
 /// print.
 pub const MAX_CONFIGURATION_BYTES: usize = 256 * 1024;
 
+/// Largest transparent statement we will download.
+///
+/// Observed at about 28 KB for a container build statement. A statement can
+/// carry its payload inline, so this leaves generous room while still refusing
+/// an endless stream.
+pub const MAX_STATEMENT_BYTES: usize = 8 * 1024 * 1024;
+
 /// Most nodes one run will appraise.
 ///
 /// Bounds the work before any parsing, so a response claiming an implausible
