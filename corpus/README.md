@@ -201,6 +201,59 @@ signed against one person's test ledger, and when that ledger was deleted every
 `--online` example in the documentation broke with no way to produce new bytes.
 Fixtures that cannot be regenerated cannot be corrected.
 
+### After recreating the test ledger
+
+Deleting and recreating a ledger changes its service identity, even when its
+hostname is unchanged. Its new keys cannot verify the historical receipts in
+`fixtures/`. Those fixtures and their pinned expectations remain valid offline
+with their committed key set; do not replace them just to repair a live test.
+
+Restore the test-only registration configuration through an ARM PATCH using
+API version `2025-06-10-preview`. Include the resource's current `location` and
+set `properties.scittConfiguration` to the JSON **string** of:
+
+```json
+{"configuration":{"authentication":{"allowUnauthenticated":true},"policy":{"policyScript":"export function apply(phdr) { return true; }"}}}
+```
+
+This permits unauthenticated registration of any valid statement and is for
+the test ledger only. Poll the returned `Azure-AsyncOperation` until it
+succeeds, then confirm the policy through the TLS-authenticated
+`GET /configuration`. An accepted PATCH alone does not mean the policy landed.
+
+Re-register the five original signed statements, retaining their signatures
+and claim digests, in a separate live corpus:
+
+```console
+python corpus/tools/seed_ledger.py \
+  --ledger mst-test-scitt-verifier.confidential-ledger.azure.com \
+  --out target/live-corpus
+```
+
+The output directory must be new or empty and outside `fixtures/`. The tool
+bootstraps TLS through the identity service, independently verifies every new
+receipt with `pyscitt` against both the fetched keys and the service certificate,
+and saves the statements, key set, binding artifacts, derived negative cases,
+and transaction IDs in `registrations.json`. It needs no signing private keys
+and never modifies the committed corpus.
+
+Run both opt-in live targets (PowerShell):
+
+```powershell
+$env:SCITT_LIVE_LEDGER = "mst-test-scitt-verifier.confidential-ledger.azure.com"
+$env:SCITT_LIVE_CORPUS = (Resolve-Path target\live-corpus).Path
+cargo test -p scitt-network -p scitt-verifier --test live -- --ignored
+```
+
+These cover authenticated key acquisition, online and offline verification of
+fresh receipts, artifact binding and tampering, appended-receipt policy, and
+refusal to authenticate the deleted ledger's receipts with the new identity.
+The last check specifically requires a recreated ledger with a new key set.
+Normal workspace tests remain offline.
+
+The seeding tool's offline regression tests run with
+`python -m unittest discover -s corpus/tools -p test_seed_ledger.py`.
+
 ## Policies
 
 | File | Purpose |

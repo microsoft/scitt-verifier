@@ -742,7 +742,6 @@ fn every_failure_path_still_writes_a_record() {
     let keys = corpus(&["fixtures", "mst-test-scitt-keys.cbor"]);
     let stale = corpus(&["fixtures", "other-service-scitt-keys.cbor"]);
     let policy = corpus(&["policies", "fixture-mst.json"]);
-    let artifact = corpus(&["fixtures", "artifact.bin"]);
     let missing = dir.join("does-not-exist").display().to_string();
 
     // A file that exists but is not what it claims to be.
@@ -855,7 +854,6 @@ fn every_failure_path_still_writes_a_record() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
-    let _ = std::fs::write(&artifact, std::fs::read(&artifact).unwrap());
 }
 
 /// A failed record write must not leave stdout claiming success.
@@ -3021,7 +3019,7 @@ fn external_chain_absent_descriptor_is_unevaluable_even_with_a_pin() {
 // was never made would be proving the opposite of what it claims.
 //
 // The paths that do reach a service are covered by the ignored live tests in
-// the scitt-network crate, where a real endpoint is named explicitly.
+// scitt-network and this crate's live target, with an explicit endpoint or corpus.
 // ---------------------------------------------------------------------------
 
 /// A run that names no ledger and no key set has not been told how to
