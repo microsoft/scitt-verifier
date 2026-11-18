@@ -52,6 +52,8 @@ Binary payloads appear as .payload.hex.
 
 VERIFY OPTIONS:
     --statement <FILE>       Transparent statement (COSE_Sign1).           [required]
+                             Optional only where an adapter's help says it
+                             can find the statement itself.
     --scitt-keys <FILE>      Transparency service signing keys (COSE_KeySet).
                              One of --scitt-keys or --online is required.
     --online                 Acquire the signing keys from a ledger the policy
@@ -206,6 +208,12 @@ LEDGER EVIDENCE (azure-confidential-ledger adapter):
                              snapshot.json and the per-node evidence it names.
     --save-evidence <DIR>    With live-evidence, write what was collected so the
                              run can be replayed offline later.
+    --statement <FILE>       Optional with live-evidence. Omitted, the statement
+                             is the one the target's trusted nodes all name in
+                             their node data (buildEvidenceUrl), fetched from a
+                             transparency service in assertions.issuer and then
+                             verified exactly as a file would be. Nodes that
+                             disagree or name none stop the run.
 
 Answers one question: does the execution policy embedded in this statement
 equal the policy the ledger's attested nodes are enforcing?
@@ -398,7 +406,8 @@ pub enum TrustSource {
 /// branch has to decide what those mean.
 #[derive(Debug, Clone)]
 pub struct VerifyArgs {
-    pub statement: PathBuf,
+    /// `None` only when the ledger adapter is to find it from the target.
+    pub statement: Option<PathBuf>,
     pub trust: TrustSource,
     pub policy: PathBuf,
     pub artifact: Option<PathBuf>,
@@ -565,8 +574,6 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             }
         }
     }
-
-    let statement = statement.ok_or("--statement is required")?;
 
     // Exactly one source of trust material. Accepting both would leave the
     // question of which one a receipt was actually checked against to be
@@ -761,6 +768,18 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         }
     }
 
+    // Checked last so that a live run missing a prerequisite is told about the
+    // prerequisite, not that it also needed a file it could have done without.
+    if statement.is_none() && !discovers_statement(adapter, binding_mode) {
+        return Err(if cfg!(feature = "adapter-azure-confidential-ledger") {
+            "--statement is required, except with --adapter azure-confidential-ledger \
+             --binding-mode live-evidence, which can find the statement the target names"
+                .into()
+        } else {
+            "--statement is required".into()
+        });
+    }
+
     Ok(Command::Verify(Box::new(VerifyArgs {
         statement,
         trust,
@@ -779,6 +798,13 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         trusted_roots,
         now,
     })))
+}
+
+/// Whether this run can obtain its statement from the target instead of a file.
+fn discovers_statement(adapter: Option<Adapter>, binding_mode: BindingMode) -> bool {
+    cfg!(feature = "adapter-azure-confidential-ledger")
+        && adapter == Some(Adapter::AzureConfidentialLedger)
+        && binding_mode == BindingMode::LiveEvidence
 }
 
 /// Whether `path` would be written inside `dir`.
@@ -1191,6 +1217,52 @@ mod tests {
         assert_eq!(v.binding_mode, BindingMode::LiveEvidence);
         assert_eq!(v.save_evidence, Some(PathBuf::from("out")));
         assert!(v.evidence.is_none());
+    }
+
+    /// Only the ledger's live mode has somewhere to find a statement; any
+    /// other run without one has nothing to verify.
+    #[test]
+    fn a_statement_may_be_omitted_only_where_the_target_can_name_one() {
+        let ledger_live = [
+            "verify",
+            "--online",
+            "--policy",
+            "p",
+            "--binding-mode",
+            "live-evidence",
+            "--adapter",
+            "azure-confidential-ledger",
+        ];
+        let parsed = parse(&args(&ledger_live));
+        if cfg!(feature = "adapter-azure-confidential-ledger") {
+            let Command::Verify(v) = parsed.expect("parses") else {
+                panic!("expected verify")
+            };
+            assert!(v.statement.is_none());
+        } else {
+            assert!(parsed.unwrap_err().contains("--statement is required"));
+        }
+
+        for other in [
+            &["verify", "--online", "--policy", "p"][..],
+            &["verify", "--scitt-keys", "k", "--policy", "p"][..],
+            &[
+                "verify",
+                "--scitt-keys",
+                "k",
+                "--policy",
+                "p",
+                "--binding-mode",
+                "saved-evidence",
+                "--adapter",
+                "azure-confidential-ledger",
+                "--evidence",
+                "dir",
+            ][..],
+        ] {
+            let err = parse(&args(other)).unwrap_err();
+            assert!(err.contains("--statement is required"), "{other:?}: {err}");
+        }
     }
 
     /// A flag the parser does not know must fail, not be ignored. A gate that

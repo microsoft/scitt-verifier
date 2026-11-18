@@ -468,6 +468,30 @@ pub struct Acquisition {
     pub external_roots: Vec<scitt_network::roots::Observation>,
 }
 
+/// Where a statement came from when no file was supplied.
+///
+/// Recorded whole because the choice of statement was made by the target, not
+/// the operator: an auditor needs to see which URL the nodes named and what
+/// was actually fetched in order to judge that choice afterwards.
+#[derive(Clone, Debug)]
+pub struct StatementSource {
+    /// The ledger whose nodes named the statement.
+    pub target: String,
+    /// The location exactly as the nodes advertised it.
+    pub advertised_url: String,
+    /// The location actually fetched, rebuilt from the issuer and transaction id.
+    pub url: String,
+    pub issuer: String,
+    pub transaction_id: String,
+    /// How many trusted nodes were read; all of them named this location.
+    pub trusted_nodes: usize,
+    pub sha256: String,
+    pub size: usize,
+    pub attempts: u32,
+    /// Real clock, Unix seconds.
+    pub fetched_at: i64,
+}
+
 /// Everything one run of `verify` established, and everything it did not.
 pub struct Assessment {
     pub verdict: Verdict,
@@ -482,6 +506,8 @@ pub struct Assessment {
     pub binding: BindingResult,
     /// How the trust material was fetched, when it was fetched at all.
     pub acquisition: Option<Acquisition>,
+    /// Present only when the statement was discovered rather than supplied.
+    pub statement_source: Option<StatementSource>,
 }
 
 impl Assessment {
@@ -509,6 +535,7 @@ impl Assessment {
             decision: None,
             binding: BindingResult::not_requested(),
             acquisition: None,
+            statement_source: None,
         }
     }
 }

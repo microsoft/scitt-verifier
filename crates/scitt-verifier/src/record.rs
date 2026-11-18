@@ -136,6 +136,9 @@ pub fn build(args: &VerifyArgs, assessment: &Assessment, now: i64) -> Value {
         root.insert("acquisition".into(), acquisition_json(a));
         root.insert("serviceConfiguration".into(), configuration_json(a));
     }
+    if let Some(source) = &assessment.statement_source {
+        root.insert("statementSource".into(), statement_source_json(source));
+    }
     root.insert("signedStatement".into(), statement_json(assessment));
     root.insert("receipts".into(), receipts_json(assessment));
     root.insert("artifactBinding".into(), binding_json(args, assessment));
@@ -166,6 +169,11 @@ pub fn facts(args: &VerifyArgs, assessment: &Assessment, now: i64) -> Value {
         // connection — so it belongs here by the same rule.
         root.insert("serviceConfiguration".into(), configuration_json(a));
     }
+    // An observation — which URL the nodes named, what was fetched — so it
+    // belongs in the facts document too.
+    if let Some(source) = &assessment.statement_source {
+        root.insert("statementSource".into(), statement_source_json(source));
+    }
     root.insert("signedStatement".into(), statement_json(assessment));
     root.insert("receipts".into(), receipts_json(assessment));
     root.insert("artifactBinding".into(), binding_json(args, assessment));
@@ -187,6 +195,27 @@ fn header(schema: &str, now: i64) -> Map<String, Value> {
     root
 }
 
+/// How a discovered statement was chosen and obtained.
+///
+/// `advertisedBy` names the source of the choice so that nobody reads the
+/// location as attested: it is node data served over authenticated TLS, not
+/// part of any node's attestation report.
+fn statement_source_json(source: &crate::outcome::StatementSource) -> Value {
+    json!({
+        "advertisedBy": "target-node-data",
+        "target": source.target,
+        "trustedNodes": source.trusted_nodes,
+        "advertisedUrl": source.advertised_url,
+        "fetchedUrl": source.url,
+        "issuer": source.issuer,
+        "transactionId": source.transaction_id,
+        "sha256": source.sha256,
+        "size": source.size,
+        "attempts": source.attempts,
+        "fetchedAt": source.fetched_at,
+    })
+}
+
 /// Local paths, kept apart from the observations.
 ///
 /// `canonical: false` says out loud what a reader would otherwise discover the
@@ -196,7 +225,8 @@ fn header(schema: &str, now: i64) -> Map<String, Value> {
 fn inputs_json(args: &VerifyArgs) -> Value {
     json!({
         "canonical": false,
-        "statement": args.statement.display().to_string(),
+        // Null when the statement was discovered; `statementSource` says from where.
+        "statement": args.statement.as_ref().map(|p| p.display().to_string()),
         // Null in online mode: there was no key file. A path here would name a
         // file the run never read, and a reader reproducing the run from this
         // record would go looking for it.
@@ -761,7 +791,7 @@ mod tests {
 
     fn args() -> VerifyArgs {
         VerifyArgs {
-            statement: PathBuf::from("s.cose"),
+            statement: Some(PathBuf::from("s.cose")),
             trust: TrustSource::Local(PathBuf::from("k.cbor")),
             policy: PathBuf::from("p.json"),
             artifact: None,
@@ -1056,7 +1086,7 @@ mod service_configuration_tests {
 
     fn args() -> VerifyArgs {
         VerifyArgs {
-            statement: PathBuf::from("s.cose"),
+            statement: Some(PathBuf::from("s.cose")),
             trust: TrustSource::Local(PathBuf::from("k.cbor")),
             policy: PathBuf::from("p.json"),
             artifact: None,

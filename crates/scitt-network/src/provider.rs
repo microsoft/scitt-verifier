@@ -34,6 +34,37 @@ pub const NODES_PATH: &str = "/gov/service/nodes?api-version=2024-07-01";
 /// what the report shows and nothing else.
 pub const CONFIGURATION_PATH: &str = "/configuration";
 
+/// Where a transparency service serves a registered statement with its receipt.
+///
+/// Built here, from a provider this build ships and a transaction id in CCF's
+/// `view.seqno` form, rather than taken whole from whoever advertised it. The
+/// advertised string can then only select *which* entry is fetched, never the
+/// scheme, port, path, or a query that changes what the service returns.
+pub fn statement_url(issuer: &str, transaction_id: &str) -> Result<String, AcquireError> {
+    route_for(issuer)?;
+    validate_transaction_id(transaction_id)?;
+    Ok(format!(
+        "https://{issuer}/entries/{transaction_id}/statement"
+    ))
+}
+
+/// Accept only a CCF transaction id: two decimal integers joined by one dot.
+pub fn validate_transaction_id(transaction_id: &str) -> Result<(), AcquireError> {
+    let valid = transaction_id.split_once('.').is_some_and(|(view, seqno)| {
+        [view, seqno].iter().all(|part| {
+            !part.is_empty() && part.len() <= 20 && part.bytes().all(|b| b.is_ascii_digit())
+        })
+    });
+    if valid {
+        Ok(())
+    } else {
+        Err(AcquireError::new(
+            Diagnostic::InvalidStatementLocation,
+            format!("'{transaction_id}' is not a transaction id of the form <view>.<seqno>"),
+        ))
+    }
+}
+
 /// A bootstrap route for one ledger.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Route {
@@ -196,6 +227,30 @@ mod tests {
             r.configuration_url,
             "https://example-ledger.confidential-ledger.azure.com/configuration"
         );
+    }
+
+    #[test]
+    fn statement_urls_are_built_only_from_a_shipped_route_and_a_transaction_id() {
+        assert_eq!(
+            statement_url(
+                "example-ledger.confidential-ledger.azure.com",
+                "1225.551634"
+            )
+            .unwrap(),
+            "https://example-ledger.confidential-ledger.azure.com/entries/1225.551634/statement"
+        );
+        for bad in [
+            "", "1225", "1225.", ".1", "1.2.3", "1.2/x", "1.2?q", "+1.2", "1.-2",
+        ] {
+            let e = statement_url("example-ledger.confidential-ledger.azure.com", bad).unwrap_err();
+            assert_eq!(
+                e.diagnostic,
+                Diagnostic::InvalidStatementLocation,
+                "accepted {bad:?}"
+            );
+        }
+        let e = statement_url("ledger.example.test", "1.2").unwrap_err();
+        assert_eq!(e.diagnostic, Diagnostic::UnsupportedProvider);
     }
 
     #[test]

@@ -273,20 +273,43 @@ fn wall_clock() -> i64 {
 /// place that has to know how to serialise a partial result. Progress events
 /// describe boundaries already crossed; they do not influence the assessment.
 fn evaluate(args: &VerifyArgs, now: i64, progress: &mut dyn progress::Sink) -> Assessment {
+    // Attached here rather than at each return so that every outcome after a
+    // discovery, including the early failures, records where the statement
+    // came from.
+    let mut source = None;
+    let mut assessment = evaluate_with(args, now, progress, &mut source);
+    assessment.statement_source = source;
+    assessment
+}
+
+fn evaluate_with(
+    args: &VerifyArgs,
+    now: i64,
+    progress: &mut dyn progress::Sink,
+    source: &mut Option<outcome::StatementSource>,
+) -> Assessment {
     let trust = Trust::unsigned_key_set();
     progress.emit(progress::Event::context(
         "Verifying",
-        args.statement.display().to_string(),
+        match &args.statement {
+            Some(path) => path.display().to_string(),
+            None => "the statement the target's nodes name".to_string(),
+        },
     ));
     progress.emit(progress::Event::stage(
         progress::Stage::Inputs,
         progress::State::Started,
-        "Reading the transparent statement and relying-party policy...",
+        if args.statement.is_some() {
+            "Reading the transparent statement and relying-party policy..."
+        } else {
+            "Reading the relying-party policy..."
+        },
     ));
 
-    let statement_bytes = match read(&args.statement) {
-        Ok(b) => b,
-        Err(e) => {
+    let statement_bytes = match args.statement.as_deref().map(read) {
+        None => None,
+        Some(Ok(b)) => Some(b),
+        Some(Err(e)) => {
             progress.emit(progress::Event::finding(
                 progress::Stage::Inputs,
                 "statement",
@@ -428,6 +451,19 @@ fn evaluate(args: &VerifyArgs, now: i64, progress: &mut dyn progress::Sink) -> A
             ));
             return Assessment::incomplete(Verdict::UsageError, trust, d, gaps(args, None, None));
         }
+    };
+    // Last among the inputs, because it is the only one that needs the
+    // network: every local mistake is reported before anything is asked of
+    // the target.
+    let statement_bytes = match statement_bytes {
+        Some(bytes) => bytes,
+        None => match discover_statement(args, &policy, progress) {
+            Ok((bytes, found)) => {
+                *source = Some(found);
+                bytes
+            }
+            Err(a) => return *a,
+        },
     };
     progress.emit(progress::Event::stage(
         progress::Stage::Inputs,
@@ -687,6 +723,71 @@ fn evaluate(args: &VerifyArgs, now: i64, progress: &mut dyn progress::Sink) -> A
         decision: Some(decision),
         binding,
         acquisition: resolved.acquisition,
+        statement_source: None,
+    }
+}
+
+/// Obtain the statement from the target when no file was given.
+///
+/// Only the ledger adapter's live mode reaches here; the parser refuses any
+/// other run without `--statement`.
+fn discover_statement(
+    args: &VerifyArgs,
+    policy: &Policy,
+    progress: &mut dyn progress::Sink,
+) -> Result<(Vec<u8>, outcome::StatementSource), Box<Assessment>> {
+    let fail = |verdict, message: String, action: &'static str| {
+        Box::new(Assessment::incomplete(
+            verdict,
+            Trust::unsigned_key_set(),
+            Diagnostic::error("StatementNotDiscovered", Category::Input, message, action),
+            gaps(args, None, None),
+        ))
+    };
+    #[cfg(feature = "adapter-azure-confidential-ledger")]
+    {
+        let Some(config) = &policy.adapters.acl else {
+            return Err(fail(
+                Verdict::UsageError,
+                "no statement was supplied and the policy names no ledger to find one from".into(),
+                "Pass --statement, or configure adapters.azure-confidential-ledger.",
+            ));
+        };
+        adapters::discover_statement(
+            &config.target.host,
+            policy.assertions.issuer.as_deref(),
+            args.save_evidence.as_deref(),
+            progress,
+        )
+        .map_err(|failure| {
+            progress.emit(progress::Event::stage(
+                progress::Stage::Inputs,
+                if failure.usage {
+                    progress::State::NotRun
+                } else {
+                    progress::State::CannotEvaluate
+                },
+                failure.message.clone(),
+            ));
+            fail(
+                if failure.usage {
+                    Verdict::UsageError
+                } else {
+                    Verdict::CannotEvaluate
+                },
+                failure.message,
+                "Pass the statement with --statement, or resolve the cause above and retry.",
+            )
+        })
+    }
+    #[cfg(not(feature = "adapter-azure-confidential-ledger"))]
+    {
+        let _ = (policy, progress);
+        Err(fail(
+            Verdict::UsageError,
+            "this build cannot find a statement; pass --statement".into(),
+            "Pass --statement.",
+        ))
     }
 }
 
@@ -1096,6 +1197,7 @@ fn acquisition_code(d: scitt_network::Diagnostic) -> &'static str {
         D::MalformedConfiguration => "AcquisitionMalformedConfiguration",
         D::InvalidRootSource => "AcquisitionInvalidRootSource",
         D::MalformedRoots => "AcquisitionMalformedRoots",
+        D::InvalidStatementLocation => "AcquisitionInvalidStatementLocation",
     }
 }
 
@@ -2345,6 +2447,18 @@ fn gaps(
                 "matching saved metadata does not establish bundle origin",
             ));
         }
+    }
+
+    if args.statement.is_none() {
+        gaps.push(Gap::new(
+            "StatementChoiceNotAttested",
+            Category::Binding,
+            "The statement was the one the target's trusted nodes name in their node data. \
+             That list was served over TLS pinned to the target's identity, but node data is \
+             not covered by any attestation report.",
+            "the target chose which statement it was compared with; a pass shows its nodes \
+             match that statement, not that it is the newest one or the one you expected",
+        ));
     }
 
     if args.binding_mode == BindingMode::None {

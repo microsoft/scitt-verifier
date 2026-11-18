@@ -176,6 +176,33 @@ pub(crate) fn get_bounded_with_header(
     read_bounded(response, url, max_bytes).map(|bytes| (bytes, value))
 }
 
+/// [`get_bounded`] for a resource the service may not have ready yet.
+///
+/// `Ok(None)` means HTTP 503 and nothing else. A CCF transparency service
+/// answers 503 while it loads an older entry from storage, so for that
+/// endpoint "unavailable" means "ask again", not "failed". Every other status
+/// is still an error: widening the retry to them would turn a refusal or a
+/// missing entry into a wait that ends in a misleading timeout.
+pub fn get_bounded_when_ready(
+    agent: &Agent,
+    url: &str,
+    max_bytes: usize,
+) -> Result<Option<Vec<u8>>, AcquireError> {
+    let response = match agent.get(url).call() {
+        Ok(r) => r,
+        Err(ureq::Error::StatusCode(503)) => return Ok(None),
+        Err(e) => return Err(classify(url, e)),
+    };
+    match response.status().as_u16() {
+        200 => read_bounded(response, url, max_bytes).map(Some),
+        503 => Ok(None),
+        status => Err(AcquireError::new(
+            Diagnostic::Transport,
+            format!("{url} returned HTTP {status}"),
+        )),
+    }
+}
+
 /// [`get_bounded`] for an endpoint a service may legitimately not offer.
 ///
 /// Separates "not served here" and "not served to you" from a failed request.

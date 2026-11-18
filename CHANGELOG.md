@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Discover the ledger's build statement
+
+With `--adapter azure-confidential-ledger --binding-mode live-evidence`,
+`--statement` is now optional. The verifier takes the URL every trusted node
+advertises in `nodeData.buildEvidenceUrl`, requires its issuer to already be in
+`assertions.issuer`, fetches the statement over pinned TLS (polling while the
+issuer answers `503`), and verifies it as usual. Disagreeing or missing URLs
+fail closed. The record gains `statementSource`, `inputs.statement` may be
+`null`, and the run reports `StatementChoiceNotAttested`. (#71)
+
 ### Latest TAV with compliant crypto backends
 
 TEE-Attestation-Verification moves to `c2562cb`, whose crypto is OpenSSL on
