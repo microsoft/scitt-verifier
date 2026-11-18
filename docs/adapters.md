@@ -346,7 +346,8 @@ scitt-verifier verify --policy ledger-policy.json \
 The fetched bytes are then verified and appraised exactly as a file passed with
 `--statement` would be, and are saved as `statement.cose` in a
 `--save-evidence` directory, so the bundle replays offline with
-`--statement evidence-snapshot/statement.cose`. The record's `statementSource`
+`--statement evidence-snapshot/statement.cose`. An existing `statement.cose`
+there is never replaced; the run stops instead. The record's `statementSource`
 names the URL, transaction ID, digest and attempts.
 
 The node data that names the URL is not covered by any attestation report, so

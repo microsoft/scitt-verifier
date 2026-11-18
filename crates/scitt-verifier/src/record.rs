@@ -1188,6 +1188,52 @@ mod service_configuration_tests {
         assert!(b["responseSha256"].is_null());
     }
 
+    /// A discovered statement has no path, and both documents say where it
+    /// came from instead.
+    #[test]
+    fn a_discovered_statement_records_its_source_in_both_documents() {
+        let mut a = assessment(None);
+        a.statement_source = Some(crate::outcome::StatementSource {
+            target: "t.example".into(),
+            advertised_url: "https://i.example/entries/2.10/statement".into(),
+            url: "https://i.example/entries/2.10/statement".into(),
+            issuer: "i.example".into(),
+            transaction_id: "2.10".into(),
+            trusted_nodes: 3,
+            sha256: "ab".into(),
+            size: 9,
+            attempts: 2,
+            fetched_at: 11,
+        });
+        let mut discovered = args();
+        discovered.statement = None;
+        let record = build(&discovered, &a, 0);
+        assert!(record["inputs"]["statement"].is_null());
+        let expected = serde_json::json!({
+            "advertisedBy": "target-node-data",
+            "target": "t.example",
+            "advertisedUrl": "https://i.example/entries/2.10/statement",
+            "fetchedUrl": "https://i.example/entries/2.10/statement",
+            "issuer": "i.example",
+            "transactionId": "2.10",
+            "trustedNodes": 3,
+            "sha256": "ab",
+            "size": 9,
+            "attempts": 2,
+            "fetchedAt": 11,
+        });
+        assert_eq!(record["statementSource"], expected);
+        assert_eq!(facts(&discovered, &a, 0)["statementSource"], expected);
+
+        let supplied = assessment(None);
+        assert!(build(&args(), &supplied, 0)
+            .get("statementSource")
+            .is_none());
+        assert!(facts(&args(), &supplied, 0)
+            .get("statementSource")
+            .is_none());
+    }
+
     /// No fetch, no block: "did not ask" must not look like "asked, got nothing".
     #[test]
     fn offline_records_have_no_configuration_block() {

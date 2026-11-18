@@ -275,9 +275,21 @@ fn wall_clock() -> i64 {
 fn evaluate(args: &VerifyArgs, now: i64, progress: &mut dyn progress::Sink) -> Assessment {
     // Attached here rather than at each return so that every outcome after a
     // discovery, including the early failures, records where the statement
-    // came from.
+    // came from. The gap goes with it: a run that stopped before discovery
+    // never saw the node list and must not describe one.
     let mut source = None;
     let mut assessment = evaluate_with(args, now, progress, &mut source);
+    if source.is_some() {
+        assessment.not_checked.push(Gap::new(
+            "StatementChoiceNotAttested",
+            Category::Binding,
+            "The statement was the one the target's trusted nodes name in their node data. \
+             That list was served over TLS pinned to the target's identity, but node data is \
+             not covered by any attestation report.",
+            "the target chose which statement it was compared with; a pass shows its nodes \
+             match that statement, not that it is the newest one or the one you expected",
+        ));
+    }
     assessment.statement_source = source;
     assessment
 }
@@ -2447,18 +2459,6 @@ fn gaps(
                 "matching saved metadata does not establish bundle origin",
             ));
         }
-    }
-
-    if args.statement.is_none() {
-        gaps.push(Gap::new(
-            "StatementChoiceNotAttested",
-            Category::Binding,
-            "The statement was the one the target's trusted nodes name in their node data. \
-             That list was served over TLS pinned to the target's identity, but node data is \
-             not covered by any attestation report.",
-            "the target chose which statement it was compared with; a pass shows its nodes \
-             match that statement, not that it is the newest one or the one you expected",
-        ));
     }
 
     if args.binding_mode == BindingMode::None {

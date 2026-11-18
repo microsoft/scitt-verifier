@@ -25,6 +25,7 @@ use crate::outcome::StatementSource;
 use crate::progress::{Event, Sink, Stage, State};
 
 /// Why no statement was obtained, and whose problem that is.
+#[derive(Debug)]
 pub struct Failure {
     /// The run's configuration cannot work, as opposed to the target not
     /// supplying what it needed to.
@@ -135,17 +136,7 @@ pub fn discover(
 
     let sha256 = hex(&scitt_receipt::sha256(&fetched.bytes));
     if let Some(dir) = save_to {
-        // Saved before verification, so a statement that then fails is still
-        // on disk to be examined; that is when a copy matters most.
-        let path = dir.join("statement.cose");
-        std::fs::create_dir_all(dir)
-            .and_then(|()| std::fs::write(&path, &fetched.bytes))
-            .map_err(|e| {
-                Failure::unavailable(format!(
-                    "the fetched statement could not be saved to {}: {e}",
-                    path.display()
-                ))
-            })?;
+        save(dir, &fetched.bytes)?;
     }
     progress.emit(Event::stage(
         Stage::Inputs,
@@ -170,6 +161,36 @@ pub fn discover(
         fetched_at: crate::wall_clock(),
     };
     Ok((fetched.bytes, source))
+}
+
+/// Write the fetched statement into the evidence directory.
+///
+/// Saved before verification, so a statement that then fails is still on disk
+/// to be examined; that is when a copy matters most. Because that happens
+/// before anything is known about the new bytes, an existing file is refused
+/// rather than replaced: overwriting would break a bundle saved by an earlier
+/// run, and `create_new` also refuses a link planted at that name.
+fn save(dir: &Path, bytes: &[u8]) -> Result<(), Failure> {
+    use std::io::Write;
+    let path = dir.join("statement.cose");
+    let written = std::fs::create_dir_all(dir).and_then(|()| {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?
+            .write_all(bytes)
+    });
+    match written {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(Failure::usage(format!(
+            "{} already exists; a fetched statement never replaces saved evidence",
+            path.display()
+        ))),
+        Err(e) => Err(Failure::unavailable(format!(
+            "the fetched statement could not be saved to {}: {e}",
+            path.display()
+        ))),
+    }
 }
 
 /// The one location every trusted node names, and how many nodes that is.
@@ -382,6 +403,22 @@ mod tests {
         ] {
             assert!(locate(bad, &allow).is_err(), "accepted {bad}");
         }
+    }
+
+    #[test]
+    fn a_saved_statement_is_never_replaced() {
+        let dir = std::env::temp_dir().join(format!("scitt-discover-save-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        save(&dir, b"first").unwrap();
+        let refused = save(&dir, b"second").unwrap_err();
+        assert!(refused.usage, "{}", refused.message);
+        assert!(
+            refused.message.contains("already exists"),
+            "{}",
+            refused.message
+        );
+        assert_eq!(std::fs::read(dir.join("statement.cose")).unwrap(), b"first");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
